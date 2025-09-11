@@ -266,5 +266,5 @@ log, result = agent.go(task_description)
 
 ---
 
-*Built with Biomni Agent Framework*
+*Built with dleader_agent Agent Framework*
 *Powered by Claude-4 Sonnet*

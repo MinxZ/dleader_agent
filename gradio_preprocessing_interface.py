@@ -1,8 +1,8 @@
 """
-Gradio Interface for Biomni Preprocessing Agent
+Gradio Interface for dleader_agent Preprocessing Agent
 
 This interface allows users to upload data files, apply preprocessing steps,
-and visualize the results using the Biomni preprocessing tools.
+and visualize the results using the dleader_agent preprocessing tools.
 """
 
 import json
@@ -16,8 +16,8 @@ from contextlib import redirect_stdout
 import gradio as gr
 import pandas as pd
 
-from biomni.agent.a1 import A1
-from biomni.tool import preprocessing
+from dleader_agent.agent.a1 import A1
+from dleader_agent.tool import preprocessing
 
 
 def create_preprocessing_agent():
@@ -39,7 +39,7 @@ def create_preprocessing_agent():
     
     # Keep only preprocessing tools
     preprocessing_modules = {
-        'biomni.tool.preprocessing': agent.module2api.get('biomni.tool.preprocessing', [])
+        'dleader_agent.tool.preprocessing': agent.module2api.get('dleader_agent.tool.preprocessing', [])
     }
     agent.module2api = preprocessing_modules
     agent.configure()
@@ -348,11 +348,11 @@ def add_data_to_agent(files):
 
 # Create Gradio interface
 def create_interface():
-    with gr.Blocks(title="Biomni Preprocessing Agent Chat", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="dleader_agent Preprocessing Agent Chat", theme=gr.themes.Soft()) as demo:
         gr.Markdown("""
-        # 🧬 Biomni Preprocessing Agent Chat
+        # 🧬 dleader_agent Preprocessing Agent Chat
         
-        Upload your data files and chat with the Biomni agent for intelligent preprocessing assistance.
+        Upload your data files and chat with the dleader_agent agent for intelligent preprocessing assistance.
         """)
         
         with gr.Row():

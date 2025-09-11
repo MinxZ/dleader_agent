@@ -1,7 +1,7 @@
 # Byte-compiled / optimized / DLL files
-biomni_release/biomni_env/biomni_tools/
+dleader_agent_release/dleader_agent_env/dleader_agent_tools/
 open_source_process.ipynb
-biomni_env/biomni_tools/*
+dleader_agent_env/dleader_agent_tools/*
 .gradio/
 *xlsx
 scripts/*.png
@@ -47,7 +47,7 @@ temp.*
 
 scripts/analysis/all_tools.txt
 
-BIOMNI_GRADIO/biomni/tool/files/*
+dleader_agent_GRADIO/dleader_agent/tool/files/*
 
 
 # C extensions
@@ -211,7 +211,7 @@ cython_debug/
 **/.DS_Store
 
 # DDInter data files
-biomni/tool/schema_db/ddinter_*.pkl
+dleader_agent/tool/schema_db/ddinter_*.pkl
 data/ddinter_raw/
 
 # PyCharm
@@ -223,3 +223,7 @@ data/ddinter_raw/
 
 # VSCode
 /.vscode
+analysis_results/
+chat_sessions/
+kegg/
+extracted_examples/

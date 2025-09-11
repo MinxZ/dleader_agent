@@ -11,16 +11,16 @@ Usage:
 Requirements:
     - preprocessing_pipeline.json (from training)
     - Model files (.pkl files from training)
-    - biomni package with inference functions
+    - dleader_agent package with inference functions
 """
 
 import os
 from datetime import datetime
 
 # Import inference functions
-from biomni.tool.preprocessing import (load_preprocessing_pipeline,
+from dleader_agent.tool.preprocessing import (load_preprocessing_pipeline,
                                        apply_inference_preprocessing)
-from biomni.tool.modeling import (predict_with_pipeline,
+from dleader_agent.tool.modeling import (predict_with_pipeline,
                                   create_prediction_summary)
 
 

@@ -12,14 +12,14 @@ Target: fup_converted
 import os
 from datetime import datetime
 
-from biomni.tool.modeling import (analyze_feature_importance,
+from dleader_agent.tool.modeling import (analyze_feature_importance,
                                   create_classification_plots,
                                   create_regression_plots, save_model,
                                   select_best_features_regression,
                                   train_classification_model,
                                   train_regression_model)
 # Import our new functions including the enhanced descriptor calculation
-from biomni.tool.preprocessing import (load_and_inspect_data,
+from dleader_agent.tool.preprocessing import (load_and_inspect_data,
                                        smiles_to_descriptors)
 
 

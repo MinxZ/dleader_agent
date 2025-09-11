@@ -1,6 +1,6 @@
-# Known Package Conflicts in Biomni
+# Known Package Conflicts in dleader_agent
 
-This file lists Python packages that are known to have dependency conflicts with the default Biomni environment. These packages are not installed by default. If you require their functionality, you must install them manually and may need to uncomment relevant code in the codebase.
+This file lists Python packages that are known to have dependency conflicts with the default dleader_agent environment. These packages are not installed by default. If you require their functionality, you must install them manually and may need to uncomment relevant code in the codebase.
 
 ## Packages
 

@@ -1,11 +1,11 @@
 """
 Example: Minimal Agent Configuration for Preprocessing Only
 
-This example shows how to configure the Biomni agent to use only 
+This example shows how to configure the dleader_agent agent to use only 
 preprocessing tools without default data lake and packages.
 """
 
-from biomni.agent.a1 import A1
+from dleader_agent.agent.a1 import A1
 
 
 def create_minimal_preprocessing_agent():
@@ -31,14 +31,14 @@ def create_minimal_preprocessing_agent():
     
     # Filter module2api to keep only preprocessing tools
     preprocessing_modules = {
-        'biomni.tool.preprocessing': agent.module2api.get('biomni.tool.preprocessing', [])
+        'dleader_agent.tool.preprocessing': agent.module2api.get('dleader_agent.tool.preprocessing', [])
     }
     agent.module2api = preprocessing_modules
     
     
     print("✅ Configured minimal agent with:")
     print(f"   📦 {len(essential_packages)} essential packages")
-    # print(f"   🔧 {len(preprocessing_modules.get('biomni.tool.preprocessing', []))} preprocessing tools")
+    # print(f"   🔧 {len(preprocessing_modules.get('dleader_agent.tool.preprocessing', []))} preprocessing tools")
     print(f"   📊 {len(agent.data_lake_dict)} data lake items (empty)")
     
     return agent
@@ -98,7 +98,7 @@ def example_minimal_preprocessing():
 
 
 if __name__ == "__main__":
-    print("🧬 Minimal Biomni Agent - Preprocessing Only")
+    print("🧬 Minimal dleader_agent Agent - Preprocessing Only")
     print("="*60)
     
     # Run examples
@@ -146,6 +146,6 @@ if __name__ == "__main__":
     # print("   agent = A1(download_data_lake=False, llm='apac.anthropic.claude-sonnet-4-20250514-v1:0')")
     # print("   agent.data_lake_dict = {}  # Clear defaults")
     # print("   agent.library_content_dict = {'pandas': 'Data analysis'}")
-    # print("   agent.module2api = {'biomni.tool.preprocessing': tools}")
+    # print("   agent.module2api = {'dleader_agent.tool.preprocessing': tools}")
     # print("   agent.configure()  # Apply changes")
     # print("   ```")

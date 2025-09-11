@@ -3,26 +3,26 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "biomni"
+name = "dleader_agent"
 dynamic = ["version"]
-description = "Biomni"
+description = "dleader_agent"
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
-    {name = "Biomni Team", email = "kexinh@cs.stanford.edu"}
+    {name = "dleader_agent Team", email = "kexinh@cs.stanford.edu"}
 ]
 requires-python = ">=3.11"
 dependencies = ["pydantic", "langchain", "python-dotenv"]
 
 [project.urls]
-Homepage = "https://github.com/snap-stanford/biomni"
-Repository = "https://github.com/snap-stanford/biomni"
+Homepage = "https://github.com/snap-stanford/dleader_agent"
+Repository = "https://github.com/snap-stanford/dleader_agent"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.dynamic]
-version = {attr = "biomni.version.__version__"}
+version = {attr = "dleader_agent.version.__version__"}
 
 [tool.setuptools.packages.find]
 exclude = ["test*", "tutorials*"]

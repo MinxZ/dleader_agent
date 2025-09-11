@@ -15,7 +15,7 @@ import numpy as np
 import random
 import json
 from datetime import datetime, timedelta
-from biomni.llm import get_llm
+from dleader_agent.llm import get_llm
 import re
 
 

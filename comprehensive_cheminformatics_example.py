@@ -17,7 +17,7 @@ Target Property: fup_converted
 
 import os
 
-from biomni.agent.a1 import A1
+from dleader_agent.agent.a1 import A1
 
 
 def create_cheminformatics_agent():
@@ -48,8 +48,8 @@ def create_cheminformatics_agent():
     
     # Keep preprocessing and modeling tools
     relevant_modules = {
-        'biomni.tool.preprocessing': agent.module2api.get('biomni.tool.preprocessing', []),
-        'biomni.tool.modeling': agent.module2api.get('biomni.tool.modeling', [])
+        'dleader_agent.tool.preprocessing': agent.module2api.get('dleader_agent.tool.preprocessing', []),
+        'dleader_agent.tool.modeling': agent.module2api.get('dleader_agent.tool.modeling', [])
     }
     agent.module2api = relevant_modules
     

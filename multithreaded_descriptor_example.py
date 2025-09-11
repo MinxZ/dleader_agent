@@ -14,8 +14,8 @@ Features:
 
 import os
 import time
-from biomni.tool.preprocessing import load_and_inspect_data
-from biomni.tool.modeling import calculate_molecular_descriptors
+from dleader_agent.tool.preprocessing import load_and_inspect_data
+from dleader_agent.tool.modeling import calculate_molecular_descriptors
 
 
 def demo_multithreaded_descriptors():

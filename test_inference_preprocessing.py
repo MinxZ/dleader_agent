@@ -7,7 +7,7 @@ This script demonstrates how to:
 3. Test with a simple SMILES list: ['CC', 'CCC', 'CCCO']
 """
 
-from biomni.tool.preprocessing import load_preprocessing_pipeline, apply_inference_preprocessing
+from dleader_agent.tool.preprocessing import load_preprocessing_pipeline, apply_inference_preprocessing
 
 
 def test_inference_preprocessing():

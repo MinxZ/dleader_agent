@@ -2,7 +2,7 @@
 # Example: Complete Preprocessing Pipeline Usage
 # ============================================
 
-from biomni.tool.preprocessing import *
+from dleader_agent.tool.preprocessing import *
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score

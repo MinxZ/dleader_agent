@@ -19,9 +19,9 @@ Key improvements:
 import os
 from datetime import datetime
 
-from biomni.tool.modeling import modeling_workflow
+from dleader_agent.tool.modeling import modeling_workflow
 # Import the new comprehensive workflow functions
-from biomni.tool.preprocessing import (data_preparation_workflow,
+from dleader_agent.tool.preprocessing import (data_preparation_workflow,
                                        preprocessing_pipeline_workflow,
                                        save_preprocessing_pipeline)
 

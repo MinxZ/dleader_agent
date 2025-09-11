@@ -7,7 +7,7 @@ The agent must intelligently analyze and merge the data without prior knowledge
 of the specific data structures.
 """
 
-from biomni.agent.a1 import A1
+from dleader_agent.agent.a1 import A1
 
 
 def create_data_merge_agent():
@@ -38,7 +38,7 @@ def create_data_merge_agent():
     
     # Filter module2api to keep only preprocessing and analysis tools
     preprocessing_modules = {
-        # 'biomni.tool.preprocessing': agent.module2api.get('biomni.tool.preprocessing', [])
+        # 'dleader_agent.tool.preprocessing': agent.module2api.get('dleader_agent.tool.preprocessing', [])
     }
     agent.module2api = preprocessing_modules
     agent.data_lake_dict = {}
