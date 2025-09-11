@@ -1,10 +1,10 @@
 """
-Agent Interface with Live Thinking Display
+日本語エージェントインターフェース（ライブ思考表示付き）
 
-This interface provides a clean layout with:
-- Left side: User input and final report display
-- Right side: Live executor showing planning and thinking process
-- Download functionality for reports and thinking process
+このインターフェースは以下の機能を持つクリーンなレイアウトを提供します：
+- 左側：ユーザー入力と最終レポート表示
+- 右側：プランニングと思考プロセスを表示するライブ実行エンジン
+- レポートと思考プロセスのダウンロード機能
 """
 
 import argparse
@@ -17,35 +17,42 @@ import time
 import uuid
 import zipfile
 from contextlib import redirect_stdout
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import gradio as gr
 import pandas as pd
 from PIL import Image
 
-# Add current directory to path for imports
+# インポート用に現在のディレクトリをパスに追加
 sys.path.insert(0, os.getcwd())
 
 from dleader_agent.agent.a1 import A1
 
+# JST (Japan Standard Time) タイムゾーンを定義
+JST = timezone(timedelta(hours=9))
+
+def now_jst():
+    """JST (UTC+9) での現在時刻を取得"""
+    return datetime.now(JST)
+
 
 class SessionManager:
-    """Manage session folders and file storage"""
+    """セッションフォルダーとファイル保存を管理"""
     def __init__(self):
         self.sessions_dir = os.path.join(os.getcwd(), "chat_sessions")
         os.makedirs(self.sessions_dir, exist_ok=True)
     
     def create_session_folder(self):
-        """Create a unique session folder"""
+        """ユニークなセッションフォルダーを作成"""
         session_id = str(uuid.uuid4())[:8]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = now_jst().strftime("%Y%m%d_%H%M%S")
         session_name = f"session_{timestamp}_{session_id}"
         session_path = os.path.join(self.sessions_dir, session_name)
         os.makedirs(session_path, exist_ok=True)
         return session_path, session_name
     
     def get_all_sessions(self):
-        """Get list of all existing chat sessions"""
+        """既存のチャットセッション一覧を取得"""
         if not os.path.exists(self.sessions_dir):
             return []
         
@@ -53,28 +60,28 @@ class SessionManager:
         for item in os.listdir(self.sessions_dir):
             session_path = os.path.join(self.sessions_dir, item)
             if os.path.isdir(session_path) and item.startswith("session_"):
-                # Extract timestamp from session name
+                # セッション名からタイムスタンプを抽出
                 try:
                     parts = item.split("_")
                     if len(parts) >= 3:
                         date_part = parts[1]
                         time_part = parts[2]
-                        # Format: YYYYMMDD_HHMMSS
+                        # フォーマット: YYYYMMDD_HHMMSS
                         display_name = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]} {time_part[:2]}:{time_part[2:4]}:{time_part[4:6]}"
                         sessions.append((item, display_name, session_path))
                 except:
                     sessions.append((item, item, session_path))
         
-        # Sort by session name (newest first)
+        # セッション名でソート（最新順）
         sessions.sort(key=lambda x: x[0], reverse=True)
         return sessions
     
     def load_session_data(self, session_path):
-        """Load data from an existing session"""
+        """既存セッションからデータを読み込み"""
         if not os.path.exists(session_path):
             return None, None, None
         
-        # Look for report, thinking, and query files
+        # レポート、思考、クエリファイルを探す
         report_content = None
         thinking_content = None
         session_files = []
@@ -89,15 +96,15 @@ class SessionManager:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         thinking_content = f.read()
                 elif not file.startswith("report_") and not file.startswith("thinking_process_") and not file.startswith("query_"):
-                    # These are user uploaded files
+                    # ユーザーがアップロードしたファイル
                     session_files.append(file_path)
         except Exception as e:
-            print(f"Error loading session data: {e}")
+            print(f"セッションデータ読み込みエラー: {e}")
         
         return report_content, thinking_content, session_files
     
     def save_uploaded_files(self, uploaded_files, session_path):
-        """Save uploaded files to session folder and return new paths"""
+        """アップロードファイルをセッションフォルダーに保存し新しいパスを返却"""
         if not uploaded_files:
             return []
         
@@ -114,7 +121,7 @@ class SessionManager:
 
 
 class StreamingCapture:
-    """Capture stdout and provide real-time updates"""
+    """標準出力をキャプチャしリアルタイム更新を提供"""
     def __init__(self):
         self.content = ""
         self.original_stdout = sys.stdout
@@ -132,9 +139,9 @@ class StreamingCapture:
 
 
 def create_agent():
-    """Create an agent configured only for image analysis tasks."""
+    """画像解析タスク専用に設定されたエージェントを作成"""
     
-    # Initialize agent without downloading default data lake
+    # デフォルトのデータレイクをダウンロードせずにエージェントを初期化
     agent = A1(
         use_tool_retriever=True,
         download_data_lake=False, 
@@ -145,14 +152,14 @@ def create_agent():
 
 
 def scan_for_new_files(current_path, start_time, exclude_folders=None):
-    """Scan for files created after start_time, excluding specified folders"""
+    """開始時刻以降に作成されたファイルをスキャン、指定フォルダーを除外"""
     if exclude_folders is None:
         exclude_folders = {'chat_sessions', '__pycache__', '.git', '.vscode', 'node_modules'}
     
     new_files = []
     try:
         for root, dirs, files in os.walk(current_path):
-            # Skip excluded directories by modifying dirs in-place
+            # 除外ディレクトリをスキップするため、dirsをその場で変更（os.walkが巡回を制御）
             dirs[:] = [d for d in dirs if d not in exclude_folders]
             
             for file in files:
@@ -162,16 +169,16 @@ def scan_for_new_files(current_path, start_time, exclude_folders=None):
                     if file_mtime > start_time:
                         new_files.append(file_path)
                 except OSError:
-                    # Skip files that can't be accessed
+                    # アクセスできないファイルはスキップ
                     continue
     except Exception as e:
-        print(f"Error scanning for new files: {e}")
+        print(f"新しいファイルのスキャンエラー: {e}")
     
     return new_files
 
 
 def move_files_to_session(file_paths, session_path):
-    """Move files to session folder, handling duplicates by renaming"""
+    """ファイルをセッションフォルダーに移動、重複は名前変更で処理"""
     moved_files = []
     
     for file_path in file_paths:
@@ -179,79 +186,76 @@ def move_files_to_session(file_paths, session_path):
             filename = os.path.basename(file_path)
             destination = os.path.join(session_path, filename)
             
-            # Handle duplicates by adding a counter
+            # 重複をカウンターで処理
             counter = 1
-            original_destination = destination
             while os.path.exists(destination):
                 name, ext = os.path.splitext(filename)
                 destination = os.path.join(session_path, f"{name}_{counter}{ext}")
                 counter += 1
             
-            # Move the file
+            # ファイルを移動
             shutil.move(file_path, destination)
             moved_files.append(destination)
-            print(f"Moved {file_path} to {destination}")
+            print(f"ファイルを移動しました: {file_path} → {destination}")
             
         except Exception as e:
-            print(f"Error moving file {file_path}: {e}")
+            print(f"ファイル移動エラー {file_path}: {e}")
     
     return moved_files
 
 
 def process_with_agent_streaming(message, uploaded_files):
-    """Process user request with live streaming of agent's thinking"""
+    """エージェントの思考をライブストリーミングでユーザーリクエストを処理"""
     if not message.strip():
-        yield "😴 Please enter a message...", "", "", "", ""
+        yield "😴 メッセージを入力してください...", "", "", "", ""
         return
     
     try:
-        # Record start time for file tracking
-
-        # Create session folder for this chat
+        # このチャット用のセッションフォルダーを作成
         session_manager = SessionManager()
         session_path, session_name = session_manager.create_session_folder()
         
-        # Initialize agent
-        yield f"🔄 **Initializing agent...** (Session: {session_name})", "", "", "", ""
+        # エージェントを初期化
+        yield f"🔄 **エージェントを初期化中...** (セッション: {session_name})", "", "", "", ""
         agent = create_agent()
         
-        # Handle uploaded files
+        # アップロードファイルを処理
         session_file_paths = []
         if uploaded_files:
-            yield f"📁 **Saving uploaded files to session folder...**", "", "", "", ""
+            yield f"📁 **アップロードファイルをセッションフォルダーに保存中...**", "", "", "", ""
             session_file_paths = session_manager.save_uploaded_files(uploaded_files, session_path)
             
-            # Add files to agent's data lake with session paths
+            # セッションパスでエージェントのデータレイクにファイルを追加
             agent.data_lake_dict = {}
             for file_path in session_file_paths:
                 filename = os.path.basename(file_path)
                 try:
                     if filename.endswith('.csv'):
                         data = pd.read_csv(file_path)
-                        agent.data_lake_dict[filename] = f"Dataset with {data.shape[0]} rows and {data.shape[1]} columns (Path: {file_path})"
+                        agent.data_lake_dict[filename] = f"{data.shape[0]}行 {data.shape[1]}列のデータセット (パス: {file_path})"
                     elif filename.endswith(('.xlsx', '.xls')):
                         data = pd.read_excel(file_path)
-                        agent.data_lake_dict[filename] = f"Excel file with {data.shape[0]} rows and {data.shape[1]} columns (Path: {file_path})"
+                        agent.data_lake_dict[filename] = f"{data.shape[0]}行 {data.shape[1]}列のExcelファイル (パス: {file_path})"
                     else:
-                        agent.data_lake_dict[filename] = f"File uploaded (format auto-detected) (Path: {file_path})"
+                        agent.data_lake_dict[filename] = f"アップロードされたファイル (フォーマット自動検出) (パス: {file_path})"
                 except:
-                    agent.data_lake_dict[filename] = f"File uploaded (format auto-detected) (Path: {file_path})"
+                    agent.data_lake_dict[filename] = f"アップロードされたファイル (フォーマット自動検出) (パス: {file_path})"
             agent.configure()
             
-        yield f"🚀 **Starting processing...** (Files stored in: {session_path})", "", "", "", ""
+        yield f"🚀 **処理を開始中...** (ファイル保存先: {session_path})", "", "", "", ""
         
-        # Set up streaming capture
+        # ストリーミングキャプチャを設定
         stream_capture = StreamingCapture()
         
-        # Container for results
+        # 結果用のコンテナ
         result_container = {"result": None, "error": None, "completed": False}
         accumulated_thinking = ""
         
         def run_agent():
             try:
                 with redirect_stdout(stream_capture):
-                    # Add session folder path to the message
-                    enhanced_message = f"{message}\n\nNote: The uploaded files are stored in the folder: {session_path}. If saving file, also save in it, it is the working folder."
+                    # セッションフォルダーパスをメッセージに追加
+                    enhanced_message = f"{message}\n\n注意: アップロードされたファイルは次の作業フォルダに保存されています: {session_path} ファイルを生成あるいは保存する場合は、作業フォルダに保存してください。コメントはできるだけ日本語で記述し、最終レポートも日本語で作成すること。 use plt.rcParams['font.family'] = ['Noto Color Emoji', 'Noto Sans CJK JP', 'Symbola', 'IPAexGothic', 'DejaVu Sans' ] when plot"
                     _, result = agent.go(enhanced_message)
                 result_container["result"] = result
             except Exception as e:
@@ -259,161 +263,162 @@ def process_with_agent_streaming(message, uploaded_files):
             finally:
                 result_container["completed"] = True
         
-        # Start agent in background
+        # エージェントをバックグラウンドで開始
         agent_thread = threading.Thread(target=run_agent)
         agent_thread.start()
-
+        
+        # ファイル追跡のため開始時刻を記録
         start_time = time.time()
         current_path = os.getcwd()
-        print(current_path)
         chat_sessions_path = os.path.join(os.getcwd(), "chat_sessions")
-        print(chat_sessions_path)
-                
-        # Monitor and stream updates
+        print(f"現在のパス: {current_path}")
+        print(f"チャットセッションパス: {chat_sessions_path}")
+        
+        # 更新を監視してストリーミング
         last_content_length = 0
         while not result_container["completed"]:
             current_content = stream_capture.get_content()
             if len(current_content) > last_content_length:
-                # New content available - show incremental update
+                # 新しいコンテンツが利用可能 - 増分更新を表示
                 new_content = current_content[last_content_length:]
                 accumulated_thinking += new_content
                 
-                # Format the live thinking display
-                thinking_display = f"""## 🤖 Agent Executor (Live)
+                # ライブ思考表示をフォーマット
+                thinking_display = f"""## 🤖 エージェント実行エンジン (ライブ)
                 
 ```
 {accumulated_thinking}
 ```
 
-**Status:** 🔄 Processing...
+**ステータス:** 🔄 処理中...
+**最終更新:** {now_jst().strftime('%H:%M:%S')}
 """
-# **Last Update:** {datetime.now().strftime('%H:%M:%S')}
                 
                 yield thinking_display, "", "", "", ""
                 last_content_length = len(current_content)
-            time.sleep(0.5)  # Update every 500ms
+            time.sleep(0.5)  # 500msごとに更新
         
-        # Wait for thread completion
+        # スレッド完了を待機
         agent_thread.join()
         
-        # Get final content
+        # 最終コンテンツを取得
         final_content = stream_capture.get_content()
         if len(final_content) > last_content_length:
             new_content = final_content[last_content_length:]
             accumulated_thinking += new_content
         
-        # Format final results
+        # 最終結果をフォーマット
         if result_container["error"]:
-            final_report = f"""## ❌ Final Report
+            final_report = f"""## ❌ 最終レポート
 
 ```
 {result_container['error']}
 ```
 """
-            thinking_final = f"""## ❌ Agent Executor (Completed)
+            thinking_final = f"""## ❌ エージェント実行エンジン (完了)
 
 ```
 {accumulated_thinking}
 ```
 
-**Status:** ❌ Error encountered
-**Completed:** {datetime.now().strftime('%H:%M:%S')}
+**ステータス:** ❌ エラーが発生しました
+**完了時刻:** {now_jst().strftime('%H:%M:%S')}
 """
         else:
-            # Extract content between <solution> and </solution> tags
-            raw_result = result_container['result'] or 'Processing completed successfully.'
+            # <solution>と</solution>タグ間のコンテンツを抽出
+            raw_result = result_container['result'] or '処理が正常に完了しました。'
             
-            # Look for solution tags
+            # solutionタグを探す
             if '<solution>' in raw_result and '</solution>' in raw_result:
                 start_idx = raw_result.find('<solution>') + len('<solution>')
                 end_idx = raw_result.find('</solution>')
                 solution_content = raw_result[start_idx:end_idx].strip()
             else:
-                # If no solution tags found, use the full result
+                # solutionタグが見つからない場合、結果全体を使用
                 solution_content = raw_result
             
-            final_report = f"""## ✅ Final Report
+            final_report = f"""## ✅ 最終レポート
 
 {solution_content}
 """
             
-            thinking_final = f"""## ✅ Agent Executor (Completed)
+            thinking_final = f"""## ✅ エージェント実行エンジン (完了)
 
 ```
 {accumulated_thinking}
 ```
 
-**Status:** ✅ Completed successfully
-**Finished:** {datetime.now().strftime('%H:%M:%S')}
+**ステータス:** ✅ 正常に完了
+**終了時刻:** {now_jst().strftime('%H:%M:%S')}
 """
         
-        # Scan for and move new files created during processing
+        # 処理中に作成された新しいファイルをスキャンして移動
         try:
-            excude_paths = {'chat_sessions', '__pycache__', '.git', '.vscode', 'node_modules', chat_sessions_path}
-            new_files = scan_for_new_files(current_path, start_time, excude_paths)
+            exclude_paths = {'chat_sessions', '__pycache__', '.git', '.vscode', 'node_modules', chat_sessions_path}
+            new_files = scan_for_new_files(current_path, start_time, exclude_paths)
             
-            # Filter out files that are already in chat_sessions folder
+            # chat_sessionsフォルダーに既にあるファイルを除外
             filtered_files = [f for f in new_files if not f.startswith(chat_sessions_path)]
             
             if filtered_files:
-                print(f"Found {len(filtered_files)} new files created during processing:")
+                print(f"処理中に作成された新しいファイルを{len(filtered_files)}個発見:")
                 for file in filtered_files:
                     print(f"  - {file}")
                 moved_files = move_files_to_session(filtered_files, session_path)
-                print(f"Moved {len(moved_files)} files to session folder")
+                print(f"{len(moved_files)}個のファイルをセッションフォルダーに移動しました")
         except Exception as e:
-            print(f"Error handling new files: {e}")
+            print(f"新しいファイルの処理エラー: {e}")
         
-        # Save session files to chat_sessions folder
+        # セッションファイルをchat_sessionsフォルダーに保存
         try:
-            # Save report file
-            report_filename = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+            # レポートファイルを保存
+            report_filename = f"report_{now_jst().strftime('%Y%m%d_%H%M%S')}.md"
             report_path = os.path.join(session_path, report_filename)
             with open(report_path, 'w', encoding='utf-8') as f:
                 f.write(final_report)
             
-            # Save thinking process file
-            thinking_filename = f"thinking_process_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            # 思考プロセスファイルを保存
+            thinking_filename = f"thinking_process_{now_jst().strftime('%Y%m%d_%H%M%S')}.txt"
             thinking_path = os.path.join(session_path, thinking_filename)
             with open(thinking_path, 'w', encoding='utf-8') as f:
                 f.write(accumulated_thinking)
             
-            # Save query/message for reference
-            query_filename = f"query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            # 参考用にクエリ/メッセージを保存
+            query_filename = f"query_{now_jst().strftime('%Y%m%d_%H%M%S')}.txt"
             query_path = os.path.join(session_path, query_filename)
             with open(query_path, 'w', encoding='utf-8') as f:
-                f.write(f"Query: {message}\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                f.write(f"クエリ: {message}\nタイムスタンプ: {now_jst().strftime('%Y-%m-%d %H:%M:%S')}")
                 
         except Exception as e:
-            print(f"Error saving session files: {e}")
+            print(f"セッションファイル保存エラー: {e}")
         
-        # Create downloadable files
+        # ダウンロード用ファイルを作成
         report_file = create_download_file(final_report, "report", "md")
         thinking_file = create_download_file(accumulated_thinking, "thinking_process", "txt")
         session_zip = create_session_zip(session_path)
         
-        # Combine thinking and final report for Agent Executor display
+        # エージェント実行エンジン表示用に思考と最終レポートを結合
         combined_executor_display = f"{thinking_final}\n\n---\n\n{final_report}"
         
-        yield combined_executor_display, "## ✅ Processing Complete\n\nResults displayed in Agent Executor panel →", report_file, thinking_file, session_zip
+        yield combined_executor_display, "## ✅ 処理完了\n\n結果はエージェント実行エンジンパネルに表示されています →", report_file, thinking_file, session_zip
         
     except Exception as e:
-        error_display = f"""## ❌ Agent Executor (System Error)
+        error_display = f"""## ❌ エージェント実行エンジン (システムエラー)
 
 ```
-System Error: {str(e)}
+システムエラー: {str(e)}
 ```
 
-**Status:** ❌ System Error
-**Timestamp:** {datetime.now().strftime('%H:%M:%S')}
+**ステータス:** ❌ システムエラー
+**タイムスタンプ:** {now_jst().strftime('%H:%M:%S')}
 """
-        yield error_display, "## ❌ System Error\n\nError details displayed in Agent Executor panel →", "", "", "", ""
+        yield error_display, "## ❌ システムエラー\n\nエラー詳細はエージェント実行エンジンパネルに表示されています →", "", "", "", ""
 
 
 def create_download_file(content, prefix, extension):
-    """Create a temporary file for download"""
+    """ダウンロード用の一時ファイルを作成"""
     try:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = now_jst().strftime('%Y%m%d_%H%M%S')
         temp_file = tempfile.NamedTemporaryFile(
             mode='w', 
             suffix=f'.{extension}',
@@ -429,15 +434,15 @@ def create_download_file(content, prefix, extension):
 
 
 def create_session_zip(session_path):
-    """Create a zip file containing all session content"""
+    """全セッションコンテンツを含むzipファイルを作成"""
     if not os.path.exists(session_path):
         return None
     
     try:
         session_name = os.path.basename(session_path)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = now_jst().strftime('%Y%m%d_%H%M%S')
         
-        # Create temporary zip file
+        # 一時zipファイルを作成
         zip_file = tempfile.NamedTemporaryFile(
             suffix='.zip',
             prefix=f"{'_'.join(session_name.split('_')[:-1])}_",
@@ -445,38 +450,38 @@ def create_session_zip(session_path):
         )
         zip_file.close()
         
-        # Create zip archive
+        # zipアーカイブを作成
         with zipfile.ZipFile(zip_file.name, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Walk through all files in session directory
+            # セッションディレクトリ内の全ファイルを巡回
             for root, dirs, files in os.walk(session_path):
                 for file in files:
                     file_path = os.path.join(root, file)
-                    # Add file to zip with relative path
+                    # 相対パスでファイルをzipに追加
                     arcname = os.path.relpath(file_path, session_path)
                     zipf.write(file_path, arcname)
         
         return zip_file.name
     except Exception as e:
-        print(f"Error creating session zip: {e}")
+        print(f"セッションzip作成エラー: {e}")
         return None
 
 
 def format_files_info(files):
-    """Format uploaded files information"""
+    """アップロードファイル情報をフォーマット"""
     if not files:
-        return "No files uploaded"
+        return "ファイルがアップロードされていません"
     
     file_info = []
     for file in files:
         filename = os.path.basename(file.name)
-        file_size = os.path.getsize(file.name) / (1024 * 1024)  # Size in MB
+        file_size = os.path.getsize(file.name) / (1024 * 1024)  # MBサイズ
         file_info.append(f"📁 **{filename}** ({file_size:.2f} MB)")
     
-    return "**Uploaded Files:**\n\n" + "\n".join(file_info)
+    return "**アップロードファイル:**\n\n" + "\n".join(file_info)
 
 
 def load_logo():
-    """Load the logo image"""
+    """ロゴ画像を読み込み"""
     try:
         img = Image.open("dleader_logo.jpg")
         return img
@@ -484,10 +489,10 @@ def load_logo():
         return None
 
 def create_interface():
-    """Create the main Gradio interface"""
+    """メインGradioインターフェースを作成"""
     
-    with gr.Blocks(title="Agent Interface", theme=gr.themes.Soft()) as demo:
-        # Header section with logo and title in blocks
+    with gr.Blocks(title="AIエージェントインターフェース", theme=gr.themes.Soft()) as demo:
+        # ロゴとタイトルのブロックによるヘッダーセクション
         with gr.Row():
             with gr.Column(scale=1, min_width=120):
                 gr.Image(
@@ -501,97 +506,96 @@ def create_interface():
                 )
             with gr.Column(scale=5):
                 gr.HTML("""
-                <div style="display: flex; align-items: center; justify-content: center; height: 120px; background: #f8f9fa; color: #333; border: 2px solid #dee2e6; border-radius: 8px; margin: 10px; padding: 20px;">
+                <div style="display: flex; align-items: center; justify-content: center; height: 120px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 20px; margin: 10px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
                     <div style="text-align: center;">
-                        <h1 style="margin: 0; font-size: 2.2em; color: #2c3e50; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-weight: 600;">KumiChem AI Agent</h1>
-                        <p style="margin: 8px 0 0 0; font-size: 1.1em; color: #6c757d; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">Intelligent task processing with live thinking display</p>
+                        <h1 style="margin: 0; font-size: 2.5em; color: white; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">KumiChem AI Agent</h1>
                     </div>
                 </div>
                 """)
         
         with gr.Row(equal_height=True):
-            # Left Column - User Input and Final Report
+            # 左カラム - ユーザー入力と最終レポート
             with gr.Column(scale=1):
-                gr.Markdown("## 📝 Input & Results")
+                gr.Markdown("## 📝 入力と結果")
                 
-                # File upload section
+                # ファイルアップロードセクション
                 with gr.Group():
-                    gr.Markdown("### 📁 Upload Files")
+                    gr.Markdown("### 📁 ファイルアップロード")
                     file_input = gr.File(
-                        label="Upload Files",
+                        label="ファイルをアップロード",
                         file_count="multiple",
                         file_types=None,
                         height=100
                     )
-                    file_status = gr.Markdown("No files uploaded")
+                    file_status = gr.Markdown("ファイルがアップロードされていません")
                 
-                # User input section
+                # ユーザー入力セクション
                 with gr.Group():
-                    gr.Markdown("### 💬 Your Request. Press 'Enter key' to go to next line.")
+                    gr.Markdown("### 💬 あなたのリクエスト")
                     user_input = gr.Textbox(
-                        label="Describe what you want the agent to do. Press 'Process' to start task.",
-                        placeholder="Enter your request here...\n\nExamples:\n• Analyze the uploaded data\n• Extract key information from documents\n• Perform calculations or analysis\n• Generate reports or summaries",
+                        label="エージェントに実行してほしいタスクを記述してください",
+                        placeholder="ここにリクエストを入力してください...\n\n例:\n• アップロードされたデータを分析\n• 文書から重要な情報を抽出\n• 計算や分析を実行\n• レポートやサマリーを生成",
                         lines=5,
                         max_lines=10
                     )
                     
                     with gr.Row():
-                        submit_btn = gr.Button("🚀 Process", variant="primary", scale=2)
-                        clear_btn = gr.Button("🗑️ Clear", variant="secondary", scale=1)
+                        submit_btn = gr.Button("🚀 処理開始", variant="primary", scale=2)
+                        clear_btn = gr.Button("🗑️ クリア", variant="secondary", scale=1)
                 
-                # Status section (replaces Final Report)
+                # ステータスセクション（最終レポートの代替）
                 with gr.Group():
-                    gr.Markdown("### 📊 Status & Results")
+                    gr.Markdown("### 📊 ステータスと結果")
                     final_report = gr.Markdown(
-                        """## 📊 Session Status
+                        """## 📊 セッションステータス
 
-Ready to show your results...
+結果表示の準備ができています...
 
-**Status:** 🟢 Waiting for processing
-**Ready to display results...**
+**ステータス:** 🟢 処理待機中
+**結果表示準備完了...**
 """,
                         height=200
                     )
                     
                     with gr.Row():
                         download_report = gr.File(
-                            label="📥 Download Report",
+                            label="📥 レポートダウンロード",
                             visible=False
                         )
                         download_thinking = gr.File(
-                            label="📥 Download Thinking Process",
+                            label="📥 思考プロセスダウンロード",
                             visible=False
                         )
                         download_session_zip = gr.File(
-                            label="📦 Download Complete Session",
+                            label="📦 完全セッションダウンロード",
                             visible=False
                         )
             
-            # Right Column - Live Executor Display
+            # 右カラム - ライブ実行エンジン表示
             with gr.Column(scale=1):
-                gr.Markdown("## 🧠 Agent Executor (scroll down to see more)")
+                gr.Markdown("## 🧠 エージェント実行エンジン (詳細を見るには下にスクロール)")
                 
                 executor_display = gr.Markdown(
-                    """## 🤖 Agent Executor
+                    """## 🤖 エージェント実行エンジン
                     
-Ready to process your request...
+リクエストの処理準備ができています...
 
-**Status:** 🟢 Idle
-**Waiting for input...**
+**ステータス:** 🟢 待機中
+**入力待機中...**
 """,
                     height=600
                 )
                 
-                # Status indicators
+                # ステータスインジケーター
                 with gr.Row():
                     gr.HTML("""
                     <div style="display: flex; align-items: center; justify-content: center; padding: 10px; background: #f0f0f0; border-radius: 5px;">
                         <span style="color: #28a745; font-weight: bold;">●</span>
-                        <span style="margin-left: 10px;">System Ready</span>
+                        <span style="margin-left: 10px;">システム準備完了</span>
                     </div>
                     """)
         
-        # Event handlers
+        # イベントハンドラー
         def update_file_status(files):
             return format_files_info(files)
         
@@ -599,14 +603,14 @@ Ready to process your request...
         def process_request(message, files):
             if not message.strip():
                 return (
-                    "## ❌ Agent Executor\n\n❌ Please enter a request", 
-                    "## ❌ No Input\n\nPlease enter a request to process.",
+                    "## ❌ エージェント実行エンジン\n\n❌ リクエストを入力してください", 
+                    "## ❌ 入力なし\n\n処理するリクエストを入力してください。",
                     gr.update(visible=False), 
                     gr.update(visible=False),
                     gr.update(visible=False)
                 )
             
-            # Stream the processing
+            # 処理をストリーミング
             for executor, report, report_file, thinking_file, session_zip in process_with_agent_streaming(message, files):
                 if report_file and thinking_file and session_zip:
                     yield (
@@ -621,27 +625,27 @@ Ready to process your request...
         
         def clear_interface():
             return (
-                "",  # Clear user input
-                """## 🤖 Agent Executor
+                "",  # ユーザー入力をクリア
+                """## 🤖 エージェント実行エンジン
                     
-Ready to process your request...
+リクエストの処理準備ができています...
 
-**Status:** 🟢 Idle
-**Waiting for input...**
-""",  # Reset executor
-                """## 📊 Session Status
+**ステータス:** 🟢 待機中
+**入力待機中...**
+""",  # 実行エンジンをリセット
+                """## 📊 セッションステータス
 
-Ready to show your results...
+結果表示の準備ができています...
 
-**Status:** 🟢 Waiting for processing
-**Ready to display results...**
-""",  # Reset status
-                gr.update(visible=False),  # Hide download buttons
+**ステータス:** 🟢 処理待機中
+**結果表示準備完了...**
+""",  # ステータスをリセット
+                gr.update(visible=False),  # ダウンロードボタンを隠す
                 gr.update(visible=False),
-                gr.update(visible=False)  # Hide session zip
+                gr.update(visible=False)  # セッションzipを隠す
             )
         
-        # Wire up events
+        # イベントを配線
         file_input.change(
             fn=update_file_status,
             inputs=[file_input],
@@ -660,7 +664,7 @@ Ready to show your results...
             outputs=[user_input, executor_display, final_report, download_report, download_thinking, download_session_zip]
         )
         
-        # Allow Enter key to submit
+        # Enterキーでの送信を許可
         user_input.submit(
             fn=process_request,
             inputs=[user_input, file_input],
@@ -671,8 +675,8 @@ Ready to show your results...
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Agent Interface with Live Thinking Display")
-    parser.add_argument("--server_port", type=int, default=7861, help="Port to run the server on (default: 7861)")
+    parser = argparse.ArgumentParser(description="日本語エージェントインターフェース（ライブ思考表示付き）")
+    parser.add_argument("--server_port", type=int, default=8000, help="サーバーのポート番号 (デフォルト: 8000)")
     args = parser.parse_args()
     
     demo = create_interface()
