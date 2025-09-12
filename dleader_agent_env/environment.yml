@@ -8,7 +8,8 @@ dependencies:
   - unzip
   - gcc_linux-64
   - gxx_linux-64
-  - python-devtools  - pip
+  - python-devtools  
+  - pip
   - pip:
       - numpy==2.1
       - pandas
