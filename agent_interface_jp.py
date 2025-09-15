@@ -1,6 +1,7 @@
+# -*- coding: utf-8 -*-
+
 """
 日本語エージェントインターフェース（ライブ思考表示付き）
-
 このインターフェースは以下の機能を持つクリーンなレイアウトを提供します：
 - 左側：ユーザー入力と最終レポート表示
 - 右側：プランニングと思考プロセスを表示するライブ実行エンジン
@@ -255,7 +256,7 @@ def process_with_agent_streaming(message, uploaded_files):
             try:
                 with redirect_stdout(stream_capture):
                     # セッションフォルダーパスをメッセージに追加
-                    enhanced_message = f"{message}\n\n注意: アップロードされたファイルは次の作業フォルダに保存されています: {session_path} ファイルを生成あるいは保存する場合は、作業フォルダに保存してください。コメントはできるだけ日本語で記述し、最終レポートも日本語で作成すること。 use plt.rcParams['font.family'] = ['Noto Color Emoji', 'Noto Sans CJK JP', 'Symbola', 'IPAexGothic', 'DejaVu Sans' ] when plot"
+                    enhanced_message = f"{message}\n\n注意: アップロードされたファイルは次の作業フォルダに保存されています: {session_path} ファイルを生成あるいは保存する場合は、作業フォルダに保存してください。コメントはできるだけ日本語で記述し、最終レポートも日本語で作成すること。 use plt.rcParams['font.family'] = ['Noto Sans CJK JP', 'DejaVu Sans' ] when plot"
                     _, result = agent.go(enhanced_message)
                 result_container["result"] = result
             except Exception as e:
