@@ -1,14 +1,14 @@
 """
-Gradio Interface for FastAPI Agent Server
+Simplified Gradio Interface for FastAPI Agent Server
 
 This interface provides a clean Gradio frontend that communicates with the FastAPI agent server:
-- Submits requests to the FastAPI server's queue system
-- Polls for status updates and results
-- Displays results without streaming (as requested)
-- Handles file uploads through the API
+- Submit requests to the FastAPI server's queue system
+- Check status with merged history and snapshots view
+- Stop tasks with history selection
 """
 
 import argparse
+import json
 import os
 import tempfile
 import time
@@ -24,15 +24,21 @@ from PIL import Image
 class FastAPIClient:
     """Client for communicating with the FastAPI agent server"""
 
-    def __init__(self, base_url: str = "http://localhost:8002"):
+    def __init__(self, base_url: str = "http://localhost:8001"):
+        # Ensure URL has proper protocol
+        if not base_url.startswith(('http://', 'https://')):
+            base_url = f"http://{base_url}"
         self.base_url = base_url.rstrip('/')
 
     def health_check(self) -> bool:
         """Check if the FastAPI server is healthy"""
         try:
+            print(f"Attempting to connect to: {self.base_url}/health")
             response = requests.get(f"{self.base_url}/health", timeout=5)
+            print(f"Health check response: {response.status_code}")
             return response.status_code == 200
-        except:
+        except Exception as e:
+            print(f"Health check failed: {e}")
             return False
 
     def submit_request(self, message: str, language: str = "en") -> Optional[str]:
@@ -80,61 +86,108 @@ class FastAPIClient:
             print(f"Error getting status: {e}")
             return None
 
-    def submit_and_wait(self, message: str, files: List[str] = None, language: str = "en", timeout: int = 1800) -> dict:
-        """Submit request and wait for completion (non-streaming)"""
-        # Submit request
-        session_id = self.submit_request(message, language)
-        if not session_id:
-            return {"error": "Failed to submit request to server"}
+    def stop_task(self, session_id: str) -> bool:
+        """Stop a running or queued task"""
+        try:
+            response = requests.post(f"{self.base_url}/stop/{session_id}", timeout=10)
+            return response.status_code == 200
+        except Exception as e:
+            print(f"Error stopping task: {e}")
+            return False
 
-        # Upload files if provided
-        if files:
-            upload_success = self.upload_files(session_id, files)
-            if not upload_success:
-                return {"error": "Failed to upload files to server"}
+    def get_json_results(self, session_id: str) -> Optional[dict]:
+        """Get structured JSON results for a completed session"""
+        try:
+            response = requests.get(f"{self.base_url}/results/{session_id}", timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting JSON results: {e}")
+            return None
 
-        # Poll for completion
-        start_time = time.time()
-        last_status = "queued"
+    def get_snapshots(self, session_id: str) -> Optional[dict]:
+        """Get all periodic snapshots for a session"""
+        try:
+            response = requests.get(f"{self.base_url}/snapshots/{session_id}", timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting snapshots: {e}")
+            return None
 
-        while time.time() - start_time < timeout:
-            status_data = self.get_status(session_id)
-            if not status_data:
-                return {"error": "Failed to get status from server"}
+    def get_all_sessions(self) -> List[dict]:
+        """Get all sessions from server storage and active sessions"""
+        all_sessions = []
+        session_ids_seen = set()
 
-            current_status = status_data.get("status", "unknown")
+        try:
+            # First, get stored/completed sessions from /all-sessions
+            print(f"Fetching stored sessions from: {self.base_url}/all-sessions")
+            response = requests.get(f"{self.base_url}/all-sessions", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                stored_sessions = data.get("sessions", [])
+                print(f"Retrieved {len(stored_sessions)} stored sessions")
+                for session in stored_sessions:
+                    session_id = session.get("session_id", "")
+                    if session_id and session_id not in session_ids_seen:
+                        all_sessions.append(session)
+                        session_ids_seen.add(session_id)
+            else:
+                print(f"All-sessions endpoint returned {response.status_code}")
 
-            # Update if status changed
-            if current_status != last_status:
-                last_status = current_status
-                print(f"Status update: {current_status}")
+            # Then, get active sessions from /sessions
+            print(f"Fetching active sessions from: {self.base_url}/sessions")
+            response = requests.get(f"{self.base_url}/sessions", timeout=10)
+            if response.status_code == 200:
+                active_sessions = response.json()
+                print(f"Retrieved {len(active_sessions)} active sessions")
+                # Convert to expected format and merge
+                for session in active_sessions:
+                    session_id = session.get("session_id", "")
+                    if session_id and session_id not in session_ids_seen:
+                        formatted_session = {
+                            "session_id": session_id,
+                            "query": session.get("query", "No query available"),
+                            "full_query": session.get("query", "No query available"),
+                            "language": session.get("language", "en"),
+                            "timestamp": session.get("created_at", ""),
+                            "status": session.get("status", "unknown"),
+                            "is_complete": session.get("status") in ["completed", "error", "cancelled"]
+                        }
+                        all_sessions.append(formatted_session)
+                        session_ids_seen.add(session_id)
+            else:
+                print(f"Sessions endpoint returned {response.status_code}")
 
-            if status_data.get("is_complete"):
-                if status_data.get("error"):
-                    return {
-                        "error": status_data["error"],
-                        "session_id": session_id,
-                        "status": current_status
-                    }
-                else:
-                    return {
-                        "success": True,
-                        "session_id": session_id,
-                        "final_report": status_data.get("final_report", "Processing completed successfully."),
-                        "thinking_content": status_data.get("thinking_content", ""),
-                        "session_path": status_data.get("session_path", ""),
-                        "status": current_status
-                    }
+            print(f"Total merged sessions: {len(all_sessions)}")
+            return all_sessions
 
-            # Show queue position if available
-            if "queue_position" in status_data:
-                queue_pos = status_data["queue_position"]
-                wait_time = status_data.get("estimated_wait_time", 0)
-                print(f"Queue position: {queue_pos}, estimated wait: {wait_time}s")
+        except Exception as e:
+            print(f"Error getting all sessions: {e}")
+            return []
 
-            time.sleep(2)  # Poll every 2 seconds
-
-        return {"error": f"Request timed out after {timeout} seconds", "session_id": session_id}
+    def download_zip(self, session_id: str) -> Optional[str]:
+        """Download zip file for a completed session"""
+        try:
+            response = requests.get(f"{self.base_url}/download/{session_id}", timeout=30)
+            if response.status_code == 200:
+                # Create temporary file for download
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                temp_file = tempfile.NamedTemporaryFile(
+                    suffix='.zip',
+                    prefix=f'session_{session_id[:8]}_{timestamp}_',
+                    delete=False
+                )
+                temp_file.write(response.content)
+                temp_file.close()
+                return temp_file.name
+            return None
+        except Exception as e:
+            print(f"Error downloading zip: {e}")
+            return None
 
 
 def load_logo():
@@ -183,13 +236,106 @@ def create_download_file(content: str, prefix: str, extension: str) -> Optional[
         return None
 
 
-def process_request(message: str, files: List, server_url: str, language: str):
-    """Process request using FastAPI backend"""
+async def process_request(message: str, files: List, server_url: str, language: str):
+    """Process request using FastAPI backend - submit immediately and return session ID"""
     if not message.strip():
         return (
             "## ❌ Error\n\nPlease enter a request to process.",
-            "## ❌ No Input\n\nPlease enter a request to process.",
-            gr.update(visible=False),
+            "## ❌ No Input\n\nPlease enter a request to process."
+        )
+
+    # Initialize client
+    client = FastAPIClient(server_url)
+
+    # Check server health
+    if not client.health_check():
+        return (
+            "## ❌ Server Error\n\nCannot connect to FastAPI server. Please ensure the server is running.",
+            "## ❌ Server Error\n\nCannot connect to FastAPI server."
+        )
+
+    # Prepare file paths
+    file_paths = []
+    if files:
+        for file in files:
+            if file is not None:
+                file_paths.append(file.name)
+
+    # Submit request directly to FastAPI queue (non-blocking)
+    try:
+        session_id = client.submit_request(message, language)
+        if not session_id:
+            return (
+                "## ❌ Submission Error\n\nFailed to submit request to server queue.",
+                "## ❌ Submission Error\n\nFailed to submit request to server queue."
+            )
+
+        # Upload files if provided
+        if file_paths:
+            upload_success = client.upload_files(session_id, file_paths)
+            if not upload_success:
+                return (
+                    "## ❌ Upload Error\n\nFailed to upload files to server.",
+                    "## ❌ Upload Error\n\nFailed to upload files to server."
+                )
+
+        # Return immediate confirmation - FastAPI will handle the queue
+        status_display = f"""## 🚀 Request Submitted Successfully
+
+**Status:** 📋 Queued for processing
+**Session ID:** `{session_id}`
+**Submitted:** {datetime.now().strftime('%H:%M:%S')}
+
+Your request has been submitted to the FastAPI queue.
+Processing will continue even if you close this page.
+You can check status using Session ID: `{session_id}`"""
+
+        result_display = f"""## 📋 Request Submitted to Queue
+
+**Session ID:** `{session_id}`
+**Submitted:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Language:** {language.upper()}
+
+Your request has been added to the processing queue. The FastAPI server will handle the processing independently.
+
+**Files uploaded:** {len(file_paths) if file_paths else 0}
+
+**Request:** {message[:200]}{'...' if len(message) > 200 else ''}
+
+---
+
+### 🔄 Processing Status
+
+The task is now queued for processing. You can:
+1. Close this page safely - processing will continue
+2. Check status using the Session ID above
+3. Return later to retrieve results
+
+Processing will be handled by the FastAPI server queue system."""
+
+        return (
+            result_display,
+            status_display
+        )
+
+    except Exception as e:
+        error_msg = f"""## ❌ System Error
+
+**Error:** {str(e)}
+**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Please check the server connection and try again."""
+        return (
+            error_msg,
+            "## ❌ System Error\n\nError details displayed in the results panel →"
+        )
+
+
+async def check_status_with_history(session_id: str, server_url: str):
+    """Check status of a session with integrated history and snapshots"""
+    if not session_id.strip():
+        return (
+            "## ❌ Error\n\nPlease enter a Session ID to check status.",
             gr.update(visible=False)
         )
 
@@ -200,104 +346,223 @@ def process_request(message: str, files: List, server_url: str, language: str):
     if not client.health_check():
         return (
             "## ❌ Server Error\n\nCannot connect to FastAPI server. Please ensure the server is running.",
-            "## ❌ Server Error\n\nCannot connect to FastAPI server.",
-            gr.update(visible=False),
             gr.update(visible=False)
         )
 
-    # Prepare file paths
-    file_paths = []
-    if files:
-        for file in files:
-            if file is not None:
-                file_paths.append(file.name)
-
-    # Submit request and wait for completion
     try:
-        result = client.submit_and_wait(message, file_paths, language)
-
-        if result.get("error"):
-            error_report = f"""## ❌ Processing Error
-
-**Error:** {result['error']}
-
-**Session ID:** {result.get('session_id', 'N/A')}
-**Status:** {result.get('status', 'Unknown')}
-**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
+        # Get status data
+        status_data = client.get_status(session_id)
+        if not status_data:
             return (
-                error_report,
-                "## ❌ Processing Failed\n\nError details displayed in the results panel →",
-                gr.update(visible=False),
+                f"## ❌ Session Not Found\n\nSession ID '{session_id}' not found on server.",
                 gr.update(visible=False)
             )
 
-        elif result.get("success"):
-            # Format final report
-            final_report = result.get("final_report", "Processing completed successfully.")
-            thinking_content = result.get("thinking_content", "")
-            session_id = result.get("session_id", "")
-            session_path = result.get("session_path", "")
+        # Get snapshots data
+        snapshots_data = client.get_snapshots(session_id)
 
-            # Create result display
-            result_display = f"""## ✅ Processing Complete
+        # Format simplified status display
+        current_status = status_data.get("status", "unknown")
+        is_complete = status_data.get("is_complete", False)
+
+        # Main status section
+        status_emoji = {
+            'queued': '📋',
+            'processing': '🔄',
+            'completed': '✅',
+            'failed': '❌',
+            'error': '❌',
+            'cancelled': '🛑'
+        }.get(current_status, '❓')
+
+        result_display = f"""## {status_emoji} Session: {session_id[:8]}...
+
+**Status:** {current_status.title()}
+**Complete:** {'Yes' if is_complete else 'No'}
+**Created:** {status_data.get('created_at', 'N/A')}"""
+
+        # Add error information if available
+        if status_data.get("error"):
+            result_display += f"""
+**Error:** {status_data['error']}"""
+
+        # Add simplified snapshots with full text
+        if snapshots_data:
+            snapshots = snapshots_data.get("snapshots", [])
+            if snapshots:
+                result_display += f"""
+
+## 📸 All Snapshots ({len(snapshots)} total) - Scroll Down for Full Content
+
+*All snapshots are displayed below in chronological order. Scroll down to view complete content.*
+
+"""
+                for i, snapshot in enumerate(snapshots, 1):
+                    snap_time = snapshot.get("timestamp", "N/A")
+                    try:
+                        dt = datetime.fromisoformat(snap_time.replace('Z', '+00:00'))
+                        formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    except:
+                        formatted_time = snap_time
+
+                    # Get thinking content
+                    content = snapshot.get("content", {})
+                    thinking_content = content.get("thinking_content", "")
+
+                    # Add character count for transparency
+                    char_count = len(thinking_content) if thinking_content else 0
+
+                    result_display += f"""
+---
+
+### 📸 Snapshot #{i} - {formatted_time}
+**Content Size:** {char_count:,} characters
+
+```
+{thinking_content if thinking_content else 'No thinking content available'}
+```
+
+"""
+            else:
+                result_display += """
+
+## 📸 Snapshots
+
+No snapshots available yet."""
+
+        # Add completion download if completed
+        if is_complete and current_status == "completed":
+            # Get the final report for completed sessions
+            results_data = client.get_json_results(session_id)
+            if results_data and 'content' in results_data and 'final_report' in results_data['content']:
+                final_report = results_data['content']['final_report']
+                if final_report:
+                    result_display += f"""
+
+## 📋 Final Report
 
 {final_report}
 
----
-
-**Session Information:**
-- **Session ID:** {session_id}
-- **Session Path:** {session_path}
-- **Completed:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
 
-            status_display = f"""## ✅ Task Completed Successfully
-
-**Status:** ✅ Completed
-**Session ID:** {session_id}
-**Completed:** {datetime.now().strftime('%H:%M:%S')}
-
-Results are displayed in the results panel →
-"""
-
-            # Create download files
-            report_file = create_download_file(final_report, "report", "md")
-            thinking_file = create_download_file(thinking_content, "thinking_process", "txt") if thinking_content else None
+            # Only show ZIP download for completed sessions
+            zip_file = client.download_zip(session_id)
 
             return (
                 result_display,
-                status_display,
-                gr.update(visible=True, value=report_file) if report_file else gr.update(visible=False),
-                gr.update(visible=True, value=thinking_file) if thinking_file else gr.update(visible=False)
+                gr.update(visible=True, value=zip_file) if zip_file else gr.update(visible=False)  # Show ZIP download
             )
 
-        else:
-            return (
-                "## ❌ Unknown Error\n\nReceived unexpected response from server.",
-                "## ❌ Unknown Error\n\nReceived unexpected response from server.",
-                gr.update(visible=False),
-                gr.update(visible=False)
-            )
+        return (
+            result_display,
+            gr.update(visible=False)  # Hide ZIP download for incomplete sessions
+        )
 
     except Exception as e:
-        error_msg = f"""## ❌ System Error
+        error_msg = f"""## ❌ Status Check Error
 
 **Error:** {str(e)}
-**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-Please check the server connection and try again.
-"""
+**Session ID:** {session_id}
+**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
         return (
             error_msg,
-            "## ❌ System Error\n\nError details displayed in the results panel →",
-            gr.update(visible=False),
             gr.update(visible=False)
         )
 
 
-def create_interface():
-    """Create the main Gradio interface"""
+def get_session_history(server_url: str) -> List[tuple]:
+    """Get session history for dropdown selection"""
+    try:
+        client = FastAPIClient(server_url)
+        if not client.health_check():
+            return [("Server not available", "")]
+
+        sessions = client.get_all_sessions()
+        if not sessions:
+            return [("No sessions available", "")]
+
+        items = []
+        for session in sessions:
+            status_emoji = {
+                'queued': '📋',
+                'processing': '🔄',
+                'completed': '✅',
+                'failed': '❌',
+                'error': '❌',
+                'cancelled': '🛑'
+            }.get(session.get('status', 'unknown'), '❓')
+
+            timestamp = session.get('timestamp', '')
+            if timestamp:
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    time_str = dt.strftime('%m/%d %H:%M')
+                except:
+                    time_str = timestamp[:16]
+            else:
+                time_str = 'Unknown'
+
+            # Create display label
+            label = f"{status_emoji} {time_str} - {session.get('query', 'No query')[:50]}..."
+            items.append((label, session['session_id']))
+
+        return items
+    except Exception as e:
+        print(f"Error getting session history: {e}")
+        return [("Error loading history", "")]
+
+
+async def stop_task_by_session_id(session_id: str, server_url: str):
+    """Stop a task by session ID"""
+    if not session_id or session_id.strip() == "":
+        return "## ❌ Error\n\nPlease select a session to stop the task."
+
+    # Initialize client
+    client = FastAPIClient(server_url)
+
+    # Check server health
+    if not client.health_check():
+        return "## ❌ Server Error\n\nCannot connect to FastAPI server. Please ensure the server is running."
+
+    try:
+        # First check if the session exists
+        status_data = client.get_status(session_id)
+        if not status_data:
+            return f"## ❌ Session Not Found\n\nSession ID '{session_id}' not found on server."
+
+        # Check if task is already complete
+        if status_data.get("is_complete", False):
+            status = status_data.get("status", "unknown")
+            return f"## ⚠️ Task Already Complete\n\nSession '{session_id}' has status: {status}.\nCannot stop a completed task."
+
+        # Attempt to stop the task
+        success = client.stop_task(session_id)
+        if success:
+            return f"""## ✅ Task Stopped Successfully
+
+**Session ID:** `{session_id}`
+**Status:** Cancelled by user
+**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+The task has been successfully cancelled."""
+        else:
+            return f"""## ❌ Failed to Stop Task
+
+**Session ID:** `{session_id}`
+**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Failed to stop the task. It may have already completed or there was a server error."""
+
+    except Exception as e:
+        return f"""## ❌ Error Stopping Task
+
+**Error:** {str(e)}
+**Session ID:** `{session_id}`
+**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+
+
+def create_interface(default_fastapi_url: str = "http://localhost:8001"):
+    """Create the simplified Gradio interface"""
 
     with gr.Blocks(title="Agent FastAPI Interface", theme=gr.themes.Soft()) as demo:
         # Header section with logo and title
@@ -329,8 +594,8 @@ def create_interface():
                 with gr.Row():
                     server_url = gr.Textbox(
                         label="FastAPI Server URL",
-                        value="http://localhost:8002",
-                        placeholder="http://localhost:8002"
+                        value=default_fastapi_url,
+                        placeholder=default_fastapi_url
                     )
                     language_choice = gr.Dropdown(
                         label="Language",
@@ -338,66 +603,59 @@ def create_interface():
                         value="en"
                     )
 
-        with gr.Row(equal_height=True):
-            # Left Column - User Input and Controls
-            with gr.Column(scale=1):
-                gr.Markdown("## 📝 Input & Controls")
+        # Main interface with tabs
+        with gr.Tabs():
+            # Submit Request Tab
+            with gr.Tab("🚀 Submit Request"):
+                with gr.Row(equal_height=True):
+                    # Left Column - User Input and Controls
+                    with gr.Column(scale=1):
+                        gr.Markdown("## 📝 Input & Controls")
 
-                # File upload section
-                with gr.Group():
-                    gr.Markdown("### 📁 Upload Files")
-                    file_input = gr.File(
-                        label="Upload Files",
-                        file_count="multiple",
-                        file_types=None,
-                        height=100
-                    )
-                    file_status = gr.Markdown("No files uploaded")
+                        # File upload section
+                        with gr.Group():
+                            gr.Markdown("### 📁 Upload Files")
+                            file_input = gr.File(
+                                label="Upload Files",
+                                file_count="multiple",
+                                file_types=None,
+                                height=100
+                            )
+                            file_status = gr.Markdown("No files uploaded")
 
-                # User input section
-                with gr.Group():
-                    gr.Markdown("### 💬 Your Request")
-                    user_input = gr.Textbox(
-                        label="Describe what you want the agent to do",
-                        placeholder="Enter your request here...\n\nExamples:\n• Analyze the uploaded data\n• Extract key information from documents\n• Perform calculations or analysis\n• Generate reports or summaries",
-                        lines=5,
-                        max_lines=10
-                    )
+                        # User input section
+                        with gr.Group():
+                            gr.Markdown("### 💬 Your Request")
+                            user_input = gr.Textbox(
+                                label="Describe what you want the agent to do",
+                                placeholder="Enter your request here...\n\nExamples:\n• Analyze the uploaded data\n• Extract key information from documents\n• Perform calculations or analysis\n• Generate reports or summaries",
+                                lines=5,
+                                max_lines=10
+                            )
 
-                    with gr.Row():
-                        submit_btn = gr.Button("🚀 Process", variant="primary", scale=2)
-                        clear_btn = gr.Button("🗑️ Clear", variant="secondary", scale=1)
+                            with gr.Row():
+                                submit_btn = gr.Button("🚀 Process", variant="primary", scale=2)
+                                clear_btn = gr.Button("🗑️ Clear", variant="secondary", scale=1)
 
-                # Status section
-                with gr.Group():
-                    gr.Markdown("### 📊 Status")
-                    status_display = gr.Markdown(
-                        """## 📊 Ready to Process
+                        # Status section
+                        with gr.Group():
+                            gr.Markdown("### 📊 Status")
+                            status_display = gr.Markdown(
+                                """## 📊 Ready to Process
 
 **Status:** 🟢 Waiting for input
 **Server:** Not connected
 
-Ready to process your request...
-""",
-                        height=150
-                    )
+Ready to process your request...""",
+                                height=150
+                            )
 
-                    with gr.Row():
-                        download_report = gr.File(
-                            label="📥 Download Report",
-                            visible=False
-                        )
-                        download_thinking = gr.File(
-                            label="📥 Download Thinking Process",
-                            visible=False
-                        )
+                    # Right Column - Results Display
+                    with gr.Column(scale=1):
+                        gr.Markdown("## 📋 Results")
 
-            # Right Column - Results Display
-            with gr.Column(scale=1):
-                gr.Markdown("## 📋 Results")
-
-                results_display = gr.Markdown(
-                    """## 📋 Results Panel
+                        results_display = gr.Markdown(
+                            """## 📋 Results Panel
 
 Ready to display your results...
 
@@ -408,10 +666,106 @@ Ready to display your results...
 3. Click "Process" to start
 4. Results will appear here
 
-The system will communicate with the FastAPI server and display results without streaming.
-""",
-                    height=600
-                )
+Requests are submitted immediately to FastAPI queue.
+You can safely close the page after submission.""",
+                            height=600
+                        )
+
+            # Check Status Tab
+            with gr.Tab("🔍 Check Status"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("## 🔍 Check Request Status")
+
+                        with gr.Group():
+                            gr.Markdown("### 📋 Session Selection")
+
+                            # Refresh session list button
+                            refresh_status_history_btn = gr.Button("🔄 Refresh Session List", variant="secondary")
+
+                            # Session selector dropdown
+                            status_session_selector = gr.Dropdown(
+                                label="Select a session to check status",
+                                choices=get_session_history(default_fastapi_url),
+                                value="",
+                                interactive=True
+                            )
+
+                            with gr.Row():
+                                check_btn = gr.Button("🔍 Check Status", variant="primary", scale=2)
+                                clear_status_btn = gr.Button("🗑️ Clear", variant="secondary", scale=1)
+
+                    with gr.Column(scale=1):
+                        gr.Markdown("## 📋 Status Results")
+
+                        status_results = gr.Markdown(
+                            """## 📋 Status Check
+
+Select a session from the dropdown to check status and view complete snapshots.
+
+**Features:**
+- Real-time status updates
+- Complete snapshots view (no truncation)
+- Full session history with scrollable window
+- Download results when completed
+
+**Instructions:**
+1. Click "🔄 Refresh Session List" to load all sessions
+2. Select a session from the dropdown (shows both active and completed sessions)
+3. Click "🔍 Check Status"
+
+All snapshots are displayed in full in a scrollable window without any character limits or truncation.""",
+                            max_height="600px"
+                        )
+
+                        # Only show session ZIP download when completed
+                        status_download_zip = gr.File(
+                            label="📥 Download Session Files",
+                            visible=False
+                        )
+
+            # Stop Task Tab
+            with gr.Tab("🛑 Stop Task"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("## 🛑 Stop Running Task")
+
+                        with gr.Group():
+                            gr.Markdown("### 📋 Select Session")
+
+                            # Refresh history button
+                            refresh_stop_history_btn = gr.Button("🔄 Refresh Session List", variant="secondary")
+
+                            # History selector dropdown
+                            stop_session_selector = gr.Dropdown(
+                                label="Select a session to stop",
+                                choices=get_session_history(default_fastapi_url),
+                                value="",
+                                interactive=True
+                            )
+
+                            with gr.Row():
+                                stop_task_btn = gr.Button("🛑 Stop Selected Task", variant="primary", scale=2)
+                                clear_stop_btn = gr.Button("🗑️ Clear", variant="secondary", scale=1)
+
+                    with gr.Column(scale=1):
+                        gr.Markdown("## 📋 Stop Results")
+
+                        stop_results = gr.Markdown(
+                            """## 🛑 Stop Task
+
+Select a session from the dropdown above to stop a running or queued task.
+
+**Instructions:**
+1. Click "Refresh Session List" to update the list
+2. Select a session from the dropdown
+3. Click "Stop Selected Task"
+4. Confirmation will appear here
+
+**Note:** You can only stop tasks that are currently queued or processing.
+Completed tasks cannot be stopped.""",
+                            height=400
+                        )
 
         # Event handlers
         def update_file_status(files):
@@ -425,8 +779,7 @@ The system will communicate with the FastAPI server and display results without 
 **Status:** 🟢 Waiting for input
 **Server:** Not connected
 
-Ready to process your request...
-""",  # Reset status
+Ready to process your request...""",  # Reset status
                 """## 📋 Results Panel
 
 Ready to display your results...
@@ -438,11 +791,62 @@ Ready to display your results...
 3. Click "Process" to start
 4. Results will appear here
 
-The system will communicate with the FastAPI server and display results without streaming.
-""",  # Reset results
-                gr.update(visible=False),  # Hide download buttons
-                gr.update(visible=False)
+Requests are submitted immediately to FastAPI queue.
+You can safely close the page after submission."""  # Reset results
             )
+
+        def clear_status_interface():
+            return (
+                "",  # Clear dropdown selection
+                """## 📋 Status Check
+
+Select a session from the dropdown to check status and view complete snapshots.
+
+**Features:**
+- Real-time status updates
+- Complete snapshots view (no truncation)
+- Full session history
+- Download results when completed
+
+**Instructions:**
+1. Click "🔄 Refresh Session List" to load all sessions
+2. Select a session from the dropdown (shows both active and completed sessions)
+3. Click "🔍 Check Status"
+
+All snapshots are displayed in full without any character limits or truncation.""",  # Reset status results
+                gr.update(visible=False)  # Hide download button
+            )
+
+        def clear_stop_interface():
+            return (
+                "",  # Clear selection
+                """## 🛑 Stop Task
+
+Select a session from the dropdown above to stop a running or queued task.
+
+**Instructions:**
+1. Click "Refresh Session List" to update the list
+2. Select a session from the dropdown
+3. Click "Stop Selected Task"
+4. Confirmation will appear here
+
+**Note:** You can only stop tasks that are currently queued or processing.
+Completed tasks cannot be stopped."""  # Reset stop results
+            )
+
+        def refresh_stop_history():
+            """Refresh the stop task session list"""
+            return gr.update(choices=get_session_history(server_url.value), value="")
+
+        def refresh_status_history():
+            """Refresh the status check session list"""
+            return gr.update(choices=get_session_history(server_url.value), value="")
+
+        async def check_status_from_dropdown(selected_session_id, server_url_value):
+            """Check status using dropdown selection"""
+            if not selected_session_id:
+                return await check_status_with_history("", server_url_value)
+            return await check_status_with_history(selected_session_id, server_url_value)
 
         # Wire up events
         file_input.change(
@@ -454,34 +858,80 @@ The system will communicate with the FastAPI server and display results without 
         submit_btn.click(
             fn=process_request,
             inputs=[user_input, file_input, server_url, language_choice],
-            outputs=[results_display, status_display, download_report, download_thinking]
+            outputs=[results_display, status_display]
         )
 
         clear_btn.click(
             fn=clear_interface,
-            outputs=[user_input, status_display, results_display, download_report, download_thinking]
+            outputs=[user_input, status_display, results_display]
         )
 
         # Allow Enter key to submit
         user_input.submit(
             fn=process_request,
             inputs=[user_input, file_input, server_url, language_choice],
-            outputs=[results_display, status_display, download_report, download_thinking]
+            outputs=[results_display, status_display]
+        )
+
+        # Status checking events
+        # Refresh status session list
+        refresh_status_history_btn.click(
+            fn=refresh_status_history,
+            outputs=[status_session_selector]
+        )
+
+        # Check status using dropdown selection
+        check_btn.click(
+            fn=check_status_from_dropdown,
+            inputs=[status_session_selector, server_url],
+            outputs=[status_results, status_download_zip]
+        )
+
+        clear_status_btn.click(
+            fn=clear_status_interface,
+            outputs=[status_session_selector, status_results, status_download_zip]
+        )
+
+        # Stop task events
+        refresh_stop_history_btn.click(
+            fn=refresh_stop_history,
+            outputs=[stop_session_selector]
+        )
+
+        stop_task_btn.click(
+            fn=stop_task_by_session_id,
+            inputs=[stop_session_selector, server_url],
+            outputs=[stop_results]
+        )
+
+        clear_stop_btn.click(
+            fn=clear_stop_interface,
+            outputs=[stop_session_selector, stop_results]
+        )
+
+        # Initialize session lists on load
+        demo.load(
+            fn=lambda url: (
+                refresh_status_history(),
+                refresh_stop_history()
+            ),
+            inputs=[server_url],
+            outputs=[status_session_selector, stop_session_selector]
         )
 
     return demo
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Gradio Interface for FastAPI Agent Server")
-    parser.add_argument("--server_port", type=int, default=7862, help="Port to run the Gradio server on (default: 7862)")
-    parser.add_argument("--fastapi_url", type=str, default="http://localhost:8002", help="FastAPI server URL")
+    parser = argparse.ArgumentParser(description="Simplified Gradio Interface for FastAPI Agent Server")
+    parser.add_argument("--server_port", type=int, default=7861, help="Port to run the Gradio server on (default: 7861)")
+    parser.add_argument("--fastapi_url", type=str, default="http://localhost:8001", help="FastAPI server URL")
     args = parser.parse_args()
 
-    print(f"Starting Gradio interface on port {args.server_port}")
+    print(f"Starting simplified Gradio interface on port {args.server_port}")
     print(f"Configured to connect to FastAPI server at: {args.fastapi_url}")
 
-    demo = create_interface()
+    demo = create_interface(args.fastapi_url)
     demo.launch(
         server_name="0.0.0.0",
         server_port=args.server_port,
