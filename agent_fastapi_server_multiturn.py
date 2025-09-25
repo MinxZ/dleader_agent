@@ -49,6 +49,8 @@ from cloud_storage_manager import cloud_storage_manager
 from dleader_agent.agent.a1 import A1
 # Import unified session manager
 from unified_session_manager import get_unified_session_manager
+# Import enhanced multi-turn handler
+from enhanced_multiturn_handler import EnhancedMultiTurnHandler
 
 # Language and timezone configurations
 JST = timezone(timedelta(hours=9))
@@ -95,7 +97,7 @@ class ConversationTurn(BaseModel):
     query: str
     response_content: Optional[str] = None
     final_report: Optional[str] = None
-    files: Optional[Dict[str, str]] = None
+    files: Optional[Dict[str, Any]] = None  # Changed to Any to support richer file metadata
     timestamp: str
     status: str = "processing"
 
@@ -162,6 +164,8 @@ class UserRequest:
 
     def _build_enhanced_message(self):
         """Build enhanced message with previous context for multi-turn conversations"""
+        # For backward compatibility, keep the simple version
+        # The actual enhanced context will be built when processing the request
         if self.is_continuation and self.previous_context:
             return f"""Previous conversation context:
 {self.previous_context}
@@ -183,6 +187,9 @@ class QueueManager:
 
         # Multi-turn session storage
         self.multiturn_sessions = {}  # session_id -> MultiTurnSession
+
+        # Initialize enhanced multi-turn handler
+        self.multiturn_handler = EnhancedMultiTurnHandler(cloud_storage_manager)
 
         # Create persistent storage directory
         self.sessions_storage_dir = os.path.join(os.getcwd(), "session_storage")
@@ -879,7 +886,39 @@ class QueueManager:
             if turn.turn_number == turn_number:
                 turn.response_content = response_content
                 turn.final_report = final_report
-                turn.files = files
+
+                # Enhanced file tracking with metadata
+                if files:
+                    # Convert simple file paths to richer metadata
+                    enhanced_files = {}
+                    for file_name, file_path in (files.items() if isinstance(files, dict) else enumerate(files)):
+                        if isinstance(file_path, str):
+                            enhanced_files[file_name if isinstance(files, dict) else str(file_path)] = {
+                                'path': file_path,
+                                'turn': turn_number,
+                                'created_at': datetime.now().isoformat()
+                            }
+                        else:
+                            enhanced_files[file_name] = file_path
+                    turn.files = enhanced_files
+                else:
+                    # Check session folder for any generated files during this turn
+                    session_path = f"session_storage/{session_id}_turn_{turn_number}"
+                    if os.path.exists(session_path):
+                        generated_files = {}
+                        for file_name in os.listdir(session_path):
+                            file_path = os.path.join(session_path, file_name)
+                            if os.path.isfile(file_path):
+                                generated_files[file_name] = {
+                                    'path': file_path,
+                                    'turn': turn_number,
+                                    'created_at': datetime.now().isoformat()
+                                }
+                        if generated_files:
+                            turn.files = generated_files
+                    else:
+                        turn.files = files
+
                 turn.status = "completed"
                 break
 
@@ -1014,6 +1053,30 @@ class QueueManager:
                             os.remove(file_path)
                         except:
                             pass  # Ignore cleanup errors
+
+            # For multi-turn sessions, ensure all previous files are available
+            if user_request.is_continuation and hasattr(user_request, 'all_turn_files'):
+                user_request.progress_queue.put({"type": "status", "message": "Checking for files from previous turns..."})
+                # Use the enhanced handler to ensure all files are available
+                if hasattr(self, 'multiturn_handler'):
+                    try:
+                        import asyncio
+                        loop = asyncio.new_event_loop()
+                        local_files = loop.run_until_complete(
+                            self.multiturn_handler.ensure_files_available(
+                                session_id=getattr(user_request, 'original_session_id', user_request.session_id),
+                                required_files=user_request.all_turn_files,
+                                session_path=session_path
+                            )
+                        )
+                        loop.close()
+                        if local_files:
+                            user_request.progress_queue.put({
+                                "type": "status",
+                                "message": f"Restored {len(local_files)} files from previous turns"
+                            })
+                    except Exception as e:
+                        print(f"Warning: Could not restore previous turn files: {e}")
 
             # Load ALL files from session folder into agent's data lake (including previous turns)
             agent.data_lake_dict = {}
@@ -2538,20 +2601,28 @@ async def continue_session(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Build context from previous turns
-    previous_context = multiturn_session.accumulated_context
+    # Build enhanced context using the handler
+    enhanced_context = queue_manager.multiturn_handler.build_enhanced_context(
+        multiturn_session=multiturn_session,
+        current_message=message,
+        uploaded_files=uploaded_file_paths,
+        include_file_list=True
+    )
 
-    # Create user request with context
+    # Create user request with enhanced context
     user_request = UserRequest(
         session_id=f"{session_id}_turn_{turn_number}",  # Unique ID for this turn
         message=message,
         language=language,
         uploaded_files=uploaded_file_paths,
         is_continuation=True,
-        previous_context=previous_context,
+        previous_context=enhanced_context['enhanced_message'],  # Use the enhanced message as context
         turn_number=turn_number,
         user_id=user_id
     )
+
+    # Store file metadata for tracking
+    user_request.all_turn_files = enhanced_context.get('all_files', {})
 
     # Store reference to original multi-turn session
     user_request.original_session_id = session_id
