@@ -1099,17 +1099,23 @@ Please wait while I process your follow-up request..."""
             outputs=[continue_query]
         )
 
-        # Trash Management Tab
+    return demo
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Simplified Gradio Interface for FastAPI Agent Server")
     parser.add_argument("--server_port", type=int, default=7861, help="Port to run the Gradio server on (default: 7861)")
     parser.add_argument("--fastapi_url", type=str, default="http://localhost:8001", help="FastAPI server URL")
     args = parser.parse_args()
 
-    print(f"Starting simplified Gradio interface on port {args.server_port}")
-    print(f"Configured to connect to FastAPI server at: {args.fastapi_url}")
+    # Ensure URL has protocol
+    fastapi_url = args.fastapi_url
+    if not fastapi_url.startswith(('http://', 'https://')):
+        fastapi_url = f"http://{fastapi_url}"
 
-    demo = create_interface(args.fastapi_url)
+    print(f"Starting simplified Gradio interface on port {args.server_port}")
+    print(f"Configured to connect to FastAPI server at: {fastapi_url}")
+
+    demo = create_interface(fastapi_url)
     demo.launch(
         server_name="0.0.0.0",
         server_port=args.server_port,
