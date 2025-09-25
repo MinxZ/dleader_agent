@@ -13,8 +13,13 @@ This FastAPI server provides:
 """
 
 import asyncio
+import glob
+import json
+import multiprocessing
 import os
+import queue
 import shutil
+import signal
 import sys
 import tempfile
 import threading
@@ -24,21 +29,26 @@ import zipfile
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import List, Optional, Dict, Any
-import queue
-import json
+from multiprocessing import Process
+from multiprocessing import Queue as MPQueue
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+import pandas as pd
+import uvicorn
+from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-import uvicorn
-import pandas as pd
 
 # Add current directory to path for imports
 sys.path.insert(0, os.getcwd())
 
+# Import cloud storage manager
+from cloud_storage_manager import cloud_storage_manager
 from dleader_agent.agent.a1 import A1
+# Import unified session manager
+from unified_session_manager import get_unified_session_manager
 
 # Language and timezone configurations
 JST = timezone(timedelta(hours=9))
@@ -56,6 +66,7 @@ class ChatRequest(BaseModel):
     message: str
     language: Language = Language.EN
     session_id: Optional[str] = None
+    user_id: Optional[str] = None
 
 class ChatResponse(BaseModel):
     session_id: str
@@ -93,21 +104,33 @@ class MultiTurnSession(BaseModel):
     created_at: str
     last_updated: str
     language: Language
+    user_id: Optional[str] = None
     total_turns: int = 0
     current_turn: int = 0
     turns: List[ConversationTurn] = []
     accumulated_context: str = ""
     session_status: str = "active"  # active, completed, error
 
+    @property
+    def first_query(self) -> str:
+        """Get the first query from the turns"""
+        return self.turns[0].query if self.turns else ""
+
+    @property
+    def latest_query(self) -> str:
+        """Get the latest query from the turns"""
+        return self.turns[-1].query if self.turns else ""
+
 class ContinueRequest(BaseModel):
     session_id: str
     message: str
     language: Language = Language.EN
+    user_id: Optional[str] = None
 
 # Queue Management System
 class UserRequest:
     def __init__(self, session_id: str, message: str, language: Language, uploaded_files: List[str] = None,
-                 is_continuation: bool = False, previous_context: str = "", turn_number: int = 1):
+                 is_continuation: bool = False, previous_context: str = "", turn_number: int = 1, user_id: str = None):
         self.session_id = session_id
         self.message = message
         self.language = language
@@ -119,12 +142,17 @@ class UserRequest:
         self.error = None
         self.is_complete = False
         self.is_cancelled = False
-        self.agent_thread = None
+        self.agent_thread = None  # Will be replaced with process
+        self.agent_process = None  # Process for agent execution
+        self.process_queue = None  # Multiprocessing queue for IPC
         self.json_result = None  # Store structured JSON result
         self.periodic_snapshots = []  # Store periodic JSON snapshots
         self.last_snapshot_time = None  # Track last snapshot time
         self.session_path = None  # Store session path for JSON updates
         self.all_progress_updates = []  # Store all progress updates permanently
+        self.user_id = user_id  # User ownership tracking
+        self.task_start_time = None  # Track when task actually starts processing
+        self.stop_requested = False  # Flag to signal stop request
 
         # Multi-turn specific attributes
         self.is_continuation = is_continuation
@@ -234,6 +262,33 @@ class QueueManager:
             # Add new updates to permanent storage
             user_request.all_progress_updates.extend(new_progress_updates)
 
+            # Keep only the latest snapshot_saved and thinking_update items
+            def filter_latest_updates(updates):
+                filtered = []
+                latest_snapshot = None
+                latest_thinking = None
+
+                # Find the latest snapshot_saved and thinking_update
+                for update in updates:
+                    if update.get("type") == "snapshot_saved":
+                        latest_snapshot = update
+                    elif update.get("type") == "thinking_update":
+                        latest_thinking = update
+                    else:
+                        # Keep all other types as they are
+                        filtered.append(update)
+
+                # Add only the latest snapshot_saved and thinking_update at the end
+                if latest_snapshot:
+                    filtered.append(latest_snapshot)
+                if latest_thinking:
+                    filtered.append(latest_thinking)
+
+                return filtered
+
+            # Apply filtering to keep only latest snapshot_saved and thinking_update
+            user_request.all_progress_updates = filter_latest_updates(user_request.all_progress_updates)
+
             # Save session to persistent storage
             self._save_session_to_storage(user_request)
 
@@ -249,7 +304,8 @@ class QueueManager:
                 "created_at": user_request.created_at.isoformat(),
                 "json_result": user_request.json_result,
                 "periodic_snapshots": user_request.periodic_snapshots,
-                "snapshot_count": len(user_request.periodic_snapshots)
+                "snapshot_count": len(user_request.periodic_snapshots),
+                "user_id": getattr(user_request, 'user_id', None)  # Include user_id for security
             }
 
         # Try to load from persistent storage if not in active sessions
@@ -323,6 +379,7 @@ class QueueManager:
             user_request.status = "cancelled"
             user_request.is_complete = True
             user_request.error = "Task was cancelled by user"
+            user_request.stop_requested = True  # Set stop flag
 
             # Add cancellation progress update
             user_request.progress_queue.put({
@@ -331,13 +388,144 @@ class QueueManager:
                 "timestamp": datetime.now().isoformat()
             })
 
-            # If currently processing, we can't directly stop the thread,
-            # but the processing loop will check is_cancelled flag
-            if user_request.agent_thread and user_request.agent_thread.is_alive():
-                # The processing function will check is_cancelled periodically
-                pass
+            # Force stop the agent process if running
+            if hasattr(user_request, 'agent_process') and user_request.agent_process and user_request.agent_process.is_alive():
+                pid = user_request.agent_process.pid
+                print(f"Terminating process tree for session {session_id} (PID: {pid})")
+
+                try:
+                    import psutil
+
+                    # Get the process and all its children
+                    parent = psutil.Process(pid)
+                    children = parent.children(recursive=True)
+
+                    # Terminate all children first
+                    for child in children:
+                        try:
+                            print(f"  Terminating child process PID {child.pid}")
+                            child.terminate()
+                        except:
+                            pass
+
+                    # Then terminate parent
+                    user_request.agent_process.terminate()
+
+                    # Wait for graceful termination
+                    try:
+                        user_request.agent_process.join(timeout=2.0)
+                    except:
+                        pass
+
+                    # If still alive, force kill everything
+                    if user_request.agent_process.is_alive():
+                        print(f"Force killing process tree for session {session_id}")
+
+                        # Kill all children
+                        for child in children:
+                            try:
+                                child.kill()
+                            except:
+                                pass
+
+                        # Kill parent
+                        user_request.agent_process.kill()
+                        time.sleep(0.5)
+
+                except Exception as e:
+                    print(f"Error using psutil, falling back to simple kill: {e}")
+                    # Fallback to simple terminate/kill
+                    user_request.agent_process.terminate()
+                    time.sleep(2)
+                    if user_request.agent_process.is_alive():
+                        user_request.agent_process.kill()
+
+                # Verify it's dead
+                if not user_request.agent_process.is_alive():
+                    print(f"SUCCESS: Process tree for session {session_id} terminated successfully")
+                else:
+                    print(f"WARNING: Process for session {session_id} may still be running")
+
+            # Also check for legacy thread-based execution
+            elif hasattr(user_request, 'agent_thread') and user_request.agent_thread and user_request.agent_thread.is_alive():
+                # Legacy thread handling
+                print(f"WARNING: Session {session_id} using thread-based execution (cannot force kill)")
+                stopped = self._wait_and_verify_stop(user_request, session_id, max_wait=3)
+                if not stopped:
+                    print(f"ERROR: Thread for session {session_id} could not be stopped gracefully!")
+
+            # Move any generated files to session folder to keep workspace clean
+            self._move_generated_files_to_session(user_request)
+
+            # Save cancelled session state to storage and trigger cloud upload
+            self._save_session_to_storage(user_request)
+
+            # Ensure S3 upload for cancelled session
+            self._trigger_s3_upload_for_session(user_request)
 
             return True
+
+    def _wait_and_verify_stop(self, user_request: UserRequest, session_id: str, max_wait: int = 10) -> bool:
+        """Wait for thread to stop and verify it's really stopped"""
+        if not hasattr(user_request, 'agent_thread') or not user_request.agent_thread:
+            return True
+
+        print(f"Waiting for thread {session_id} to stop (max {max_wait} seconds)...")
+
+        # Check every 0.5 seconds
+        for i in range(max_wait * 2):
+            if not user_request.agent_thread.is_alive():
+                print(f"Thread stopped after {i * 0.5} seconds")
+                return True
+            time.sleep(0.5)
+
+        # Final check
+        return not user_request.agent_thread.is_alive()
+
+    def _trigger_s3_upload_for_session(self, user_request: UserRequest):
+        """Trigger S3 upload for a completed/cancelled session"""
+        try:
+            # Create zip if session has files
+            if user_request.session_path and os.path.exists(user_request.session_path):
+                zip_path = create_session_zip(user_request.session_path, save_to_chat_zips=True)
+                print(f"Created zip for S3 upload: {zip_path}")
+
+            # Prepare session data for cloud upload
+            session_data = {
+                "session_id": user_request.session_id,
+                "message": user_request.message,
+                "language": user_request.language.value if hasattr(user_request.language, 'value') else user_request.language,
+                "status": user_request.status,
+                "is_complete": user_request.is_complete,
+                "is_cancelled": user_request.is_cancelled,
+                "error": user_request.error,
+                "result": user_request.result,
+                "json_result": user_request.json_result,
+                "user_id": user_request.user_id,
+                "session_path": user_request.session_path,
+                "created_at": user_request.created_at.isoformat() if hasattr(user_request.created_at, 'isoformat') else str(user_request.created_at)
+            }
+
+            # Upload to cloud asynchronously
+            def upload_in_thread():
+                import asyncio
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(cloud_storage_manager.upload_session_to_cloud(
+                        user_request.session_id, session_data
+                    ))
+                    loop.close()
+                    print(f"Successfully uploaded session {user_request.session_id} to S3")
+                except Exception as e:
+                    print(f"Failed to upload session {user_request.session_id} to S3: {e}")
+
+            upload_thread = threading.Thread(target=upload_in_thread, daemon=True)
+            upload_thread.start()
+            print(f"Initiated S3 upload for session {user_request.session_id}")
+
+        except Exception as e:
+            print(f"Error triggering S3 upload for session {user_request.session_id}: {e}")
 
     def _save_session_to_storage(self, user_request: UserRequest):
         """Save session data to persistent storage"""
@@ -357,13 +545,206 @@ class QueueManager:
                 "json_result": user_request.json_result,
                 "periodic_snapshots": user_request.periodic_snapshots,
                 "session_path": user_request.session_path,
-                "all_progress_updates": user_request.all_progress_updates
+                "all_progress_updates": user_request.all_progress_updates,
+                "user_id": user_request.user_id
             }
 
             with open(session_file, 'w', encoding='utf-8') as f:
                 json.dump(session_data, f, indent=2, ensure_ascii=False, default=str)
         except Exception as e:
             print(f"Error saving session {user_request.session_id} to storage: {e}")
+
+    def _move_generated_files_to_session(self, user_request: UserRequest):
+        """Move ANY newly generated files to session folder when task is cancelled or completed"""
+        try:
+            # Use existing session path - it should always be set during _process_user_request
+            session_path = user_request.session_path
+            if not session_path:
+                print(f"ERROR: No session_path set for session {user_request.session_id} - skipping file cleanup")
+                return
+
+            # Ensure the folder exists
+            if not os.path.exists(session_path):
+                os.makedirs(session_path, exist_ok=True)
+                print(f"Created session path {session_path}")
+
+            # Only look for files created after the task started
+            if not user_request.task_start_time:
+                print(f"No task start time recorded for session {user_request.session_id}, skipping file cleanup")
+                return
+
+            task_start_timestamp = user_request.task_start_time.timestamp()
+
+            # System files to never move
+            system_files = {
+                'requirements.txt', 'requirements_fastapi.txt', 'requirements-test.txt',
+                'pytest.ini', 'README.md', 'CLOUD_STORAGE_README.md', 'TEST_SUMMARY.md',
+                '.env', '.env.example', 'Dockerfile', 'docker-compose.yml', '.gitignore',
+                'setup.py', 'setup.cfg', 'pyproject.toml', 'Makefile', 'dleader_logo.jpg'
+            }
+
+            # Application Python files to skip
+            app_python_files = {
+                'agent_fastapi_server_multiturn.py', 'agent_gradio_fastapi_multiturn.py',
+                'cloud_storage_manager.py', 'unified_session_manager.py', 'a1.py',
+                'agent_fastapi_server.py', 'agent_interface_gradio.py'
+            }
+
+            import glob
+            import shutil
+
+            moved_files = []
+            moved_folders = []
+            skipped_large_files = []
+
+            # Directories to never move
+            system_dirs = {
+                'session_storage', 'results', 'chat_zips', 'multiturn_sessions',
+                'chat_sessions', 's3_mongodb', 'tests', 'docs', '__pycache__',
+                '.git', '.github', 'node_modules', 'venv', 'env', '.env',
+                'build', 'dist', 'egg-info', '.pytest_cache', '.vscode'
+            }
+
+            # Scan ALL files and directories in current directory
+            for file_path in glob.glob("*"):
+                filename = os.path.basename(file_path)
+
+                # Handle directories
+                if os.path.isdir(file_path):
+                    # Skip system directories
+                    if filename in system_dirs:
+                        continue
+
+                    # Check if directory was created after task started
+                    try:
+                        dir_mtime = os.path.getmtime(file_path)
+                        dir_ctime = os.path.getctime(file_path)
+                        dir_time = max(dir_mtime, dir_ctime)
+
+                        if dir_time >= task_start_timestamp:
+                            # Move entire directory to session folder
+                            dest_path = os.path.join(session_path, filename)
+
+                            # Handle duplicate directory names
+                            if os.path.exists(dest_path):
+                                counter = 1
+                                while os.path.exists(dest_path):
+                                    new_dirname = f"{filename}_{counter}"
+                                    dest_path = os.path.join(session_path, new_dirname)
+                                    counter += 1
+
+                            # Calculate total size of directory
+                            total_size = 0
+                            for dirpath, dirnames, filenames in os.walk(file_path):
+                                for f in filenames:
+                                    fp = os.path.join(dirpath, f)
+                                    if os.path.exists(fp):
+                                        total_size += os.path.getsize(fp)
+
+                            total_size_mb = total_size / (1024 * 1024)
+
+                            if total_size_mb > 500:
+                                print(f"Directory {filename} is too large ({total_size_mb:.1f}MB > 500MB limit), deleting...")
+                                shutil.rmtree(file_path)
+                                skipped_large_files.append(f"{filename}/ ({total_size_mb:.1f}MB)")
+                            else:
+                                shutil.move(file_path, dest_path)
+                                moved_folders.append(filename)
+                                print(f"Moved directory {filename}/ to session folder ({total_size_mb:.1f}MB)")
+                    except Exception as e:
+                        print(f"Error handling directory {filename}: {e}")
+
+                    continue  # Skip to next item
+
+                # Handle regular files
+                filename = os.path.basename(file_path)
+
+                # Skip system files and app files
+                if filename in system_files or filename in app_python_files:
+                    continue
+
+                # Skip test files
+                if filename.startswith('test_') and filename.endswith('.py'):
+                    continue
+
+                # Skip compiled Python files
+                if filename.endswith(('.pyc', '.pyo', '.pyd')):
+                    continue
+
+                # Check if file was created or modified after task started
+                try:
+                    file_mtime = os.path.getmtime(file_path)
+                    file_ctime = os.path.getctime(file_path)
+                    file_time = max(file_mtime, file_ctime)
+
+                    if file_time >= task_start_timestamp:
+                        # Check file size (skip/delete files > 500MB)
+                        file_size = os.path.getsize(file_path)
+                        file_size_mb = file_size / (1024 * 1024)
+
+                        if file_size_mb > 500:
+                            skipped_large_files.append(f"{filename} ({file_size_mb:.1f}MB)")
+                            print(f"Deleting large file {filename} ({file_size_mb:.1f}MB > 500MB limit)")
+                            try:
+                                os.remove(file_path)
+                                print(f"Deleted {filename}")
+                            except Exception as del_error:
+                                print(f"Could not delete {filename}: {del_error}")
+                        else:
+                            # Move file to session folder
+                            dest_path = os.path.join(session_path, filename)
+
+                            # Handle duplicate filenames
+                            if os.path.exists(dest_path):
+                                base, ext = os.path.splitext(filename)
+                                counter = 1
+                                while os.path.exists(dest_path):
+                                    new_filename = f"{base}_{counter}{ext}"
+                                    dest_path = os.path.join(session_path, new_filename)
+                                    counter += 1
+
+                            shutil.move(file_path, dest_path)
+                            moved_files.append(filename)
+                            print(f"Moved {filename} to session folder ({file_size_mb:.1f}MB)")
+
+                except Exception as e:
+                    # Continue with other files even if one fails
+                    pass
+
+            if moved_files or moved_folders or skipped_large_files:
+                summary_parts = []
+                if moved_files:
+                    summary_parts.append(f"{len(moved_files)} files")
+                if moved_folders:
+                    summary_parts.append(f"{len(moved_folders)} folders")
+                if summary_parts:
+                    summary = f"Moved {' and '.join(summary_parts)} to session folder"
+                else:
+                    summary = ""
+
+                if skipped_large_files:
+                    if summary:
+                        summary += f", deleted {len(skipped_large_files)} large items (>500MB)"
+                    else:
+                        summary = f"Deleted {len(skipped_large_files)} large items (>500MB)"
+                    print(f"Large items deleted: {', '.join(skipped_large_files)}")
+
+                print(f"{summary} for session {user_request.session_id}")
+
+                # Add progress update about file cleanup
+                user_request.progress_queue.put({
+                    "type": "cleanup",
+                    "message": summary,
+                    "files_moved": moved_files,
+                    "folders_moved": moved_folders,
+                    "files_deleted": skipped_large_files,
+                    "timestamp": datetime.now().isoformat()
+                })
+            else:
+                print(f"No new files found to move for session {user_request.session_id}")
+
+        except Exception as e:
+            print(f"Error moving generated files for session {user_request.session_id}: {e}")
 
     def _load_session_from_storage(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Load session data from persistent storage"""
@@ -387,7 +768,9 @@ class QueueManager:
                 "created_at": session_data["created_at"],
                 "json_result": session_data.get("json_result"),
                 "periodic_snapshots": session_data.get("periodic_snapshots", []),
-                "snapshot_count": len(session_data.get("periodic_snapshots", []))
+                "snapshot_count": len(session_data.get("periodic_snapshots", [])),
+                "session_path": session_data.get("session_path"),  # Include session path
+                "user_id": session_data.get("user_id")  # Include user_id
             }
         except Exception as e:
             print(f"Error loading session {session_id} from storage: {e}")
@@ -442,7 +825,7 @@ class QueueManager:
         except Exception as e:
             print(f"Error saving multi-turn session {session.session_id}: {e}")
 
-    def create_or_get_multiturn_session(self, session_id: str, language: Language) -> MultiTurnSession:
+    def create_or_get_multiturn_session(self, session_id: str, language: Language, user_id: str = None) -> MultiTurnSession:
         """Create new multi-turn session or get existing one"""
         if session_id in self.multiturn_sessions:
             return self.multiturn_sessions[session_id]
@@ -453,7 +836,8 @@ class QueueManager:
             session_id=session_id,
             created_at=now,
             last_updated=now,
-            language=language
+            language=language,
+            user_id=user_id
         )
         self.multiturn_sessions[session_id] = session
         self._save_multiturn_session(session)
@@ -509,6 +893,47 @@ class QueueManager:
         session.last_updated = datetime.now().isoformat()
         self._save_multiturn_session(session)
 
+        # Upload updated multi-turn session to cloud storage
+        try:
+            multiturn_session_data = {
+                "session_id": session.session_id,
+                "created_at": session.created_at,
+                "last_updated": session.last_updated,
+                "total_turns": session.total_turns,
+                "language": session.language,
+                "user_id": getattr(session, 'user_id', None),
+                "session_status": session.session_status,
+                "first_query": session.first_query,
+                "latest_query": session.latest_query,
+                "turns": [
+                    {
+                        "turn_number": turn.turn_number,
+                        "query": turn.query,
+                        "response_content": turn.response_content,
+                        "final_report": turn.final_report,
+                        "files": turn.files,
+                        "status": turn.status,
+                        "created_at": turn.timestamp
+                    } for turn in session.turns
+                ]
+            }
+            # Upload to cloud asynchronously
+            def upload_multiturn_in_thread():
+                import asyncio
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(cloud_storage_manager.upload_multiturn_session(multiturn_session_data))
+                    loop.close()
+                except Exception as e:
+                    print(f"Background multiturn cloud upload failed for session {session_id}: {e}")
+
+            upload_thread = threading.Thread(target=upload_multiturn_in_thread, daemon=True)
+            upload_thread.start()
+            print(f"Initiated cloud upload for multi-turn session {session_id}")
+        except Exception as e:
+            print(f"Failed to initiate cloud upload for multi-turn session {session_id}: {e}")
+
     def _process_queue(self):
         """Background thread to process queue requests"""
         while True:
@@ -539,12 +964,32 @@ class QueueManager:
         """Process a single user request"""
         try:
             user_request.status = "processing"
+            user_request.task_start_time = datetime.now()  # Record when task actually starts
             user_request.progress_queue.put({"type": "status", "message": "Starting agent initialization..."})
 
-            # Create session manager
-            session_manager = SessionManager()
-            session_path, session_name = session_manager.create_session_folder()
-            self.session_history[user_request.session_id] = session_manager
+            # For multi-turn sessions, use shared session folder
+            if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+                # This is a continuation turn - use existing session folder
+                original_session_id = user_request.original_session_id
+                if original_session_id in self.session_history:
+                    # Reuse existing session manager and folder
+                    session_manager = self.session_history[original_session_id]
+                    session_path = session_manager.get_session_path()
+                    session_name = os.path.basename(session_path)
+                else:
+                    # Create new shared session folder for multi-turn
+                    session_manager = SessionManager()
+                    session_path, session_name = session_manager.create_multiturn_session_folder(original_session_id)
+                    self.session_history[original_session_id] = session_manager
+
+                # Also store for this turn's session ID for compatibility
+                self.session_history[user_request.session_id] = session_manager
+            else:
+                # Single turn or first turn - create new session
+                session_manager = SessionManager()
+                session_path, session_name = session_manager.create_session_folder()
+                self.session_history[user_request.session_id] = session_manager
+
             user_request.session_path = session_path
 
             # Record start time for new file tracking
@@ -555,34 +1000,50 @@ class QueueManager:
             # Initialize agent
             agent = create_agent()
             
-            # Handle uploaded files
+            # Handle uploaded files for this turn
             if user_request.uploaded_files:
                 user_request.progress_queue.put({"type": "status", "message": "Processing uploaded files..."})
-                # Copy files to session folder
-                session_file_paths = []
+                # Copy files from temp_uploads to shared session folder
                 for file_path in user_request.uploaded_files:
                     if os.path.exists(file_path):
                         filename = os.path.basename(file_path)
                         new_path = os.path.join(session_path, filename)
                         shutil.copy2(file_path, new_path)
-                        session_file_paths.append(new_path)
-                
-                # Add files to agent's data lake
-                agent.data_lake_dict = {}
-                for file_path in session_file_paths:
-                    filename = os.path.basename(file_path)
-                    try:
-                        if filename.endswith('.csv'):
-                            data = pd.read_csv(file_path)
-                            agent.data_lake_dict[filename] = f"Dataset with {data.shape[0]} rows and {data.shape[1]} columns (Path: {file_path})"
-                        elif filename.endswith(('.xlsx', '.xls')):
-                            data = pd.read_excel(file_path)
-                            agent.data_lake_dict[filename] = f"Excel file with {data.shape[0]} rows and {data.shape[1]} columns (Path: {file_path})"
-                        else:
-                            agent.data_lake_dict[filename] = f"File uploaded (format auto-detected) (Path: {file_path})"
-                    except:
-                        agent.data_lake_dict[filename] = f"File uploaded (format auto-detected) (Path: {file_path})"
+                        # Clean up temp file
+                        try:
+                            os.remove(file_path)
+                        except:
+                            pass  # Ignore cleanup errors
+
+            # Load ALL files from session folder into agent's data lake (including previous turns)
+            agent.data_lake_dict = {}
+            if os.path.exists(session_path):
+                for filename in os.listdir(session_path):
+                    file_path = os.path.join(session_path, filename)
+                    if os.path.isfile(file_path) and not filename.startswith('.'):
+                        try:
+                            if filename.endswith('.csv'):
+                                data = pd.read_csv(file_path)
+                                agent.data_lake_dict[filename] = f"Dataset with {data.shape[0]} rows and {data.shape[1]} columns (Path: {file_path})"
+                            elif filename.endswith(('.xlsx', '.xls')):
+                                data = pd.read_excel(file_path)
+                                agent.data_lake_dict[filename] = f"Excel file with {data.shape[0]} rows and {data.shape[1]} columns (Path: {file_path})"
+                            elif filename.endswith(('.txt', '.md', '.json')):
+                                agent.data_lake_dict[filename] = f"Text file (Path: {file_path})"
+                            elif filename.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg')):
+                                agent.data_lake_dict[filename] = f"Image file (Path: {file_path})"
+                            else:
+                                agent.data_lake_dict[filename] = f"File (format auto-detected) (Path: {file_path})"
+                        except:
+                            agent.data_lake_dict[filename] = f"File (Path: {file_path})"
+
+            # Configure agent with all available files
+            if agent.data_lake_dict:
                 agent.configure()
+                user_request.progress_queue.put({
+                    "type": "status",
+                    "message": f"Loaded {len(agent.data_lake_dict)} files from session folder"
+                })
             
             # Set up streaming capture
             stream_capture = StreamingCapture()
@@ -601,7 +1062,6 @@ class QueueManager:
                             enhanced_message = f"""{base_message}
 
 注意: アップロードされたファイルは次の作業フォルダに保存されています: {session_path} ファイルを生成あるいは保存する場合は、作業フォルダに保存してください。コメントはできるだけ日本語で記述し、最終レポートも日本語で作成すること。 use plt.rcParams['font.family'] = ['Noto Sans CJK JP', 'DejaVu Sans' ] when plot
-
 重要 - 深い思考と洞察のガイドライン:
 あなたの役割は、直接的な質問への回答を超えて、深く思考し価値ある洞察を提供することです。以下を心がけてください：
 - 常により広範な含意と潜在的な改善点を考慮する
@@ -628,7 +1088,6 @@ class QueueManager:
                             enhanced_message = f"""{base_message}
 
 Note: The uploaded files are stored in the folder: {session_path}. If saving file, also save in it, it is the working folder.
-
 IMPORTANT - Enhanced Thinking and Insight Guidelines:
 Your role is to think deeply and provide valuable insights beyond just answering the direct question. You should:
 - Always consider the broader implications and potential improvements
@@ -650,112 +1109,291 @@ When working with molecules or chemical compounds, you MUST:
   * Plot molecular structures with functional groups color-coded
   * Create overlay plots comparing active vs inactive compounds
   * Visualize binding sites and molecular interactions
-  * Highlight pharmacophore features and important structural motifs"""
-                        
+  * Highlight pharmacophore features and important structural motifs
+
+🚨 CRITICAL REQUIREMENT - SAVING PLOTS AND FILES 🚨
+- YOU MUST SAVE ALL PLOTS TO FILES - THIS IS ABSOLUTELY MANDATORY
+- REPLACE plt.show() WITH plt.savefig() - ALWAYS!
+- STEP-BY-STEP PROCESS FOR EVERY PLOT:
+  1. Create your plot with plt.figure() or plt.subplots()
+  2. Add your data and formatting
+  3. SAVE the plot: plt.savefig('filename.svg', format='svg', bbox_inches='tight')
+  4. Close the plot: plt.close()
+  5. Verify file exists: print(f"Plot saved: {os.path.exists('filename.svg')}")
+
+- NEVER EVER use plt.show() - it only displays but DOES NOT SAVE files
+- ALWAYS use plt.savefig() or fig.savefig() to SAVE plots to files
+- REPLACE any plt.show() with plt.savefig('descriptive_name.svg', format='svg', bbox_inches='tight')
+
+- FORMAT EXAMPLES:
+  * JPG for all charts/graphs: plt.savefig('molecular_structures.jpg', format='jpeg', dpi=300, bbox_inches='tight')
+  * PNG only for transparency: plt.savefig('overlay_plot.png', format='png', dpi=300, bbox_inches='tight', transparent=True)
+
+- MANDATORY VERIFICATION: After plt.savefig(), ALWAYS check:
+  print(f"File saved successfully: {os.path.exists('your_filename.svg')}")
+
+- THE USER CANNOT SEE plt.show() - THEY NEED SAVED FILES!"""
+#   * SVG for all charts/graphs: plt.savefig('tpsa_pesticide_analysis.svg', format='svg', bbox_inches='tight')
                         _, result = agent.go(enhanced_message)
                         user_request.result = result
                 except Exception as e:
-                    user_request.error = str(e)
+                    import traceback
+
+                    # Get detailed traceback information
+                    tb_str = traceback.format_exc()
+                    error_details = f"Agent execution error: {str(e)}\n\nFull traceback:\n{tb_str}"
+                    user_request.error = error_details
+                    print(f"Detailed agent error for session {user_request.session_id}:\n{error_details}")
             
-            # Start agent processing
-            agent_thread = threading.Thread(target=run_agent)
-            user_request.agent_thread = agent_thread
-            agent_thread.start()
+            # Use process-based execution for true termination capability
+            # Create multiprocessing queues for communication
+            message_queue = MPQueue()
+            result_queue = MPQueue()
+
+            # Store queues in user_request
+            user_request.process_queue = result_queue
+
+            # Create and start process
+            agent_process = Process(
+                target=run_agent_in_process,
+                args=(message_queue, result_queue, user_request.enhanced_message, session_path)
+            )
+            user_request.agent_process = agent_process
+            agent_process.start()
+
+            print(f"Started agent process with PID: {agent_process.pid}")
 
             # Monitor progress
             accumulated_thinking = ""
             last_content_length = 0
             user_request.last_snapshot_time = time.time()
 
-            while agent_thread.is_alive():
+            # Monitor process instead of thread
+            while agent_process.is_alive():
                 # Check if task was cancelled
                 if user_request.is_cancelled:
                     user_request.progress_queue.put({
                         "type": "cancelled",
                         "message": "Task was cancelled by user"
                     })
+                    # Terminate the process immediately
+                    if agent_process.is_alive():
+                        agent_process.terminate()
+                        time.sleep(0.5)
+                        if agent_process.is_alive():
+                            agent_process.kill()  # Force kill if still alive
                     return  # Exit early if cancelled
 
-                current_content = stream_capture.get_content()
-                if len(current_content) > last_content_length:
-                    new_content = current_content[last_content_length:]
-                    accumulated_thinking += new_content
+                # Check for process results
+                try:
+                    while not result_queue.empty():
+                        msg = result_queue.get_nowait()
+                        if msg["type"] == "status":
+                            user_request.progress_queue.put({
+                                "type": "status",
+                                "message": msg["content"]
+                            })
+                        elif msg["type"] == "thinking_update":
+                            accumulated_thinking = msg["content"]
+                            user_request.progress_queue.put({
+                                "type": "thinking_update",
+                                "content": msg["content"],
+                                "accumulated": accumulated_thinking
+                            })
+                        elif msg["type"] == "snapshot":
+                            # Process snapshot from subprocess
+                            accumulated_thinking = msg["content"]
+                            snapshot = queue_manager.create_json_snapshot(
+                                user_request,
+                                accumulated_thinking,
+                                session_path
+                            )
+                            user_request.periodic_snapshots.clear()
+                            user_request.periodic_snapshots.append(snapshot)
 
-                    user_request.progress_queue.put({
-                        "type": "thinking_update",
-                        "content": new_content,
-                        "accumulated": accumulated_thinking
-                    })
-                    last_content_length = len(current_content)
+                            # Save snapshot to file
+                            try:
+                                # Delete old snapshot files
+                                for file in os.listdir(session_path):
+                                    if file.startswith('snapshot_') and file.endswith('.json'):
+                                        os.remove(os.path.join(session_path, file))
 
-                # Create periodic snapshots every 2 seconds
-                current_time = time.time()
-                if current_time - user_request.last_snapshot_time >= 2:
-                    snapshot = queue_manager.create_json_snapshot(
-                        user_request,
-                        accumulated_thinking,
-                        session_path
-                    )
+                                # Save new snapshot
+                                snapshot_filename = f"snapshot_latest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                                snapshot_path = os.path.join(session_path, snapshot_filename)
+                                with open(snapshot_path, 'w', encoding='utf-8') as f:
+                                    json.dump(snapshot, f, indent=2, ensure_ascii=False)
 
-                    # Delete all previous snapshots and keep only the latest one
-                    user_request.periodic_snapshots.clear()
-                    user_request.periodic_snapshots.append(snapshot)
-                    user_request.last_snapshot_time = current_time
+                                user_request.progress_queue.put({
+                                    "type": "snapshot_saved",
+                                    "message": f"Snapshot saved: {snapshot_filename}",
+                                    "snapshot": snapshot
+                                })
+                            except Exception as e:
+                                print(f"Error saving snapshot: {e}")
 
-                    # Delete previous snapshot files from session folder
-                    try:
-                        for file in os.listdir(session_path):
-                            if file.startswith('snapshot_') and file.endswith('.json'):
-                                os.remove(os.path.join(session_path, file))
-                    except Exception as e:
-                        print(f"Error deleting previous snapshot files: {e}")
+                        elif msg["type"] == "final_snapshot":
+                            accumulated_thinking = msg["content"]
+                            user_request.result = msg.get("result", "")
+                        elif msg["type"] == "result":
+                            user_request.result = msg["content"]
+                            accumulated_thinking = msg.get("output", "")
+                        elif msg["type"] == "error":
+                            user_request.error = msg["content"]
+                            print(f"Process error: {msg.get('traceback', msg['content'])}")
+                except:
+                    pass
 
-                    # Save latest snapshot to file
-                    try:
-                        snapshot_filename = f"snapshot_latest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                        snapshot_path = os.path.join(session_path, snapshot_filename)
-                        with open(snapshot_path, 'w', encoding='utf-8') as f:
-                            json.dump(snapshot, f, indent=2, ensure_ascii=False)
-
-                        user_request.progress_queue.put({
-                            "type": "snapshot_saved",
-                            "message": f"Latest snapshot saved: {snapshot_filename}",
-                            "snapshot_count": len(user_request.periodic_snapshots)
-                        })
-                    except Exception as e:
-                        print(f"Error saving snapshot: {e}")
-
-                time.sleep(0.5)
+                # Sleep briefly to avoid busy waiting
+                time.sleep(0.1)
             
-            # Wait for completion
-            agent_thread.join()
-            
-            # Get final content
-            final_content = stream_capture.get_content()
+            # Wait for process completion
+            agent_process.join()
+
+            # Get final results from queue
+            try:
+                while not result_queue.empty():
+                    msg = result_queue.get_nowait()
+                    if msg["type"] == "result":
+                        user_request.result = msg["content"]
+                        accumulated_thinking = msg.get("output", accumulated_thinking)
+                    elif msg["type"] == "error":
+                        user_request.error = msg["content"]
+            except:
+                pass
+
+            # Get final content (for backwards compatibility)
+            final_content = accumulated_thinking
+            if hasattr(locals(), 'stream_capture'):
+                final_content = stream_capture.get_content()
             if len(final_content) > last_content_length:
                 new_content = final_content[last_content_length:]
                 accumulated_thinking += new_content
             
-            # Scan for and move new files created during processing
+            # Scan for and move ALL new files created during processing
             try:
-                exclude_paths = {'chat_sessions', 'chat_zips', '__pycache__', '.git', '.vscode', 'node_modules', chat_sessions_path}
-                new_files = scan_for_new_files(current_path, start_time, exclude_paths)
+                # Define folders and files to exclude from scanning (working directories and system folders)
+                exclude_dirs = {
+                    # Working directories for this application
+                    'chat_sessions', 'chat_zips', 'session_storage', 'multiturn_sessions', 'temp_uploads',
 
-                # Filter out files that are already in chat_sessions folder
-                filtered_files = [f for f in new_files if not f.startswith(chat_sessions_path)]
+                    # Python cache and build directories
+                    '__pycache__', '.pytest_cache', 'build', 'dist', '*.egg-info', '.eggs',
 
-                if filtered_files:
-                    print(f"Found {len(filtered_files)} new files created during processing:")
-                    for file in filtered_files:
-                        print(f"  - {file}")
-                    moved_files = move_files_to_session(filtered_files, session_path)
-                    print(f"Moved {len(moved_files)} files to session folder")
+                    # Virtual environments
+                    'venv', 'env', '.venv', '.env', 'virtualenv', 'ENV', 'env.bak', 'venv.bak',
+
+                    # Version control
+                    '.git', '.svn', '.hg', '.bzr',
+
+                    # IDE and editor directories
+                    '.vscode', '.idea', '.eclipse', '.sublime', '*.swp', '*.swo',
+
+                    # JavaScript/Node
+                    'node_modules', 'bower_components', '.npm',
+
+                    # Testing and coverage
+                    'tests', 'test', '.tox', '.coverage', 'htmlcov', '.hypothesis',
+
+                    # Documentation
+                    'docs', 'documentation', '.sphinx',
+
+                    # Application specific
+                    's3_mongodb', 'migrations', 'logs', 'log', 'tmp', 'temp', 'cache',
+
+                    # OS specific
+                    '.DS_Store', 'Thumbs.db', '.Trash',
+
+                    # Jupyter/IPython
+                    '.ipynb_checkpoints', '.jupyter',
+
+                    # Database
+                    'db', 'database', 'data'
+                }
+
+                # System files to never move
+                system_files = {'requirements.txt', 'requirements_fastapi.txt', 'requirements-test.txt',
+                               'pytest.ini', 'README.md', 'CLOUD_STORAGE_README.md', 'TEST_SUMMARY.md',
+                               '.env', '.env.example', 'Dockerfile', 'docker-compose.yml', '.gitignore',
+                               'setup.py', 'setup.cfg', 'pyproject.toml', 'Makefile'}
+
+                # Python files that are part of the application
+                app_files = {'agent_fastapi_server_multiturn.py', 'agent_gradio_fastapi_multiturn.py',
+                            'cloud_storage_manager.py', 'unified_session_manager.py', 'a1.py'}
+
+                all_new_files = []
+
+                # Scan current directory and all subdirectories
+                for root, dirs, files in os.walk(current_path):
+                    # Skip excluded directories
+                    dirs[:] = [d for d in dirs if d not in exclude_dirs]
+
+                    # Skip if we're in an excluded directory
+                    if any(excluded in root for excluded in exclude_dirs):
+                        continue
+
+                    for file in files:
+                        # Skip system files and app files
+                        if file in system_files or file in app_files:
+                            continue
+
+                        # Skip Python cache files and compiled files
+                        if file.endswith(('.pyc', '.pyo', '.pyd', '.so', '.dll', '.dylib')):
+                            continue
+
+                        file_path = os.path.join(root, file)
+
+                        # Check if file was created after task started
+                        try:
+                            file_mtime = os.path.getmtime(file_path)
+                            if file_mtime > start_time:
+                                # Check file size (skip files > 500MB)
+                                file_size = os.path.getsize(file_path)
+                                file_size_mb = file_size / (1024 * 1024)
+
+                                if file_size_mb > 500:
+                                    print(f"Skipping large file {file_path} ({file_size_mb:.1f}MB > 500MB limit)")
+                                    # Optionally delete very large files
+                                    try:
+                                        os.remove(file_path)
+                                        print(f"Deleted large file {file_path}")
+                                    except:
+                                        pass
+                                    continue
+
+                                # Add to list of files to move
+                                all_new_files.append(file_path)
+
+                        except OSError:
+                            continue
+
+                if all_new_files:
+                    print(f"Found {len(all_new_files)} new files created during processing:")
+
+                    # Group files by type for logging
+                    image_files = [f for f in all_new_files if any(f.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp'])]
+                    data_files = [f for f in all_new_files if any(f.lower().endswith(ext) for ext in ['.csv', '.xlsx', '.xls', '.tsv', '.json'])]
+                    other_files = [f for f in all_new_files if f not in image_files and f not in data_files]
+
+                    print(f"  - {len(image_files)} image files")
+                    print(f"  - {len(data_files)} data files")
+                    print(f"  - {len(other_files)} other files")
+
+                    # Move all files to session folder
+                    moved_files = move_files_to_session(all_new_files, session_path)
+                    print(f"Successfully moved {len(moved_files)} files to session folder: {session_path}")
+
                     user_request.progress_queue.put({
                         "type": "status",
                         "message": f"Moved {len(moved_files)} new files to session folder"
                     })
+                else:
+                    print(f"No new files found to move (checked from time: {start_time})")
+
             except Exception as e:
                 print(f"Error handling new files: {e}")
+                import traceback
+                traceback.print_exc()
 
             # Save session files
             try:
@@ -864,6 +1502,13 @@ When working with molecules or chemical compounds, you MUST:
             # Mark as complete
             user_request.status = "completed"
             user_request.is_complete = True
+
+            # Move any generated files to session folder to keep workspace clean
+            queue_manager._move_generated_files_to_session(user_request)
+
+            # Trigger S3 upload for completed session
+            queue_manager._trigger_s3_upload_for_session(user_request)
+
             # Clean thinking content for completion update
             cleaned_thinking = queue_manager._clean_thinking_content(accumulated_thinking, user_request.message)
             completion_update = {
@@ -875,18 +1520,67 @@ When working with molecules or chemical compounds, you MUST:
             user_request.progress_queue.put(completion_update)
             user_request.all_progress_updates.append(completion_update)
 
+            # Clean up temp upload directory for this session
+            if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+                temp_upload_dir = os.path.join(os.getcwd(), "temp_uploads", user_request.original_session_id)
+            else:
+                temp_upload_dir = os.path.join(os.getcwd(), "temp_uploads", user_request.session_id)
+
+            if os.path.exists(temp_upload_dir):
+                try:
+                    shutil.rmtree(temp_upload_dir)
+                except Exception as e:
+                    print(f"Warning: Could not clean up temp upload directory {temp_upload_dir}: {e}")
+
             # Save final session state to persistent storage
             queue_manager._save_session_to_storage(user_request)
+
+            # Upload completed session to cloud storage
+            try:
+                session_data = {
+                    "session_id": user_request.session_id,
+                    "status": user_request.status,
+                    "is_complete": user_request.is_complete,
+                    "is_cancelled": user_request.is_cancelled,
+                    "error": user_request.error,
+                    "created_at": user_request.created_at.isoformat(),
+                    "query": user_request.message,
+                    "language": user_request.language,
+                    "user_id": user_request.user_id,
+                    "session_path": session_path,
+                    "all_progress_updates": user_request.all_progress_updates,
+                    "periodic_snapshots": user_request.periodic_snapshots,
+                    "result": user_request.result,
+                    "json_result": user_request.json_result
+                }
+                # Upload to cloud asynchronously (don't wait for completion)
+                def upload_in_thread():
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(cloud_storage_manager.upload_session_to_cloud(
+                            user_request.session_id, session_data
+                        ))
+                        loop.close()
+                    except Exception as e:
+                        print(f"Background cloud upload failed for session {user_request.session_id}: {e}")
+
+                upload_thread = threading.Thread(target=upload_in_thread, daemon=True)
+                upload_thread.start()
+                print(f"Initiated cloud upload for session {user_request.session_id}")
+            except Exception as e:
+                print(f"Failed to initiate cloud upload for session {user_request.session_id}: {e}")
 
             # Update multi-turn session if this is a turn
             if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
                 # Get file paths for the turn
                 files_dict = {
-                    'report_md': report_md_path,
-                    'thinking_process': thinking_process_path,
-                    'query_file': query_file_path,
-                    'session_zip': session_zip_path,
-                    'result_json': result_json_path
+                    'report_md': report_path,
+                    'thinking_process': thinking_path,
+                    'query_file': query_path,
+                    'session_zip': zip_file_path,
+                    'result_json': json_path
                 }
 
                 # Complete the turn in multi-turn session
@@ -902,6 +1596,10 @@ When working with molecules or chemical compounds, you MUST:
             user_request.status = "error"
             user_request.error = str(e)
             user_request.is_complete = True
+
+            # Move any generated files to session folder even on error
+            queue_manager._move_generated_files_to_session(user_request)
+
             error_update = {
                 "type": "error",
                 "error": str(e)
@@ -909,11 +1607,348 @@ When working with molecules or chemical compounds, you MUST:
             user_request.progress_queue.put(error_update)
             user_request.all_progress_updates.append(error_update)
 
+            # Clean up temp upload directory even on error
+            if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+                temp_upload_dir = os.path.join(os.getcwd(), "temp_uploads", user_request.original_session_id)
+            else:
+                temp_upload_dir = os.path.join(os.getcwd(), "temp_uploads", user_request.session_id)
+
+            if os.path.exists(temp_upload_dir):
+                try:
+                    shutil.rmtree(temp_upload_dir)
+                except Exception as cleanup_error:
+                    print(f"Warning: Could not clean up temp upload directory {temp_upload_dir}: {cleanup_error}")
+
             # Save failed session state to persistent storage
             queue_manager._save_session_to_storage(user_request)
 
+            # Upload failed session to cloud storage
+            try:
+                session_data = {
+                    "session_id": user_request.session_id,
+                    "status": user_request.status,
+                    "is_complete": user_request.is_complete,
+                    "is_cancelled": user_request.is_cancelled,
+                    "error": user_request.error,
+                    "created_at": user_request.created_at.isoformat(),
+                    "query": user_request.message,
+                    "language": user_request.language,
+                    "user_id": user_request.user_id,
+                    "session_path": user_request.session_path,
+                    "all_progress_updates": user_request.all_progress_updates,
+                    "periodic_snapshots": user_request.periodic_snapshots,
+                    "result": user_request.result,
+                    "json_result": user_request.json_result
+                }
+                # Upload to cloud asynchronously (don't wait for completion)
+                def upload_in_thread():
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(cloud_storage_manager.upload_session_to_cloud(
+                            user_request.session_id, session_data
+                        ))
+                        loop.close()
+                    except Exception as e:
+                        print(f"Background cloud upload failed for session {user_request.session_id}: {e}")
+
+                upload_thread = threading.Thread(target=upload_in_thread, daemon=True)
+                upload_thread.start()
+                print(f"Initiated cloud upload for failed session {user_request.session_id}")
+            except Exception as e:
+                print(f"Failed to initiate cloud upload for failed session {user_request.session_id}: {e}")
+
+        finally:
+            # Remove completed/cancelled sessions from active_sessions
+            # This is crucial for proper download functionality
+            if user_request.is_complete or user_request.is_cancelled:
+                if user_request.session_id in self.active_sessions:
+                    del self.active_sessions[user_request.session_id]
+                    print(f"Removed completed/cancelled session {user_request.session_id} from active sessions")
+
+    def get_all_stored_sessions(self) -> List[Dict[str, Any]]:
+        """Get all stored sessions from persistent storage - needed for unified session manager"""
+        sessions = []
+        try:
+            if os.path.exists(self.sessions_storage_dir):
+                for filename in os.listdir(self.sessions_storage_dir):
+                    if filename.endswith('.json'):
+                        session_id = filename[:-5]  # Remove .json extension
+                        try:
+                            session_file = os.path.join(self.sessions_storage_dir, filename)
+                            with open(session_file, 'r', encoding='utf-8') as f:
+                                session_data = json.load(f)
+                            sessions.append(session_data)
+                        except Exception as e:
+                            print(f"Error loading stored session {session_id}: {e}")
+        except Exception as e:
+            print(f"Error accessing stored sessions directory: {e}")
+        return sessions
+
 # Initialize queue manager
 queue_manager = QueueManager()
+
+# Process-based agent runner (defined at module level for pickling)
+def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced_message: str, session_path: str):
+    """
+    Run agent in a separate process for true termination capability
+    This function runs in a separate process and communicates via queues
+    """
+    import atexit
+    import glob
+    import io
+    import os
+    import shutil
+    import sys
+    import threading
+    import time
+    from contextlib import redirect_stdout
+
+    import psutil
+
+    # Record start time for file tracking
+    process_start_time = time.time()
+
+    # Track all child processes spawned by this process
+    parent_process = psutil.Process()
+
+    # Shared buffer for output capture
+    output_buffer = io.StringIO()
+    output_lock = threading.Lock()
+
+    def cleanup_subprocesses():
+        """Kill all child processes when parent terminates"""
+        try:
+            children = parent_process.children(recursive=True)
+            for child in children:
+                try:
+                    print(f"Terminating subprocess PID {child.pid}")
+                    child.terminate()
+                except:
+                    pass
+
+            # Give them time to terminate gracefully
+            _, alive = psutil.wait_procs(children, timeout=2)
+
+            # Force kill any remaining
+            for child in alive:
+                try:
+                    print(f"Force killing subprocess PID {child.pid}")
+                    child.kill()
+                except:
+                    pass
+        except:
+            pass
+
+    # Register cleanup function
+    atexit.register(cleanup_subprocesses)
+
+    # Also handle SIGTERM signal
+    import signal
+    def signal_handler(signum, frame):
+        cleanup_subprocesses()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    def send_periodic_snapshots():
+        """Send snapshots every 2 seconds while agent is running"""
+        while not agent_complete.is_set():
+            time.sleep(2)
+
+            with output_lock:
+                current_output = output_buffer.getvalue()
+
+            # Send snapshot with current output
+            result_queue.put({
+                "type": "snapshot",
+                "content": current_output,
+                "timestamp": time.time()
+            })
+
+            # Also send as thinking update for real-time display
+            if current_output:
+                result_queue.put({
+                    "type": "thinking_update",
+                    "content": current_output
+                })
+
+    # Event to signal agent completion
+    agent_complete = threading.Event()
+
+    # Start snapshot thread
+    snapshot_thread = threading.Thread(target=send_periodic_snapshots, daemon=True)
+    snapshot_thread.start()
+
+    try:
+        with redirect_stdout(output_buffer):
+            # Send status update
+            result_queue.put({
+                "type": "status",
+                "content": "Agent starting in separate process with snapshot tracking..."
+            })
+
+            # Create agent
+            from agent_fastapi_server_multiturn import create_agent
+            agent = create_agent()
+
+            # Send status
+            result_queue.put({
+                "type": "status",
+                "content": "Agent initialized, processing message..."
+            })
+
+            # Run agent (this blocks until complete)
+            _, result = agent.go(enhanced_message)
+
+            # Signal completion
+            agent_complete.set()
+
+            # Get final output
+            with output_lock:
+                final_output = output_buffer.getvalue()
+
+            # Send final result with complete output
+            result_queue.put({
+                "type": "result",
+                "content": result,
+                "output": final_output
+            })
+
+            # Send final snapshot
+            result_queue.put({
+                "type": "final_snapshot",
+                "content": final_output,
+                "result": result,
+                "timestamp": time.time()
+            })
+
+    except Exception as e:
+        import traceback
+        agent_complete.set()
+
+        with output_lock:
+            error_output = output_buffer.getvalue()
+
+        result_queue.put({
+            "type": "error",
+            "content": str(e),
+            "traceback": traceback.format_exc(),
+            "output": error_output
+        })
+    finally:
+        # Move generated files to session folder before exiting process
+        try:
+            print(f"Process: Starting file collection for session path: {session_path}")
+            print(f"Process: Session path exists: {os.path.exists(session_path)}")
+
+            # Ensure session folder exists
+            if not os.path.exists(session_path):
+                os.makedirs(session_path, exist_ok=True)
+                print(f"Process: Created session folder: {session_path}")
+
+            # System files to never move
+            system_files = {
+                'requirements.txt', 'requirements_fastapi.txt', 'requirements-test.txt',
+                'pytest.ini', 'README.md', 'CLOUD_STORAGE_README.md', 'TEST_SUMMARY.md',
+                '.env', '.env.example', 'Dockerfile', 'docker-compose.yml', '.gitignore',
+                'setup.py', 'setup.cfg', 'pyproject.toml', 'Makefile', 'dleader_logo.jpg'
+            }
+
+            # Application Python files to skip
+            app_python_files = {
+                'agent_fastapi_server_multiturn.py', 'agent_gradio_fastapi_multiturn.py',
+                'cloud_storage_manager.py', 'unified_session_manager.py', 'a1.py',
+                'agent_fastapi_server.py', 'agent_interface_gradio.py'
+            }
+
+            moved_count = 0
+            image_count = 0
+
+            # Scan for all files created during this process
+            all_files = glob.glob("*") + glob.glob("*/*")
+            print(f"Process: Scanning {len(all_files)} potential files")
+
+            for file_path in all_files:
+                # Skip directories and files in system folders
+                if os.path.isdir(file_path):
+                    continue
+
+                # Skip files in system directories
+                if any(file_path.startswith(d + '/') for d in ['chat_sessions', 'chat_zips',
+                       'session_storage', 'multiturn_sessions', 'temp_uploads', 's3_mongodb']):
+                    continue
+
+                filename = os.path.basename(file_path)
+
+                # Skip system files and app files
+                if filename in system_files or filename in app_python_files:
+                    continue
+
+                # Skip test files
+                if filename.startswith('test_') and filename.endswith('.py'):
+                    continue
+
+                # Skip compiled Python files
+                if filename.endswith(('.pyc', '.pyo', '.pyd')):
+                    continue
+
+                # Check if file was created or modified after process started
+                try:
+                    file_mtime = os.path.getmtime(file_path)
+                    file_ctime = os.path.getctime(file_path)
+                    file_time = max(file_mtime, file_ctime)
+
+                    if file_time >= process_start_time:
+                        # Check file size (skip files > 500MB)
+                        file_size = os.path.getsize(file_path)
+                        file_size_mb = file_size / (1024 * 1024)
+
+                        if file_size_mb > 500:
+                            print(f"Process: Deleting large file {filename} ({file_size_mb:.1f}MB)")
+                            os.remove(file_path)
+                        else:
+                            # Move file to session folder
+                            dest_path = os.path.join(session_path, filename)
+
+                            # Handle duplicate filenames
+                            if os.path.exists(dest_path):
+                                base, ext = os.path.splitext(filename)
+                                counter = 1
+                                while os.path.exists(dest_path):
+                                    new_filename = f"{base}_{counter}{ext}"
+                                    dest_path = os.path.join(session_path, new_filename)
+                                    counter += 1
+
+                            print(f"Process: Moving {file_path} -> {dest_path}")
+                            shutil.move(file_path, dest_path)
+                            moved_count += 1
+
+                            # Count images
+                            if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp')):
+                                image_count += 1
+                                print(f"Process: This is an image file: {filename}")
+
+                            print(f"Process: Successfully moved {filename} to session folder")
+
+                except Exception as e:
+                    print(f"Process: Error processing file {file_path}: {e}")
+                    # Continue with other files even if one fails
+                    pass
+
+            if moved_count > 0:
+                result_queue.put({
+                    "type": "status",
+                    "content": f"Process: Moved {moved_count} files to session ({image_count} images)"
+                })
+                print(f"Process: Successfully moved {moved_count} files ({image_count} images) to {session_path}")
+
+        except Exception as e:
+            print(f"Process: Error moving files: {e}")
+
+        # Clean up any remaining subprocesses
+        cleanup_subprocesses()
 
 # Session and utility classes (reused from original files)
 class SessionManager:
@@ -921,7 +1956,8 @@ class SessionManager:
     def __init__(self):
         self.sessions_dir = os.path.join(os.getcwd(), "chat_sessions")
         os.makedirs(self.sessions_dir, exist_ok=True)
-    
+        self.session_path = None  # Store the session path for this manager
+
     def create_session_folder(self):
         """Create a unique session folder"""
         session_id = str(uuid.uuid4())[:8]
@@ -929,7 +1965,21 @@ class SessionManager:
         session_name = f"session_{timestamp}_{session_id}"
         session_path = os.path.join(self.sessions_dir, session_name)
         os.makedirs(session_path, exist_ok=True)
+        self.session_path = session_path
         return session_path, session_name
+
+    def create_multiturn_session_folder(self, multiturn_session_id: str):
+        """Create a shared session folder for multi-turn sessions"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_name = f"multiturn_{timestamp}_{multiturn_session_id[:8]}"
+        session_path = os.path.join(self.sessions_dir, session_name)
+        os.makedirs(session_path, exist_ok=True)
+        self.session_path = session_path
+        return session_path, session_name
+
+    def get_session_path(self):
+        """Get the current session path"""
+        return self.session_path
 
 class StreamingCapture:
     """Capture stdout and provide real-time updates"""
@@ -1031,13 +2081,39 @@ def create_session_zip(session_path, save_to_chat_zips=True):
 
         # Create zip archive
         with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            total_size = 0
+            max_zip_size = 500 * 1024 * 1024  # 500MB max zip size
+            skipped_files = []
+
             # Walk through all files in session directory
             for root, dirs, files in os.walk(session_path):
                 for file in files:
                     file_path = os.path.join(root, file)
+                    file_size = os.path.getsize(file_path)
+
+                    # Skip individual files larger than 100MB
+                    if file_size > 100 * 1024 * 1024:
+                        skipped_files.append(f"{file} ({file_size / 1024 / 1024:.1f}MB)")
+                        print(f"Skipping large file in zip: {file} ({file_size / 1024 / 1024:.1f}MB)")
+                        continue
+
+                    # Check total zip size limit
+                    if total_size + file_size > max_zip_size:
+                        skipped_files.append(f"{file} (would exceed 500MB zip limit)")
+                        print(f"Skipping {file} - would exceed 500MB zip limit")
+                        continue
+
                     # Add file to zip with relative path
                     arcname = os.path.relpath(file_path, session_path)
                     zipf.write(file_path, arcname)
+                    total_size += file_size
+
+            # Add a notice file if files were skipped
+            if skipped_files:
+                notice_content = "LARGE FILES EXCLUDED FROM ZIP:\n\n"
+                notice_content += "\n".join(skipped_files)
+                notice_content += "\n\nThese files were too large and excluded to keep download size manageable."
+                zipf.writestr("SKIPPED_LARGE_FILES.txt", notice_content)
 
         print(f"Created session zip: {zip_file_path}")
         return zip_file_path
@@ -1068,93 +2144,50 @@ app.add_middleware(
 )
 
 # API Endpoints
-@app.post("/chat", response_model=ChatResponse)
-async def start_chat(request: ChatRequest):
-    """Process chat request through queue and return complete results"""
-    session_id = request.session_id or str(uuid.uuid4())
-
-    # Create user request and add to queue
-    user_request = UserRequest(
-        session_id=session_id,
-        message=request.message,
-        language=request.language
-    )
-
-    # Add to queue
-    position = queue_manager.add_request(user_request)
-
-    # Wait for completion with timeout (max 30 minutes)
-    max_wait_time = 30 * 60  # 30 minutes
-    start_time = time.time()
-
-    while not user_request.is_complete:
-        if time.time() - start_time > max_wait_time:
-            return ChatResponse(
-                session_id=session_id,
-                status="timeout",
-                error="Request timed out after 30 minutes",
-                progress_updates=[]
-            )
-
-        await asyncio.sleep(0.5)  # Check every 500ms
-
-    # Collect all progress updates
-    all_progress_updates = []
-    while not user_request.progress_queue.empty():
-        try:
-            all_progress_updates.append(user_request.progress_queue.get_nowait())
-        except queue.Empty:
-            break
-
-    # Return complete results
-    if user_request.error:
-        return ChatResponse(
-            session_id=session_id,
-            status="error",
-            error=user_request.error,
-            progress_updates=all_progress_updates
-        )
-    else:
-        # Extract final report and thinking content from progress updates
-        final_report = None
-        thinking_content = ""
-        session_path = None
-
-        for update in all_progress_updates:
-            if update.get("type") == "completion":
-                final_report = update.get("final_report")
-                thinking_content = update.get("thinking_content", "")
-                session_path = update.get("session_path")
-                break
-
-        return ChatResponse(
-            session_id=session_id,
-            status="completed",
-            thinking_content=thinking_content,
-            final_report=final_report,
-            progress_updates=all_progress_updates,
-            session_path=session_path
-        )
+# REMOVED: /chat endpoint - legacy blocking endpoint, use /chat-queue for modern queue-based multi-turn chat
 
 
 
 @app.post("/chat-queue")
-async def start_chat_queue(request: ChatRequest):
-    """Add chat request to queue and return session ID for status tracking"""
-    session_id = request.session_id or str(uuid.uuid4())
+async def start_chat_queue(
+    message: str = Form(...),
+    language: Language = Form(Language.EN),
+    user_id: str = Form(...),
+    session_id: Optional[str] = Form(None),
+    files: List[UploadFile] = File(default=[])
+):
+    """Add chat request to queue with optional file uploads"""
+    session_id = session_id or str(uuid.uuid4())
+
+    # Handle file uploads
+    uploaded_file_paths = []
+    if files and any(file.filename for file in files):
+        # Create temporary upload directory for this session
+        upload_dir = os.path.join(os.getcwd(), "temp_uploads", session_id)
+        os.makedirs(upload_dir, exist_ok=True)
+
+        for file in files:
+            if file.filename:
+                file_path = os.path.join(upload_dir, file.filename)
+                with open(file_path, "wb") as buffer:
+                    content = await file.read()
+                    buffer.write(content)
+                uploaded_file_paths.append(file_path)
 
     # Create or get multi-turn session
-    multiturn_session = queue_manager.create_or_get_multiturn_session(session_id, request.language)
+    multiturn_session = queue_manager.create_or_get_multiturn_session(session_id, language, user_id)
 
     # Add first turn to session
-    turn_number = queue_manager.add_turn_to_session(session_id, request.message)
+    turn_number = queue_manager.add_turn_to_session(session_id, message)
 
     # Create user request and add to queue
     user_request = UserRequest(
         session_id=session_id,
-        message=request.message,
-        language=request.language,
-        turn_number=turn_number
+        message=message,
+        language=language,
+        uploaded_files=uploaded_file_paths,
+        turn_number=turn_number,
+        user_id=user_id
     )
 
     # Store reference to original multi-turn session
@@ -1168,167 +2201,197 @@ async def start_chat_queue(request: ChatRequest):
         "turn_number": turn_number,
         "status": "queued",
         "position": position,
+        "uploaded_files": len(uploaded_file_paths),
         "message": "Request added to queue. Use /status/{session_id} to check progress."
     }
 
+@app.get("/progress/{session_id}")
+async def get_progress(session_id: str, user_id: str):
+    """Get current progress for a session (alias for /status for backward compatibility)"""
+    return await get_status(session_id, user_id)
+
 @app.get("/status/{session_id}")
-async def get_status(session_id: str):
-    """Get current status and progress for a session"""
-    # Check if session exists in active sessions
-    progress = queue_manager.get_session_progress(session_id)
-    if not progress:
-        raise HTTPException(status_code=404, detail="Session not found")
+async def get_status(session_id: str, user_id: str):
+    """Get current status and progress for a session from local or cloud storage"""
+    try:
+        # Get unified session manager
+        unified_manager = get_unified_session_manager(queue_manager)
 
-    # Get queue status if still queued
-    queue_status = queue_manager.get_queue_status(session_id)
+        # Get session status using unified manager (handles local/cloud intelligently)
+        status_data = await unified_manager.get_session_status(session_id)
+        if not status_data:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    response = {
-        "session_id": session_id,
-        "status": progress["status"],
-        "is_complete": progress["is_complete"],
-        "created_at": progress["created_at"]
-    }
+        # Verify user owns this session
+        session_user_id = status_data.get("user_id")
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-    if queue_status:
-        response["queue_position"] = queue_status.position
-        response["estimated_wait_time"] = queue_status.estimated_wait_time
-        response["total_users_in_queue"] = queue_status.total_users_in_queue
+        # For active sessions, get queue status
+        queue_status = None
+        if status_data.get("storage_location") == "active":
+            queue_status = queue_manager.get_queue_status(session_id)
 
-    if progress["error"]:
-        response["error"] = progress["error"]
+        response = {
+            "session_id": session_id,
+            "status": status_data.get("status", "unknown"),
+            "is_complete": status_data.get("is_complete", False),
+            "is_cancelled": status_data.get("is_cancelled", False),
+            "created_at": status_data.get("created_at", datetime.now().isoformat())
+        }
 
-    if progress["result"] and progress["is_complete"]:
-        # Extract final report and thinking content from progress updates
-        all_progress_updates = progress["progress_updates"]
-        final_report = None
-        thinking_content = ""
-        session_path = None
+        # Add queue information for active sessions
+        if queue_status:
+            response["queue_position"] = queue_status.position
+            response["estimated_wait_time"] = queue_status.estimated_wait_time
+            response["total_users_in_queue"] = queue_status.total_users_in_queue
 
-        for update in all_progress_updates:
-            if update.get("type") == "completion":
-                final_report = update.get("final_report")
-                thinking_content = update.get("thinking_content", "")
-                session_path = update.get("session_path")
-                break
+        # Add error information if present
+        if status_data.get("error"):
+            response["error"] = status_data["error"]
 
-        response["final_report"] = final_report
-        response["thinking_content"] = thinking_content
-        response["session_path"] = session_path
+        # Handle progress updates based on storage location
+        storage_location = status_data.get("storage_location", "unknown")
 
-    # Include latest progress updates
-    response["progress_updates"] = progress["progress_updates"]
+        if storage_location == "active":
+            # Active sessions: include real-time progress updates
+            response["progress_updates"] = status_data.get("progress_updates", [])
 
-    return response
+            # Extract final report for completed active sessions
+            if status_data["is_complete"]:
+                for update in status_data.get("progress_updates", []):
+                    if update.get("type") == "completion":
+                        response["final_report"] = update.get("final_report")
+                        response["thinking_content"] = update.get("thinking_content", "")
+                        response["session_path"] = update.get("session_path")
+                        break
 
-@app.post("/upload/{session_id}")
-async def upload_files(session_id: str, files: List[UploadFile] = File(...)):
-    """Upload files for a session"""
-    if session_id not in queue_manager.active_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+        elif storage_location == "cloud":
+            # Cloud sessions: show summary data (progress is summarized)
+            response["progress_summary"] = status_data.get("progress_summary", {})
+            response["cloud_info"] = {
+                "uploaded_at": status_data.get("uploaded_to_cloud_at"),
+                "files_available": True
+            }
 
-    uploaded_paths = []
-    temp_dir = tempfile.mkdtemp()
+        elif storage_location == "local":
+            # Local stored sessions: include available progress data
+            response["progress_updates"] = status_data.get("progress_updates", [])
 
-    for file in files:
-        file_path = os.path.join(temp_dir, file.filename)
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-        uploaded_paths.append(file_path)
+        # Add storage location for debugging
+        response["_storage_location"] = storage_location
 
-    # Update session with file paths
-    user_request = queue_manager.active_sessions[session_id]
-    user_request.uploaded_files.extend(uploaded_paths)
+        return response
 
-    return {"message": f"Uploaded {len(files)} files", "file_paths": uploaded_paths}
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 404) without modification
+        raise
+    except Exception as e:
+        print(f"Error getting status for session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving session status: {str(e)}")
+
+# REMOVED: /upload/{session_id} endpoint - not needed for multi-turn chat workflow
+# File uploads can be handled during initial session creation if needed
 
 
-@app.get("/sessions")
-async def list_sessions():
-    """List all active sessions"""
-    sessions = []
-    for session_id, user_request in queue_manager.active_sessions.items():
-        sessions.append(SessionInfo(
-            session_id=session_id,
-            status=user_request.status,
-            created_at=user_request.created_at.isoformat(),
-            language=user_request.language,
-            query=user_request.message
-        ))
-
-    return sessions
+# REMOVED: /sessions endpoint - was insecure (exposed all users' sessions)
+# Use /all-sessions with user_id filtering instead
 
 @app.get("/download/{session_id}")
-async def download_session_zip(session_id: str):
-    """Download session zip file"""
-    # First try to get session info to find the zip path
-    progress = queue_manager.get_session_progress(session_id)
-    if not progress:
-        raise HTTPException(status_code=404, detail="Session not found")
+async def download_session_zip(session_id: str, user_id: str):
+    """Download session zip file from local or cloud storage"""
+    import requests
+    from fastapi.responses import RedirectResponse
 
-    # Try to get zip path from JSON result
-    json_result = progress.get("json_result")
-    if json_result and json_result.get("files", {}).get("session_zip"):
-        zip_path = json_result["files"]["session_zip"]
-        if os.path.exists(zip_path):
-            return FileResponse(
-                zip_path,
-                media_type='application/zip',
-                filename=os.path.basename(zip_path)
-            )
+    try:
+        # For multi-turn sessions, extract base session ID
+        base_session_id = session_id
+        if "_turn_" in session_id:
+            base_session_id = session_id.split("_turn_")[0]
+            print(f"Multi-turn download request: {session_id} -> base: {base_session_id}")
 
-    # Fallback: Look for session zip in chat_zips directory
-    chat_zips_dir = os.path.join(os.getcwd(), "chat_zips")
-    if not os.path.exists(chat_zips_dir):
-        raise HTTPException(status_code=404, detail="Chat zips directory not found")
+        # Get unified session manager
+        unified_manager = get_unified_session_manager(queue_manager)
 
-    # Find zip file for this session
-    session_zip = None
-    for filename in os.listdir(chat_zips_dir):
-        if filename.startswith(f"session_") and session_id in filename and filename.endswith('.zip'):
-            session_zip = os.path.join(chat_zips_dir, filename)
-            break
+        # First verify user owns this session (try both session IDs)
+        session_data = await unified_manager.get_session_by_id(session_id)
+        if not session_data and base_session_id != session_id:
+            session_data = await unified_manager.get_session_by_id(base_session_id)
 
-    if not session_zip or not os.path.exists(session_zip):
-        raise HTTPException(status_code=404, detail="Session zip file not found")
+        if not session_data:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    return FileResponse(
-        session_zip,
-        media_type='application/zip',
-        filename=os.path.basename(session_zip)
-    )
+        session_user_id = session_data.get("user_id")
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        # Get session files info using unified manager (use base session ID for files)
+        files_info = await unified_manager.get_session_files(base_session_id)
+        if not files_info:
+            raise HTTPException(status_code=404, detail="Session files not found")
+
+        download_method = files_info.get("download_method", "none")
+
+        if download_method == "local_zip":
+            # Local session: serve zip file directly
+            zip_path = files_info.get("zip_path")
+            if zip_path and os.path.exists(zip_path):
+                return FileResponse(
+                    zip_path,
+                    media_type='application/zip',
+                    filename=os.path.basename(zip_path)
+                )
+            else:
+                raise HTTPException(status_code=404, detail="Local zip file not found")
+
+        elif download_method == "s3_keys":
+            # Cloud session: generate fresh presigned URL
+            s3_files = files_info.get("s3_files", {})
+            session_zip_info = s3_files.get("session_zip")
+
+            if session_zip_info and isinstance(session_zip_info, dict):
+                s3_key = session_zip_info.get("s3_key")
+                if s3_key:
+                    # Generate fresh presigned URL (2 hours)
+                    fresh_url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
+                    # Redirect to fresh S3 presigned URL
+                    return RedirectResponse(url=fresh_url)
+                else:
+                    raise HTTPException(status_code=404, detail="Cloud zip S3 key not available")
+            else:
+                raise HTTPException(status_code=404, detail="Cloud zip file not found")
+
+        elif download_method == "none":
+            # Active session: files not ready yet
+            message = files_info.get("message", "Session files not ready for download")
+            raise HTTPException(status_code=425, detail=message)
+
+        else:
+            raise HTTPException(status_code=500, detail=f"Unknown download method: {download_method}")
+
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        print(f"Error in download endpoint for session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error preparing download: {str(e)}")
 
 
-@app.get("/list-zips")
-async def list_chat_zips():
-    """List all available chat zip files"""
-    chat_zips_dir = os.path.join(os.getcwd(), "chat_zips")
-    if not os.path.exists(chat_zips_dir):
-        return {"zips": []}
-
-    zip_files = []
-    for filename in os.listdir(chat_zips_dir):
-        if filename.endswith('.zip'):
-            file_path = os.path.join(chat_zips_dir, filename)
-            file_stat = os.stat(file_path)
-            zip_files.append({
-                "filename": filename,
-                "size": file_stat.st_size,
-                "created_at": datetime.fromtimestamp(file_stat.st_ctime).isoformat(),
-                "modified_at": datetime.fromtimestamp(file_stat.st_mtime).isoformat()
-            })
-
-    # Sort by creation time (newest first)
-    zip_files.sort(key=lambda x: x["created_at"], reverse=True)
-    return {"zips": zip_files}
+# REMOVED: /list-zips endpoint - was insecure (exposed all zip files)
+# Use session-specific download endpoints with user_id validation instead
 
 
 @app.get("/results/{session_id}")
-async def get_session_results(session_id: str):
+async def get_session_results(session_id: str, user_id: str):
     """Get structured JSON results for a completed session"""
     progress = queue_manager.get_session_progress(session_id)
     if not progress:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # Verify user owns this session
+    session_user_id = progress.get("user_id")
+    if session_user_id and session_user_id != user_id:
+        raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
     if not progress.get("is_complete", False):
         raise HTTPException(status_code=400, detail="Session is not yet complete")
@@ -1351,8 +2414,14 @@ async def get_session_results(session_id: str):
 
 
 @app.post("/stop/{session_id}")
-async def stop_task(session_id: str):
+async def stop_task(session_id: str, user_id: str):
     """Stop a running or queued task"""
+    # First verify user owns this session
+    if session_id in queue_manager.active_sessions:
+        session_user_id = getattr(queue_manager.active_sessions[session_id], 'user_id', None)
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
     success = queue_manager.stop_session(session_id)
     if success:
         return {
@@ -1364,49 +2433,23 @@ async def stop_task(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
 
-@app.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
-    """WebSocket endpoint for real-time progress updates"""
-    await websocket.accept()
-
-    try:
-        while True:
-            progress = queue_manager.get_session_progress(session_id)
-            if progress:
-                await websocket.send_text(json.dumps(progress))
-
-                if progress.get("is_complete"):
-                    break
-
-            await asyncio.sleep(1)
-
-    except WebSocketDisconnect:
-        pass
+# REMOVED: /ws/{session_id} endpoint - WebSocket not used by Gradio and doesn't validate user_id
 
 
-@app.get("/stream/{session_id}")
-async def stream_progress(session_id: str):
-    """Server-Sent Events endpoint for real-time progress updates"""
-    async def generate():
-        while True:
-            progress = queue_manager.get_session_progress(session_id)
-            if progress:
-                yield f"data: {json.dumps(progress)}\n\n"
-
-                if progress.get("is_complete"):
-                    break
-
-            await asyncio.sleep(1)
-
-    return StreamingResponse(generate(), media_type="text/plain")
+# REMOVED: /stream/{session_id} endpoint - SSE streaming not used by Gradio (uses polling instead)
 
 
 @app.get("/snapshots/{session_id}")
-async def get_session_snapshots(session_id: str):
+async def get_session_snapshots(session_id: str, user_id: str):
     """Get all periodic snapshots for a session"""
     progress = queue_manager.get_session_progress(session_id)
     if not progress:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # Verify user owns this session
+    session_user_id = progress.get("user_id")
+    if session_user_id and session_user_id != user_id:
+        raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
     return {
         "session_id": session_id,
@@ -1416,61 +2459,82 @@ async def get_session_snapshots(session_id: str):
 
 
 @app.get("/all-sessions")
-async def get_all_sessions():
-    """Get all sessions from storage"""
+async def get_all_sessions(user_id: Optional[str] = None):
+    """Get all sessions from both local and cloud storage"""
     try:
-        sessions = []
-        sessions_storage_dir = queue_manager.sessions_storage_dir
+        # Get unified session manager
+        unified_manager = get_unified_session_manager(queue_manager)
 
-        if os.path.exists(sessions_storage_dir):
-            for filename in os.listdir(sessions_storage_dir):
-                if filename.endswith('.json'):
-                    session_id = filename[:-5]  # Remove .json extension
-                    try:
-                        session_file = os.path.join(sessions_storage_dir, filename)
-                        with open(session_file, 'r', encoding='utf-8') as f:
-                            session_data = json.load(f)
+        # Get all sessions (local + cloud) filtered by user_id if provided
+        all_sessions = await unified_manager.get_all_sessions(include_cloud=True, user_id=user_id)
 
-                        # Extract relevant information for history
-                        session_info = {
-                            "session_id": session_data["session_id"],
-                            "query": session_data["message"][:200] + ("..." if len(session_data["message"]) > 200 else ""),
-                            "full_query": session_data["message"],
-                            "language": session_data["language"],
-                            "files_count": len(session_data.get("uploaded_files", [])),
-                            "timestamp": session_data["created_at"],
-                            "status": session_data["status"],
-                            "is_complete": session_data["is_complete"]
-                        }
-                        sessions.append(session_info)
-                    except Exception as e:
-                        print(f"Error loading session {session_id}: {e}")
-                        continue
+        # Convert to expected format for compatibility
+        formatted_sessions = []
+        for session in all_sessions:
+            # Handle both old and new session formats
+            query = session.get("query", session.get("message", ""))
 
-        # Sort by timestamp (newest first)
-        sessions.sort(key=lambda x: x["timestamp"], reverse=True)
+            session_info = {
+                "session_id": session["session_id"],
+                "query": query[:200] + ("..." if len(query) > 200 else ""),
+                "full_query": query,
+                "language": session.get("language", "en"),
+                "files_count": len(session.get("uploaded_files", [])),
+                "timestamp": session.get("timestamp", session.get("created_at", "")),
+                "status": session.get("status", "unknown"),
+                "is_complete": session.get("is_complete", False),
+                # Add storage info for debugging (remove in production)
+                "_source": session.get("_storage_location", "unknown")
+            }
+            formatted_sessions.append(session_info)
 
-        return {"sessions": sessions}
+        return {"sessions": formatted_sessions}
     except Exception as e:
         print(f"Error getting all sessions: {e}")
+        # Fallback to original local-only logic if unified manager fails
         return {"sessions": []}
 
 
 # Multi-Turn Conversation Endpoints
 
 @app.post("/continue-session")
-async def continue_session(request: ContinueRequest):
-    """Continue an existing multi-turn session with a new query"""
-    session_id = request.session_id
-
+async def continue_session(
+    session_id: str = Form(...),
+    message: str = Form(...),
+    language: Language = Form(Language.EN),
+    user_id: str = Form(...),
+    files: List[UploadFile] = File(default=[])
+):
+    """Continue an existing multi-turn session with a new query and optional file uploads"""
     # Check if multi-turn session exists
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     if not multiturn_session:
         raise HTTPException(status_code=404, detail="Multi-turn session not found")
 
+    # Verify user owns this session
+    if multiturn_session.user_id and multiturn_session.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+    # Handle file uploads
+    uploaded_file_paths = []
+    if files and any(file.filename for file in files):
+        # Create temporary upload directory for this session
+        upload_dir = os.path.join(os.getcwd(), "temp_uploads", session_id)
+        os.makedirs(upload_dir, exist_ok=True)
+
+        for file in files:
+            if file.filename:
+                # Add turn number to filename to avoid conflicts
+                filename = f"turn{multiturn_session.total_turns + 1}_{file.filename}"
+                file_path = os.path.join(upload_dir, filename)
+                with open(file_path, "wb") as buffer:
+                    content = await file.read()
+                    buffer.write(content)
+                uploaded_file_paths.append(file_path)
+
     # Add new turn to session
     try:
-        turn_number = queue_manager.add_turn_to_session(session_id, request.message)
+        turn_number = queue_manager.add_turn_to_session(session_id, message)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1480,11 +2544,13 @@ async def continue_session(request: ContinueRequest):
     # Create user request with context
     user_request = UserRequest(
         session_id=f"{session_id}_turn_{turn_number}",  # Unique ID for this turn
-        message=request.message,
-        language=request.language,
+        message=message,
+        language=language,
+        uploaded_files=uploaded_file_paths,
         is_continuation=True,
         previous_context=previous_context,
-        turn_number=turn_number
+        turn_number=turn_number,
+        user_id=user_id
     )
 
     # Store reference to original multi-turn session
@@ -1499,43 +2565,63 @@ async def continue_session(request: ContinueRequest):
         "turn_number": turn_number,
         "status": "queued",
         "position": position,
+        "uploaded_files": len(uploaded_file_paths),
         "message": f"Turn {turn_number} added to queue. Use /status/{session_id}_turn_{turn_number} to check progress."
     }
 
 @app.get("/multiturn-session/{session_id}")
-async def get_multiturn_session(session_id: str):
+async def get_multiturn_session(session_id: str, user_id: str):
     """Get complete multi-turn session history"""
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     if not multiturn_session:
         raise HTTPException(status_code=404, detail="Multi-turn session not found")
 
+    # Verify user owns this session
+    if multiturn_session.user_id and multiturn_session.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
     return multiturn_session
 
 @app.get("/multiturn-sessions")
-async def get_all_multiturn_sessions():
-    """Get all multi-turn sessions"""
-    sessions = []
-    for session_id, session in queue_manager.multiturn_sessions.items():
-        session_summary = {
-            "session_id": session_id,
-            "created_at": session.created_at,
-            "last_updated": session.last_updated,
-            "total_turns": session.total_turns,
-            "language": session.language,
-            "session_status": session.session_status,
-            "first_query": session.turns[0].query if session.turns else "No queries",
-            "latest_query": session.turns[-1].query if session.turns else "No queries"
-        }
-        sessions.append(session_summary)
+async def get_all_multiturn_sessions(user_id: Optional[str] = None):
+    """Get all multi-turn sessions from both local and cloud storage"""
+    try:
+        # Get unified session manager
+        unified_manager = get_unified_session_manager(queue_manager)
 
-    return {"sessions": sessions}
+        # Get all multi-turn sessions (local + cloud) filtered by user_id if provided
+        all_sessions = await unified_manager.get_multiturn_sessions(include_cloud=True, user_id=user_id)
+
+        return {"sessions": all_sessions}
+    except Exception as e:
+        print(f"Error getting multi-turn sessions: {e}")
+        # Fallback to local-only sessions
+        sessions = []
+        for session_id, session in queue_manager.multiturn_sessions.items():
+            session_summary = {
+                "session_id": session_id,
+                "created_at": session.created_at,
+                "last_updated": session.last_updated,
+                "total_turns": session.total_turns,
+                "language": session.language,
+                "session_status": session.session_status,
+                "first_query": session.turns[0].query if session.turns else "No queries",
+                "latest_query": session.turns[-1].query if session.turns else "No queries",
+                "_storage_location": "local"
+            }
+            sessions.append(session_summary)
+        return {"sessions": sessions}
 
 @app.get("/turn-report/{session_id}/{turn_number}")
-async def get_turn_report(session_id: str, turn_number: int):
+async def get_turn_report(session_id: str, turn_number: int, user_id: str):
     """Get specific turn report from multi-turn session"""
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     if not multiturn_session:
         raise HTTPException(status_code=404, detail="Multi-turn session not found")
+
+    # Verify user owns this session
+    if multiturn_session.user_id and multiturn_session.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
     # Find the specific turn
     for turn in multiturn_session.turns:
@@ -1554,11 +2640,15 @@ async def get_turn_report(session_id: str, turn_number: int):
     raise HTTPException(status_code=404, detail=f"Turn {turn_number} not found in session")
 
 @app.get("/session-context/{session_id}")
-async def get_session_context(session_id: str):
+async def get_session_context(session_id: str, user_id: str):
     """Get accumulated context for a multi-turn session"""
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     if not multiturn_session:
         raise HTTPException(status_code=404, detail="Multi-turn session not found")
+
+    # Verify user owns this session
+    if multiturn_session.user_id and multiturn_session.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
     return {
         "session_id": session_id,
@@ -1571,25 +2661,431 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
         "queue_size": queue_manager.request_queue.qsize(),
         "is_processing": queue_manager.is_processing,
         "current_session": queue_manager.current_processing_session,
         "multiturn_sessions": len(queue_manager.multiturn_sessions)
     }
 
+# ============= TRASH SYSTEM ENDPOINTS =============
+
+@app.post("/trash/{session_id}")
+async def move_to_trash(session_id: str, user_id: str):
+    """Soft delete - Move session to trash (mark as deleted but keep data)"""
+    try:
+        # Get unified session manager
+        unified_manager = get_unified_session_manager(queue_manager)
+
+        # Verify user owns this session
+        session_data = await unified_manager.get_session_by_id(session_id)
+        if not session_data:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        session_user_id = session_data.get("user_id")
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        # Mark as trashed (soft delete)
+        trashed_at = datetime.now().isoformat()
+
+        # Update session data with trash metadata
+        session_data["is_trashed"] = True
+        session_data["trashed_at"] = trashed_at
+        session_data["trashed_by"] = user_id
+
+        # Save updated session data
+        session_file = f"session_storage/{session_id}.json"
+        if os.path.exists(session_file):
+            with open(session_file, 'w') as f:
+                json.dump(session_data, f, indent=2)
+
+        # Also update cloud storage metadata if it exists
+        try:
+            await cloud_storage_manager.update_session_metadata(session_id, {
+                "is_trashed": True,
+                "trashed_at": trashed_at,
+                "trashed_by": user_id
+            })
+        except:
+            pass  # Cloud storage update is optional
+
+        return {
+            "status": "success",
+            "message": "Session moved to trash",
+            "session_id": session_id,
+            "trashed_at": trashed_at
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error moving session to trash: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/restore/{session_id}")
+async def restore_from_trash(session_id: str, user_id: str):
+    """Restore session from trash"""
+    try:
+        # Get unified session manager
+        unified_manager = get_unified_session_manager(queue_manager)
+
+        # Verify user owns this session
+        session_data = await unified_manager.get_session_by_id(session_id)
+        if not session_data:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        session_user_id = session_data.get("user_id")
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        if not session_data.get("is_trashed"):
+            raise HTTPException(status_code=400, detail="Session is not in trash")
+
+        # Remove trash metadata
+        session_data.pop("is_trashed", None)
+        session_data.pop("trashed_at", None)
+        session_data.pop("trashed_by", None)
+        session_data["restored_at"] = datetime.now().isoformat()
+
+        # Save updated session data
+        session_file = f"session_storage/{session_id}.json"
+        if os.path.exists(session_file):
+            with open(session_file, 'w') as f:
+                json.dump(session_data, f, indent=2)
+
+        # Also update cloud storage metadata if it exists
+        try:
+            await cloud_storage_manager.update_session_metadata(session_id, {
+                "is_trashed": False,
+                "restored_at": session_data["restored_at"]
+            })
+        except:
+            pass  # Cloud storage update is optional
+
+        return {
+            "status": "success",
+            "message": "Session restored from trash",
+            "session_id": session_id,
+            "restored_at": session_data["restored_at"]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error restoring session from trash: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/permanent-delete/{session_id}")
+async def permanent_delete_session(session_id: str, user_id: str, confirm: bool = False):
+    """Permanently delete session - removes all data from S3, MongoDB, and local storage"""
+    try:
+        if not confirm:
+            raise HTTPException(status_code=400, detail="Must confirm permanent deletion with confirm=true")
+
+        # Get unified session manager
+        unified_manager = get_unified_session_manager(queue_manager)
+
+        # Verify user owns this session
+        session_data = await unified_manager.get_session_by_id(session_id)
+        if not session_data:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        session_user_id = session_data.get("user_id")
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        # Check if session is in trash (optional - can delete directly)
+        if not session_data.get("is_trashed"):
+            print(f"Warning: Permanently deleting session {session_id} that is not in trash")
+
+        deleted_items = {
+            "local_files": [],
+            "s3_files": [],
+            "mongodb_docs": []
+        }
+
+        # 1. Delete local files
+        # Delete session storage JSON
+        session_file = f"session_storage/{session_id}.json"
+        if os.path.exists(session_file):
+            os.remove(session_file)
+            deleted_items["local_files"].append(session_file)
+
+        # Delete multi-turn session file if exists
+        multiturn_file = f"multiturn_sessions/{session_id}.json"
+        if os.path.exists(multiturn_file):
+            os.remove(multiturn_file)
+            deleted_items["local_files"].append(multiturn_file)
+
+        # Delete any turn-specific files
+        import glob
+        turn_files = glob.glob(f"session_storage/{session_id}_turn_*.json")
+        for turn_file in turn_files:
+            if os.path.exists(turn_file):
+                os.remove(turn_file)
+                deleted_items["local_files"].append(turn_file)
+
+        # Delete zip files
+        zip_files = glob.glob(f"chat_zips/*{session_id[:8]}*.zip")
+        for zip_file in zip_files:
+            if os.path.exists(zip_file):
+                os.remove(zip_file)
+                deleted_items["local_files"].append(zip_file)
+
+        # Delete session folders
+        session_folders = glob.glob(f"chat_sessions/*{session_id[:8]}*")
+        for folder in session_folders:
+            if os.path.exists(folder):
+                import shutil
+                shutil.rmtree(folder)
+                deleted_items["local_files"].append(folder)
+
+        # 2. Delete from S3
+        try:
+            s3_deleted = await cloud_storage_manager.delete_session_from_s3(session_id)
+            deleted_items["s3_files"] = s3_deleted
+        except Exception as e:
+            print(f"S3 deletion error (continuing): {e}")
+
+        # 3. Delete from MongoDB
+        try:
+            mongo_deleted = await cloud_storage_manager.delete_session_from_mongodb(session_id)
+            deleted_items["mongodb_docs"] = mongo_deleted
+        except Exception as e:
+            print(f"MongoDB deletion error (continuing): {e}")
+
+        return {
+            "status": "success",
+            "message": "Session permanently deleted",
+            "session_id": session_id,
+            "deleted_items": deleted_items,
+            "deleted_at": datetime.now().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error permanently deleting session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/trash")
+async def get_trash_sessions(user_id: str):
+    """Get all sessions in trash for a user"""
+    try:
+        # Get unified session manager
+        unified_manager = get_unified_session_manager(queue_manager)
+
+        # Get all sessions (including trashed)
+        all_sessions = await unified_manager.get_all_sessions(include_cloud=True, user_id=user_id)
+
+        # Filter for trashed sessions
+        trashed_sessions = []
+        for session in all_sessions:
+            if session.get("is_trashed"):
+                # Add summary info
+                summary = {
+                    "session_id": session.get("session_id"),
+                    "query": session.get("query", "No query"),
+                    "status": session.get("status"),
+                    "created_at": session.get("created_at"),
+                    "trashed_at": session.get("trashed_at"),
+                    "trashed_by": session.get("trashed_by"),
+                    "user_id": session.get("user_id")
+                }
+                trashed_sessions.append(summary)
+
+        # Sort by trashed_at (most recent first)
+        trashed_sessions.sort(key=lambda x: x.get("trashed_at", ""), reverse=True)
+
+        return {
+            "status": "success",
+            "count": len(trashed_sessions),
+            "sessions": trashed_sessions
+        }
+
+    except Exception as e:
+        print(f"Error getting trash sessions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/empty-trash")
+async def empty_trash(user_id: str, confirm: bool = False):
+    """Empty all trash for a user - permanently delete all trashed sessions"""
+    try:
+        if not confirm:
+            raise HTTPException(status_code=400, detail="Must confirm emptying trash with confirm=true")
+
+        # Get all trashed sessions
+        trash_response = await get_trash_sessions(user_id)
+        trashed_sessions = trash_response.get("sessions", [])
+
+        if not trashed_sessions:
+            return {
+                "status": "success",
+                "message": "Trash is already empty",
+                "deleted_count": 0
+            }
+
+        deleted_sessions = []
+        failed_deletions = []
+
+        # Delete each trashed session
+        for session in trashed_sessions:
+            session_id = session["session_id"]
+            try:
+                # Call permanent delete
+                await permanent_delete_session(session_id, user_id, confirm=True)
+                deleted_sessions.append(session_id)
+            except Exception as e:
+                print(f"Failed to delete session {session_id}: {e}")
+                failed_deletions.append({"session_id": session_id, "error": str(e)})
+
+        return {
+            "status": "success" if not failed_deletions else "partial",
+            "message": f"Deleted {len(deleted_sessions)} sessions from trash",
+            "deleted_count": len(deleted_sessions),
+            "deleted_sessions": deleted_sessions,
+            "failed_deletions": failed_deletions,
+            "emptied_at": datetime.now().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error emptying trash: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import argparse
-    
+
+    # Additional endpoint for getting fresh download URLs for cloud sessions
+    @app.get("/download-urls/{session_id}")
+    async def get_session_download_urls(session_id: str, user_id: str):
+        """Get download URLs for session files (always prefer S3/cloud)"""
+        try:
+            # Wait briefly to ensure S3 upload completed
+            await asyncio.sleep(1)
+
+            # For multi-turn sessions, extract base session ID
+            base_session_id = session_id
+            if "_turn_" in session_id:
+                base_session_id = session_id.split("_turn_")[0]
+                print(f"Multi-turn session detected: {session_id} -> base: {base_session_id}")
+
+            # Try to get from cloud storage directly using base session ID
+            try:
+                download_data = await cloud_storage_manager.get_session_download_urls(base_session_id)
+                if download_data:
+                    # Verify user ownership
+                    session_info = await cloud_storage_manager.get_session_info(base_session_id)
+                    if session_info:
+                        session_user_id = session_info.get("user_id")
+                        if session_user_id and session_user_id != user_id:
+                            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+                    return download_data
+            except Exception as e:
+                print(f"Cloud storage check failed for {base_session_id}: {e}")
+
+            # Fallback: Get unified session manager
+            unified_manager = get_unified_session_manager(queue_manager)
+
+            # Check if session exists locally (try both session IDs)
+            session_data = await unified_manager.get_session_by_id(session_id)
+            if not session_data and base_session_id != session_id:
+                session_data = await unified_manager.get_session_by_id(base_session_id)
+
+            if not session_data:
+                # Check if in active sessions and trigger upload
+                if session_id in queue_manager.active_sessions:
+                    user_request = queue_manager.active_sessions[session_id]
+                    if user_request.is_complete:
+                        queue_manager._trigger_s3_upload_for_session(user_request)
+                        # Wait for upload
+                        await asyncio.sleep(3)
+                        # Try cloud again
+                        try:
+                            download_data = await cloud_storage_manager.get_session_download_urls(session_id)
+                            if download_data:
+                                return download_data
+                        except:
+                            pass
+
+                if not session_data:
+                    raise HTTPException(status_code=404, detail="Session not found")
+
+            # Verify user owns this session
+            session_user_id = session_data.get("user_id")
+            if session_user_id and session_user_id != user_id:
+                raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+            storage_location = session_data.get("_storage_location", "unknown")
+
+            # Try cloud first
+            if storage_location == "cloud":
+                download_data = await cloud_storage_manager.get_session_download_urls(session_id)
+                if download_data:
+                    return download_data
+
+            # For local sessions or if cloud failed, try to create/find local zip
+            session_path = session_data.get("session_path")
+            if not session_path and session_data.get("is_complete"):
+                # Try to find session folder
+                import glob
+                patterns = [
+                    f"chat_sessions/*{session_id[:8]}*",
+                    f"chat_sessions/multiturn_*{session_id[:8]}*"
+                ]
+                for pattern in patterns:
+                    matches = glob.glob(pattern)
+                    if matches:
+                        session_path = matches[0]
+                        break
+
+            if session_path and os.path.exists(session_path):
+                # Create zip if it doesn't exist
+                zip_filename = f"session_{session_id[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                zip_path = os.path.join("chat_zips", zip_filename)
+
+                if not os.path.exists(zip_path):
+                    zip_path = create_session_zip(session_path, save_to_chat_zips=True)
+
+                # Return local download URL
+                return {
+                    "session_id": session_id,
+                    "download_url": f"/download/{session_id}?user_id={user_id}",
+                    "zip_available": True,
+                    "storage_type": storage_location
+                }
+
+            # No files found
+            raise HTTPException(status_code=404, detail="No downloadable files found for session")
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"Error getting download URLs for session {session_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error generating download URLs: {str(e)}")
+
+    # Note: Cloud storage is now integrated transparently into all endpoints
+    # Sessions are automatically uploaded to cloud when completed
+    # Use the standard endpoints (/all-sessions, /status/{id}, etc.) to access both local and cloud data
+
     parser = argparse.ArgumentParser(description="FastAPI Agent Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8001, help="Port to bind to")
-    parser.add_argument("--reload", action="store_true", help="Enable auto-reload")
-    
+    parser.add_argument("--no-reload", action="store_true", help="Disable auto-reload (auto-reload is enabled by default)")
+
     args = parser.parse_args()
-    
+
+    # Enable reload by default, disable only if --no-reload is specified
+    reload_enabled = not args.no_reload
+
     uvicorn.run(
         "agent_fastapi_server_multiturn:app",
         host=args.host,
         port=args.port,
-        reload=args.reload
+        reload=reload_enabled
     )

@@ -1,12 +1,13 @@
 """
-Multi-Turn Gradio Interface for FastAPI Agent Server
+Simplified Gradio Interface for FastAPI Agent Server
 
-This interface provides a multi-turn conversation frontend that communicates with the FastAPI agent server:
+This is a simplified interface that provides basic multi-turn conversation functionality:
+- Submit queries and view results
 - Continue conversations with follow-up questions
-- View complete conversation history with all turns
-- Check status with merged history and snapshots view
-- Stop tasks with history selection
-- Context-aware multi-turn interactions
+- View conversation history
+- Stop running tasks
+- No user management, delete, or trash features
+- All users default to: test_user_dleader
 """
 
 import argparse
@@ -468,8 +469,10 @@ No snapshots available yet."""
         return error_msg, gr.update(visible=False)
 
 
-def get_session_history(server_url: str, user_id: str = None) -> List[tuple]:
+def get_session_history(server_url: str, user_id: str = "test_user_dleader") -> List[tuple]:
     """Get session history for dropdown selection"""
+    # Always use default user in simplified version
+    user_id = "test_user_dleader"
     try:
         client = FastAPIClient(server_url)
         if not client.health_check():
@@ -562,7 +565,7 @@ Failed to stop the task. It may have already completed or there was a server err
 def create_interface(default_fastapi_url: str = "http://localhost:8001"):
     """Create the simplified Gradio interface"""
 
-    with gr.Blocks(title="Agent FastAPI Interface", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="Agent Interface (Simplified)", theme=gr.themes.Soft()) as demo:
         # Header section with logo and title
         with gr.Row():
             with gr.Column(scale=1, min_width=120):
@@ -579,9 +582,9 @@ def create_interface(default_fastapi_url: str = "http://localhost:8001"):
                 gr.HTML("""
                 <div style="display: flex; align-items: center; justify-content: center; height: 120px; background: #f8f9fa; color: #333; border: 2px solid #dee2e6; border-radius: 8px; margin: 10px; padding: 20px;">
                     <div style="text-align: center;">
-                        <h1 style="margin: 0; font-size: 2.2em; color: #2c3e50; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-weight: 600;">KumiChem AI Agent</h1>
-                        <p style="margin: 8px 0 0 0; font-size: 1.1em; color: #6c757d; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">Multi-Turn Conversation Interface</p>
-                        <p style="margin: 4px 0 0 0; font-size: 0.9em; color: #28a745; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">💬 Context-Aware Conversations</p>
+                        <h1 style="margin: 0; font-size: 2.2em; color: #2c3e50; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-weight: 600;">AI Agent - Simplified</h1>
+                        <p style="margin: 8px 0 0 0; font-size: 1.1em; color: #6c757d; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">Basic Multi-Turn Interface</p>
+                        <p style="margin: 4px 0 0 0; font-size: 0.9em; color: #007bff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">🚀 All users: test_user_dleader</p>
                     </div>
                 </div>
                 """)
@@ -601,13 +604,8 @@ def create_interface(default_fastapi_url: str = "http://localhost:8001"):
                         choices=[("English", "en"), ("Japanese", "jp")],
                         value="en"
                     )
-                    user_id_input = gr.Dropdown(
-                        label="User ID",
-                        choices=["Chen", "Yuan", "Zhang", "Test user", "Tom"],
-                        value="Chen",
-                        allow_custom_value=True,
-                        info="Select a user or type a custom ID"
-                    )
+                    # Fixed user ID for simplified version
+                    user_id_input = gr.State(value="test_user_dleader")
 
         # Main interface with tabs
         with gr.Tabs():
@@ -1102,278 +1100,6 @@ Please wait while I process your follow-up request..."""
         )
 
         # Trash Management Tab
-        with gr.Tab("🗑️ Trash"):
-            with gr.Row():
-                with gr.Column(scale=1):
-                    gr.Markdown("## 🗑️ Trash Management")
-
-                    with gr.Group():
-                        gr.Markdown("### Sessions Management")
-
-                        # Session selector for moving to trash
-                        refresh_sessions_for_trash_btn = gr.Button("🔄 Refresh Session List", variant="secondary")
-
-                        session_to_trash_selector = gr.Dropdown(
-                                label="Select session to move to trash",
-                                choices=[],
-                                value="",
-                                interactive=True,
-                                allow_custom_value=True
-                            )
-
-                        move_to_trash_btn = gr.Button("🗑️ Move to Trash", variant="primary")
-
-                    with gr.Group():
-                        gr.Markdown("### Trash Contents")
-
-                        # Refresh trash list button
-                        refresh_trash_btn = gr.Button("🔄 Refresh Trash", variant="secondary")
-
-                        # Trash selector dropdown
-                        trash_selector = gr.Dropdown(
-                                label="Sessions in trash",
-                                choices=[],
-                                value="",
-                                interactive=True,
-                                allow_custom_value=True
-                            )
-
-                        with gr.Row():
-                            restore_btn = gr.Button("♻️ Restore", variant="secondary", scale=1)
-                            permanent_delete_btn = gr.Button("🚮 Delete Forever", variant="stop", scale=1)
-                            empty_trash_btn = gr.Button("🗑️ Empty All Trash", variant="stop", scale=1)
-
-                with gr.Column(scale=1):
-                    gr.Markdown("## 📋 Trash Status")
-
-                    trash_status = gr.Markdown(
-                            """## 🗑️ Trash System
-
-**Two-Step Deletion Process:**
-1. **Move to Trash** - Soft delete (data preserved)
-2. **Delete Forever** - Permanent delete (removes from S3/MongoDB)
-
-**Features:**
-- ♻️ Restore sessions from trash
-- 🚮 Permanently delete individual sessions
-- 🗑️ Empty all trash at once
-- Complete cleanup of S3 and MongoDB data
-
-**Instructions:**
-1. Select a session and click "Move to Trash" to soft delete
-2. View trash contents with "Refresh Trash"
-3. Restore or permanently delete as needed
-
-⚠️ **Warning:** Permanent deletion cannot be undone!""",
-                            height=400
-                        )
-
-        # Trash management event handlers
-        def refresh_sessions_for_trash(server_url_value, user_id):
-            """Refresh regular sessions list for trash management"""
-            return gr.update(choices=get_session_history(server_url.value, user_id), value="")
-
-        def refresh_trash_list(server_url_value, user_id):
-            """Get trash sessions"""
-            # Ensure URL has protocol
-            if not server_url_value.startswith(('http://', 'https://')):
-                server_url_value = f"http://{server_url_value}"
-
-            try:
-                client = FastAPIClient(server_url_value)
-                response = requests.get(f"{server_url_value}/trash",
-                                       params={"user_id": user_id})
-                if response.status_code == 200:
-                    data = response.json()
-                    sessions = data.get("sessions", [])
-                    choices = []
-                    for session in sessions:
-                        session_id = session['session_id']
-                        query = session.get('query', 'No query')[:30]
-                        trashed_at = session.get('trashed_at', '')[:10]
-                        label = f"🗑️ {trashed_at} - {session_id[:8]}... - {query}"
-                        choices.append((label, session_id))
-                    return gr.update(choices=choices, value="")
-                return gr.update(choices=[], value="")
-            except Exception as e:
-                print(f"Error getting trash sessions: {e}")
-                return gr.update(choices=[], value="")
-
-        async def move_session_to_trash(session_id, server_url_value, user_id):
-            """Move a session to trash"""
-            if not session_id:
-                return "## ❌ Error\n\nPlease select a session to move to trash."
-
-            # Ensure URL has protocol
-            if not server_url_value.startswith(('http://', 'https://')):
-                server_url_value = f"http://{server_url_value}"
-
-            try:
-                response = requests.post(f"{server_url_value}/trash/{session_id}",
-                                        params={"user_id": user_id})
-                if response.status_code == 200:
-                    data = response.json()
-                    return f"""## ✅ Moved to Trash
-
-**Session ID:** `{session_id}`
-**Moved at:** {data.get('trashed_at', 'Unknown')}
-
-Session has been moved to trash. You can restore it anytime or permanently delete it."""
-                else:
-                    return f"""## ❌ Failed to Move to Trash
-
-**Session ID:** `{session_id}`
-**Error:** {response.text}"""
-            except Exception as e:
-                return f"""## ❌ Error
-
-**Error:** {str(e)}"""
-
-        async def restore_from_trash(session_id, server_url_value, user_id):
-            """Restore a session from trash"""
-            if not session_id:
-                return "## ❌ Error\n\nPlease select a session to restore."
-
-            # Ensure URL has protocol
-            if not server_url_value.startswith(('http://', 'https://')):
-                server_url_value = f"http://{server_url_value}"
-
-            try:
-                response = requests.post(f"{server_url_value}/restore/{session_id}",
-                                        params={"user_id": user_id})
-                if response.status_code == 200:
-                    data = response.json()
-                    return f"""## ♻️ Restored Successfully
-
-**Session ID:** `{session_id}`
-**Restored at:** {data.get('restored_at', 'Unknown')}
-
-Session has been restored from trash and is now active again."""
-                else:
-                    return f"""## ❌ Failed to Restore
-
-**Session ID:** `{session_id}`
-**Error:** {response.text}"""
-            except Exception as e:
-                return f"""## ❌ Error
-
-**Error:** {str(e)}"""
-
-        async def permanent_delete(session_id, server_url_value, user_id):
-            """Permanently delete a session"""
-            if not session_id:
-                return "## ❌ Error\n\nPlease select a session to delete permanently."
-
-            # Ensure URL has protocol
-            if not server_url_value.startswith(('http://', 'https://')):
-                server_url_value = f"http://{server_url_value}"
-
-            try:
-                response = requests.delete(f"{server_url_value}/permanent-delete/{session_id}",
-                                         params={"user_id": user_id, "confirm": True})
-                if response.status_code == 200:
-                    data = response.json()
-                    deleted_items = data.get('deleted_items', {})
-                    return f"""## 🚮 Permanently Deleted
-
-**Session ID:** `{session_id}`
-**Deleted at:** {data.get('deleted_at', 'Unknown')}
-
-**Deleted Items:**
-- Local files: {len(deleted_items.get('local_files', []))}
-- S3 objects: {len(deleted_items.get('s3_files', []))}
-- MongoDB docs: {len(deleted_items.get('mongodb_docs', []))}
-
-⚠️ This action cannot be undone."""
-                else:
-                    return f"""## ❌ Failed to Delete
-
-**Session ID:** `{session_id}`
-**Error:** {response.text}"""
-            except Exception as e:
-                return f"""## ❌ Error
-
-**Error:** {str(e)}"""
-
-        async def empty_all_trash(server_url_value, user_id):
-            """Empty all trash"""
-            # Ensure URL has protocol
-            if not server_url_value.startswith(('http://', 'https://')):
-                server_url_value = f"http://{server_url_value}"
-
-            try:
-                response = requests.post(f"{server_url_value}/empty-trash",
-                                        params={"user_id": user_id, "confirm": True})
-                if response.status_code == 200:
-                    data = response.json()
-                    return f"""## 🗑️ Trash Emptied
-
-**Status:** {data.get('status', 'Unknown')}
-**Deleted count:** {data.get('deleted_count', 0)}
-**Emptied at:** {data.get('emptied_at', 'Unknown')}
-
-All trash items have been permanently deleted.
-
-⚠️ This action cannot be undone."""
-                else:
-                    return f"""## ❌ Failed to Empty Trash
-
-**Error:** {response.text}"""
-            except Exception as e:
-                return f"""## ❌ Error
-
-**Error:** {str(e)}"""
-
-        # Wire up trash events
-        refresh_sessions_for_trash_btn.click(
-            fn=refresh_sessions_for_trash,
-            inputs=[server_url, user_id_input],
-            outputs=[session_to_trash_selector]
-        )
-
-        refresh_trash_btn.click(
-            fn=refresh_trash_list,
-            inputs=[server_url, user_id_input],
-            outputs=[trash_selector]
-        )
-
-        move_to_trash_btn.click(
-            fn=move_session_to_trash,
-            inputs=[session_to_trash_selector, server_url, user_id_input],
-            outputs=[trash_status]
-        )
-
-        restore_btn.click(
-            fn=restore_from_trash,
-            inputs=[trash_selector, server_url, user_id_input],
-            outputs=[trash_status]
-        )
-
-        permanent_delete_btn.click(
-            fn=permanent_delete,
-            inputs=[trash_selector, server_url, user_id_input],
-            outputs=[trash_status]
-        )
-
-        empty_trash_btn.click(
-            fn=empty_all_trash,
-            inputs=[server_url, user_id_input],
-            outputs=[trash_status]
-        )
-
-        # Initialize session lists on load
-        demo.load(
-            fn=lambda url, user_id: (
-                refresh_status_history(user_id),
-                refresh_stop_history(user_id)
-            ),
-            inputs=[server_url, user_id_input],
-            outputs=[status_session_selector, stop_session_selector]
-        )
-
-    return demo
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Simplified Gradio Interface for FastAPI Agent Server")
     parser.add_argument("--server_port", type=int, default=7861, help="Port to run the Gradio server on (default: 7861)")

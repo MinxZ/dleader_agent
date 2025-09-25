@@ -224,9 +224,10 @@ data/ddinter_raw/
 # VSCode
 /.vscode
 analysis_results/
-chat_sessions/
 kegg/
 extracted_examples/
 pdf/
+chat_sessions/
 chat_zips/
 session_storage/
+multiturn_sessions/
