@@ -563,5 +563,145 @@ class CloudStorageManager:
                 "error": str(e)
             }
 
+    # ============= COMMUNITY SHARING METHODS =============
+
+    async def store_shared_session(self, shared_data: Dict) -> Dict[str, Any]:
+        """Store a shared session in the community collection"""
+        try:
+            session_id = shared_data.get("session_id")
+            logger.info(f"Storing shared session {session_id} to community collection")
+
+            # Add metadata fields
+            shared_data["_id"] = session_id
+            shared_data["indexed_at"] = datetime.now().isoformat()
+
+            # Store in community_sessions collection
+            event = {
+                "database_name": self.database_name,
+                "collection_name": "community_sessions",
+                "items": [shared_data],
+                "id_field": "_id"
+            }
+
+            result = upsert_wrapper(event)
+
+            if result.get("statusCode") == 200:
+                logger.info(f"Shared session {session_id} stored successfully")
+                return {"success": True, "session_id": session_id}
+            else:
+                raise Exception(f"Failed to store shared session: {result}")
+
+        except Exception as e:
+            logger.error(f"Failed to store shared session {session_id}: {e}")
+            raise
+
+    async def remove_shared_session(self, session_id: str) -> Dict[str, Any]:
+        """Remove a session from the community collection"""
+        try:
+            logger.info(f"Removing shared session {session_id} from community collection")
+
+            collection = get_mongodb_collection(self.database_name, "community_sessions")
+            if collection is not None:
+                result = collection.delete_one({"session_id": session_id})
+                if result.deleted_count > 0:
+                    logger.info(f"Shared session {session_id} removed successfully")
+                    return {"success": True, "session_id": session_id}
+
+            return {"success": False, "message": "Session not found"}
+
+        except Exception as e:
+            logger.error(f"Failed to remove shared session {session_id}: {e}")
+            raise
+
+    async def search_shared_sessions(self, tags: List[str] = None, search_query: str = None,
+                                    visibility: str = "community", limit: int = 50,
+                                    offset: int = 0) -> Dict[str, Any]:
+        """Search for shared sessions based on tags and query"""
+        try:
+            collection = get_mongodb_collection(self.database_name, "community_sessions")
+            if collection is None:
+                return {"sessions": [], "total": 0}
+
+            # Build query
+            query = {"visibility": visibility}
+
+            if tags:
+                query["tags"] = {"$in": tags}
+
+            if search_query:
+                # Search in title, description, and first/last query
+                query["$or"] = [
+                    {"title": {"$regex": search_query, "$options": "i"}},
+                    {"description": {"$regex": search_query, "$options": "i"}},
+                    {"first_query": {"$regex": search_query, "$options": "i"}},
+                    {"last_query": {"$regex": search_query, "$options": "i"}}
+                ]
+
+            # Count total matching documents
+            total = collection.count_documents(query)
+
+            # Get paginated results
+            sessions = list(collection.find(query)
+                          .sort("shared_at", -1)
+                          .skip(offset)
+                          .limit(limit))
+
+            # Clean up MongoDB _id field
+            for session in sessions:
+                if "_id" in session:
+                    session["_id"] = str(session["_id"])
+
+            return {
+                "sessions": sessions,
+                "total": total
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to search shared sessions: {e}")
+            return {"sessions": [], "total": 0}
+
+    async def get_shared_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get a specific shared session"""
+        try:
+            collection = get_mongodb_collection(self.database_name, "community_sessions")
+            if collection is None:
+                return None
+
+            session = collection.find_one({"session_id": session_id})
+            if session:
+                if "_id" in session:
+                    session["_id"] = str(session["_id"])
+                return session
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Failed to get shared session {session_id}: {e}")
+            return None
+
+    async def get_popular_tags(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get popular tags from shared sessions"""
+        try:
+            collection = get_mongodb_collection(self.database_name, "community_sessions")
+            if collection is None:
+                return []
+
+            # Aggregate to get tag counts
+            pipeline = [
+                {"$match": {"visibility": {"$ne": "private"}}},
+                {"$unwind": "$tags"},
+                {"$group": {"_id": "$tags", "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}},
+                {"$limit": limit},
+                {"$project": {"tag": "$_id", "count": 1, "_id": 0}}
+            ]
+
+            result = list(collection.aggregate(pipeline))
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to get popular tags: {e}")
+            return []
+
 # Global instance
 cloud_storage_manager = CloudStorageManager()

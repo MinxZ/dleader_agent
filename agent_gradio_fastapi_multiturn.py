@@ -824,6 +824,88 @@ Choose to start a new conversation or continue an existing one from the left pan
                             visible=False
                         )
 
+        # Community Sharing Tab
+        with gr.Tab("🌍 Community Sharing"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("## 🌍 Community Sharing")
+
+                    with gr.Group():
+                        gr.Markdown("### Share Your Sessions")
+
+                        # Session selector for sharing
+                        refresh_sessions_for_sharing_btn = gr.Button("🔄 Refresh My Sessions", variant="secondary")
+
+                        session_to_share_dropdown = gr.Dropdown(
+                            label="Select Session to Share",
+                            choices=[],
+                            interactive=True,
+                            info="Choose a session to share with the community"
+                        )
+
+                        share_title_input = gr.Textbox(
+                            label="Title",
+                            placeholder="Enter a descriptive title for your shared session",
+                            info="This will be displayed in search results"
+                        )
+
+                        share_description_input = gr.Textbox(
+                            label="Description (Optional)",
+                            placeholder="Describe what this conversation is about",
+                            lines=3
+                        )
+
+                        share_tags_input = gr.Textbox(
+                            label="Tags (comma-separated)",
+                            placeholder="e.g., drug-discovery, cancer-research, protein-analysis",
+                            info="Add tags to help others find your session"
+                        )
+
+                        share_visibility_dropdown = gr.Dropdown(
+                            label="Visibility",
+                            choices=[("Community", "community"), ("Public", "public"), ("Private", "private")],
+                            value="community",
+                            info="Who can see this shared session"
+                        )
+
+                        share_session_btn = gr.Button("📤 Share Session", variant="primary")
+
+                    share_result = gr.Markdown("")
+
+                with gr.Column(scale=1):
+                    gr.Markdown("### 🔍 Search Community Sessions")
+
+                    with gr.Group():
+                        search_query_input = gr.Textbox(
+                            label="Search Query",
+                            placeholder="Search by title, description, or content",
+                            info="Leave empty to browse all"
+                        )
+
+                        search_tags_input = gr.Textbox(
+                            label="Filter by Tags (comma-separated)",
+                            placeholder="e.g., cancer-research, protein-analysis",
+                            info="Filter results by specific tags"
+                        )
+
+                        popular_tags_output = gr.Markdown("**Popular Tags:** Loading...")
+
+                        search_sessions_btn = gr.Button("🔍 Search Sessions", variant="primary")
+
+                    search_results = gr.Markdown("")
+
+                    with gr.Group():
+                        gr.Markdown("### 📖 View Shared Session")
+
+                        shared_session_id_input = gr.Textbox(
+                            label="Session ID",
+                            placeholder="Enter the session ID to view"
+                        )
+
+                        view_shared_btn = gr.Button("👁️ View Session", variant="secondary")
+
+                    shared_session_display = gr.Markdown("")
+
         # Event handlers
 
         def clear_status_interface():
@@ -881,6 +963,179 @@ Completed tasks cannot be stopped."""  # Reset stop results
             return status_text
 
         # Wire up events
+
+        # Community Sharing Functions
+        async def share_session(session_id, title, description, tags, visibility, server_url_value, user_id):
+            """Share a session with the community"""
+            if not session_id:
+                return "## ❌ Error\n\nPlease select a session to share."
+            if not title:
+                return "## ❌ Error\n\nPlease provide a title for the shared session."
+
+            # Ensure URL has protocol
+            if not server_url_value.startswith(('http://', 'https://')):
+                server_url_value = f"http://{server_url_value}"
+
+            try:
+                # Parse tags
+                tag_list = [tag.strip() for tag in tags.split(',') if tag.strip()] if tags else []
+
+                # Prepare request data
+                share_data = {
+                    "session_id": session_id,
+                    "title": title,
+                    "description": description,
+                    "tags": tag_list,
+                    "visibility": visibility,
+                    "user_id": user_id
+                }
+
+                response = requests.post(f"{server_url_value}/share-session", json=share_data)
+                if response.status_code == 200:
+                    data = response.json()
+                    return f"""## ✅ Session Shared Successfully!
+
+**Session ID:** `{session_id}`
+**Title:** {title}
+**Tags:** {', '.join(tag_list) if tag_list else 'None'}
+**Visibility:** {visibility}
+**Shared at:** {data.get('shared_at', 'Unknown')}
+
+Your session is now available for the community to search and view!"""
+                else:
+                    return f"""## ❌ Failed to Share Session
+
+**Error:** {response.text}"""
+            except Exception as e:
+                return f"""## ❌ Error
+
+**Error:** {str(e)}"""
+
+        async def search_community_sessions(query, tags, server_url_value):
+            """Search for shared sessions in the community"""
+            # Ensure URL has protocol
+            if not server_url_value.startswith(('http://', 'https://')):
+                server_url_value = f"http://{server_url_value}"
+
+            try:
+                # Parse tags
+                tag_list = [tag.strip() for tag in tags.split(',') if tag.strip()] if tags else []
+
+                # Prepare search data
+                search_data = {
+                    "search_query": query if query else None,
+                    "tags": tag_list if tag_list else None,
+                    "visibility": "community",
+                    "limit": 20,
+                    "offset": 0
+                }
+
+                response = requests.post(f"{server_url_value}/search-shared-sessions", json=search_data)
+                if response.status_code == 200:
+                    data = response.json()
+                    sessions = data.get('sessions', [])
+                    total = data.get('total', 0)
+
+                    if not sessions:
+                        return "## 🔍 No Results Found\n\nTry different search terms or tags."
+
+                    results = f"## 🔍 Search Results ({total} found)\n\n"
+                    for session in sessions[:10]:  # Show first 10
+                        title = session.get('title', 'Untitled')
+                        session_id = session.get('session_id', '')
+                        tags = session.get('tags', [])
+                        shared_by = session.get('shared_by', 'Unknown')
+                        turns = session.get('total_turns', 0)
+
+                        results += f"""### 📄 {title}
+**ID:** `{session_id[:8]}...`
+**Shared by:** {shared_by}
+**Tags:** {', '.join(tags) if tags else 'None'}
+**Turns:** {turns}
+
+---
+"""
+                    return results
+                else:
+                    return f"""## ❌ Search Failed
+
+**Error:** {response.text}"""
+            except Exception as e:
+                return f"""## ❌ Error
+
+**Error:** {str(e)}"""
+
+        async def view_shared_session(session_id, server_url_value):
+            """View a shared session"""
+            if not session_id:
+                return "## ❌ Error\n\nPlease enter a session ID."
+
+            # Ensure URL has protocol
+            if not server_url_value.startswith(('http://', 'https://')):
+                server_url_value = f"http://{server_url_value}"
+
+            try:
+                response = requests.get(f"{server_url_value}/shared-session/{session_id}")
+                if response.status_code == 200:
+                    session = response.json()
+                    title = session.get('title', 'Untitled')
+                    description = session.get('description', 'No description')
+                    tags = session.get('tags', [])
+                    shared_by = session.get('shared_by', 'Unknown')
+                    turns = session.get('turns', [])
+
+                    result = f"""## 📖 {title}
+
+**Shared by:** {shared_by}
+**Tags:** {', '.join(tags) if tags else 'None'}
+
+### Description
+{description}
+
+### Conversation ({len(turns)} turns)
+
+"""
+                    for turn in turns:
+                        turn_num = turn.get('turn_number', 0)
+                        query = turn.get('query', '')
+                        report = turn.get('final_report', '')
+
+                        result += f"""**Turn {turn_num} - User:**
+{query}
+
+**Agent Response:**
+{report[:500] if report else 'No response'}...
+
+---
+"""
+                    return result
+                else:
+                    return f"""## ❌ Session Not Found
+
+**Error:** {response.text}"""
+            except Exception as e:
+                return f"""## ❌ Error
+
+**Error:** {str(e)}"""
+
+        async def get_popular_tags(server_url_value):
+            """Get popular tags"""
+            # Ensure URL has protocol
+            if not server_url_value.startswith(('http://', 'https://')):
+                server_url_value = f"http://{server_url_value}"
+
+            try:
+                response = requests.get(f"{server_url_value}/popular-tags?limit=15")
+                if response.status_code == 200:
+                    data = response.json()
+                    tags = data.get('tags', [])
+                    if tags:
+                        tag_list = [f"{tag['tag']} ({tag['count']})" for tag in tags]
+                        return f"**Popular Tags:** {', '.join(tag_list)}"
+                    return "**Popular Tags:** No tags yet"
+                return "**Popular Tags:** Unable to load"
+            except:
+                return "**Popular Tags:** Unable to load"
 
         # Status checking events
         # Refresh status session list
@@ -958,6 +1213,11 @@ Completed tasks cannot be stopped."""  # Reset stop results
             except Exception as e:
                 print(f"Error getting multiturn sessions: {e}")
                 return []
+
+        def get_all_multiturn_sessions(url, user_id=None):
+            """Get all multi-turn sessions as dropdown choices for sharing"""
+            choices = get_multiturn_sessions(url, user_id)
+            return gr.update(choices=choices, value="")
 
         def refresh_multiturn_sessions(url, user_id):
             """Refresh the multi-turn sessions dropdown"""
@@ -1359,6 +1619,53 @@ All trash items have been permanently deleted.
             fn=empty_all_trash,
             inputs=[server_url, user_id_input],
             outputs=[trash_status]
+        )
+
+        # Community Sharing Events
+        refresh_sessions_for_sharing_btn.click(
+            fn=get_all_multiturn_sessions,
+            inputs=[server_url, user_id_input],
+            outputs=[session_to_share_dropdown]
+        )
+
+        share_session_btn.click(
+            fn=share_session,
+            inputs=[
+                session_to_share_dropdown,
+                share_title_input,
+                share_description_input,
+                share_tags_input,
+                share_visibility_dropdown,
+                server_url,
+                user_id_input
+            ],
+            outputs=[share_result]
+        )
+
+        search_sessions_btn.click(
+            fn=search_community_sessions,
+            inputs=[
+                search_query_input,
+                search_tags_input,
+                server_url
+            ],
+            outputs=[search_results]
+        )
+
+        view_shared_btn.click(
+            fn=view_shared_session,
+            inputs=[
+                shared_session_id_input,
+                server_url
+            ],
+            outputs=[shared_session_display]
+        )
+
+        # Load popular tags on startup
+        demo.load(
+            fn=get_popular_tags,
+            inputs=[server_url],
+            outputs=[popular_tags_output]
         )
 
         # Initialize session lists on load

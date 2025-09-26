@@ -113,6 +113,14 @@ class MultiTurnSession(BaseModel):
     accumulated_context: str = ""
     session_status: str = "active"  # active, completed, error
 
+    # Sharing metadata
+    is_shared: bool = False
+    shared_at: Optional[str] = None
+    share_tags: List[str] = []
+    share_title: Optional[str] = None
+    share_description: Optional[str] = None
+    share_visibility: str = "private"  # private, public, community
+
     @property
     def first_query(self) -> str:
         """Get the first query from the turns"""
@@ -128,6 +136,35 @@ class ContinueRequest(BaseModel):
     message: str
     language: Language = Language.EN
     user_id: Optional[str] = None
+
+# Sharing Models
+class ShareSessionRequest(BaseModel):
+    session_id: str
+    title: str
+    description: Optional[str] = None
+    tags: List[str] = []
+    visibility: str = "community"  # private, public, community
+    user_id: Optional[str] = None
+
+class SharedSessionInfo(BaseModel):
+    session_id: str
+    title: str
+    description: Optional[str] = None
+    tags: List[str]
+    visibility: str
+    shared_by: str
+    shared_at: str
+    total_turns: int
+    language: str
+    first_query: str
+    last_query: str
+
+class SearchSharedSessionsRequest(BaseModel):
+    tags: Optional[List[str]] = None
+    search_query: Optional[str] = None
+    visibility: Optional[str] = "community"
+    limit: int = 50
+    offset: int = 0
 
 # Queue Management System
 class UserRequest:
@@ -2727,6 +2764,178 @@ async def get_session_context(session_id: str, user_id: str):
         "total_turns": multiturn_session.total_turns
     }
 
+# ============= SESSION SHARING ENDPOINTS =============
+
+@app.post("/share-session")
+async def share_session(request: ShareSessionRequest):
+    """Share a multi-turn session with the community"""
+    try:
+        # Get the session to share
+        multiturn_session = queue_manager.multiturn_sessions.get(request.session_id)
+        if not multiturn_session:
+            # Try to get from cloud storage
+            unified_manager = get_unified_session_manager(queue_manager)
+            session_data = await unified_manager.get_session_by_id(request.session_id)
+            if not session_data:
+                raise HTTPException(status_code=404, detail="Session not found")
+
+            # Convert to MultiTurnSession if from cloud
+            multiturn_session = MultiTurnSession(**session_data)
+
+        # Verify user owns this session
+        if multiturn_session.user_id and multiturn_session.user_id != request.user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        # Update sharing metadata
+        multiturn_session.is_shared = True
+        multiturn_session.shared_at = datetime.now().isoformat()
+        multiturn_session.share_tags = request.tags
+        multiturn_session.share_title = request.title
+        multiturn_session.share_description = request.description
+        multiturn_session.share_visibility = request.visibility
+
+        # Save updated session
+        queue_manager.multiturn_sessions[request.session_id] = multiturn_session
+        queue_manager._save_multiturn_session(multiturn_session)
+
+        # Upload to cloud storage for community access
+        if cloud_storage_manager:
+            # Prepare shared session data
+            shared_data = {
+                "session_id": multiturn_session.session_id,
+                "title": request.title,
+                "description": request.description,
+                "tags": request.tags,
+                "visibility": request.visibility,
+                "shared_by": request.user_id,
+                "shared_at": multiturn_session.shared_at,
+                "total_turns": multiturn_session.total_turns,
+                "language": multiturn_session.language,
+                "first_query": multiturn_session.first_query,
+                "last_query": multiturn_session.latest_query,
+                "turns": [turn.dict() for turn in multiturn_session.turns],
+                "created_at": multiturn_session.created_at,
+                "last_updated": multiturn_session.last_updated
+            }
+
+            # Store in community collection
+            await cloud_storage_manager.store_shared_session(shared_data)
+
+        return {
+            "success": True,
+            "session_id": request.session_id,
+            "shared_at": multiturn_session.shared_at,
+            "message": "Session shared successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error sharing session: {e}")
+        raise HTTPException(status_code=500, detail=f"Error sharing session: {str(e)}")
+
+@app.post("/unshare-session")
+async def unshare_session(session_id: str, user_id: str):
+    """Remove a session from community sharing"""
+    try:
+        # Get the session
+        multiturn_session = queue_manager.multiturn_sessions.get(session_id)
+        if not multiturn_session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # Verify user owns this session
+        if multiturn_session.user_id and multiturn_session.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        # Update sharing metadata
+        multiturn_session.is_shared = False
+        multiturn_session.share_visibility = "private"
+
+        # Save updated session
+        queue_manager.multiturn_sessions[session_id] = multiturn_session
+        queue_manager._save_multiturn_session(multiturn_session)
+
+        # Remove from cloud community collection
+        if cloud_storage_manager:
+            await cloud_storage_manager.remove_shared_session(session_id)
+
+        return {
+            "success": True,
+            "session_id": session_id,
+            "message": "Session unshared successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error unsharing session: {e}")
+        raise HTTPException(status_code=500, detail=f"Error unsharing session: {str(e)}")
+
+@app.post("/search-shared-sessions")
+async def search_shared_sessions(request: SearchSharedSessionsRequest):
+    """Search for shared sessions in the community"""
+    try:
+        if not cloud_storage_manager:
+            return {"sessions": [], "total": 0}
+
+        # Search in cloud storage
+        results = await cloud_storage_manager.search_shared_sessions(
+            tags=request.tags,
+            search_query=request.search_query,
+            visibility=request.visibility,
+            limit=request.limit,
+            offset=request.offset
+        )
+
+        return {
+            "sessions": results.get("sessions", []),
+            "total": results.get("total", 0),
+            "limit": request.limit,
+            "offset": request.offset
+        }
+
+    except Exception as e:
+        print(f"Error searching shared sessions: {e}")
+        raise HTTPException(status_code=500, detail=f"Error searching sessions: {str(e)}")
+
+@app.get("/shared-session/{session_id}")
+async def get_shared_session(session_id: str):
+    """Get a specific shared session (public access)"""
+    try:
+        if not cloud_storage_manager:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # Get from cloud storage
+        session_data = await cloud_storage_manager.get_shared_session(session_id)
+        if not session_data:
+            raise HTTPException(status_code=404, detail="Shared session not found")
+
+        # Check if session is actually shared
+        if not session_data.get("visibility") or session_data["visibility"] == "private":
+            raise HTTPException(status_code=403, detail="Session is not publicly shared")
+
+        return session_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting shared session: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving session: {str(e)}")
+
+@app.get("/popular-tags")
+async def get_popular_tags(limit: int = 20):
+    """Get popular tags used in shared sessions"""
+    try:
+        if not cloud_storage_manager:
+            return {"tags": []}
+
+        tags = await cloud_storage_manager.get_popular_tags(limit=limit)
+        return {"tags": tags}
+
+    except Exception as e:
+        print(f"Error getting popular tags: {e}")
+        return {"tags": []}
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -3025,6 +3234,120 @@ async def empty_trash(user_id: str, confirm: bool = False):
     except Exception as e:
         print(f"Error emptying trash: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/hard-delete/{session_id}")
+async def hard_delete_session(session_id: str, user_id: str, confirm: bool = False):
+    """
+    Hard delete - Immediately and permanently delete a session without moving to trash
+    This action cannot be undone!
+    """
+    try:
+        if not confirm:
+            raise HTTPException(
+                status_code=400,
+                detail="Must confirm hard deletion with confirm=true. This action cannot be undone!"
+            )
+
+        # Get unified session manager
+        unified_manager = get_unified_session_manager(queue_manager)
+
+        # Verify the session exists and user owns it
+        session_data = await unified_manager.get_session_by_id(session_id)
+        if not session_data:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # Verify user owns this session
+        session_user_id = session_data.get("user_id")
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        deleted_items = {
+            "local_files": [],
+            "s3_files": [],
+            "mongodb_docs": []
+        }
+
+        # 1. Delete all local files and folders
+        # Delete from session_storage
+        session_file = f"session_storage/{session_id}.json"
+        if os.path.exists(session_file):
+            os.remove(session_file)
+            deleted_items["local_files"].append(session_file)
+
+        # Delete from multiturn_sessions
+        multiturn_file = f"multiturn_sessions/{session_id}.json"
+        if os.path.exists(multiturn_file):
+            os.remove(multiturn_file)
+            deleted_items["local_files"].append(multiturn_file)
+
+        # Remove from in-memory multiturn sessions
+        if session_id in queue_manager.multiturn_sessions:
+            del queue_manager.multiturn_sessions[session_id]
+            deleted_items["local_files"].append(f"In-memory multiturn session")
+
+        # Remove from active sessions if present
+        if session_id in queue_manager.active_sessions:
+            del queue_manager.active_sessions[session_id]
+            deleted_items["local_files"].append(f"Active session")
+
+        # Delete any turn-specific files
+        import glob
+        turn_files = glob.glob(f"session_storage/{session_id}_turn_*.json")
+        for turn_file in turn_files:
+            if os.path.exists(turn_file):
+                os.remove(turn_file)
+                deleted_items["local_files"].append(turn_file)
+
+        # Delete zip files
+        zip_files = glob.glob(f"chat_zips/*{session_id[:8]}*.zip")
+        for zip_file in zip_files:
+            if os.path.exists(zip_file):
+                os.remove(zip_file)
+                deleted_items["local_files"].append(zip_file)
+
+        # Delete session folders
+        session_folders = glob.glob(f"chat_sessions/*{session_id[:8]}*")
+        for folder in session_folders:
+            if os.path.exists(folder):
+                import shutil
+                shutil.rmtree(folder)
+                deleted_items["local_files"].append(folder)
+
+        # 2. Delete from S3 (if exists)
+        try:
+            s3_deleted = await cloud_storage_manager.delete_session_from_s3(session_id)
+            deleted_items["s3_files"] = s3_deleted
+        except Exception as e:
+            print(f"S3 deletion error (continuing): {e}")
+
+        # 3. Delete from MongoDB (if exists)
+        try:
+            mongo_deleted = await cloud_storage_manager.delete_session_from_mongodb(session_id)
+            deleted_items["mongodb_docs"] = mongo_deleted
+        except Exception as e:
+            print(f"MongoDB deletion error (continuing): {e}")
+
+        # 4. Delete from community_sessions if shared
+        try:
+            await cloud_storage_manager.remove_shared_session(session_id)
+            deleted_items["mongodb_docs"].append("community_sessions")
+        except Exception as e:
+            print(f"Community session deletion error (continuing): {e}")
+
+        return {
+            "status": "success",
+            "message": "Session hard deleted permanently",
+            "session_id": session_id,
+            "deleted_items": deleted_items,
+            "deleted_at": datetime.now().isoformat(),
+            "deleted_by": user_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error hard deleting session: {e}")
+        raise HTTPException(status_code=500, detail=f"Error hard deleting session: {str(e)}")
 
 if __name__ == "__main__":
     import argparse

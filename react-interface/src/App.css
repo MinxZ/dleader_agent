@@ -1,0 +1,375 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+  background-color: #212121;
+  color: #e3e3e3;
+}
+
+.sidebar {
+  width: 260px;
+  background-color: #171717;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #2d2d2d;
+}
+
+.sidebar-header {
+  padding: 12px;
+  border-bottom: 1px solid #2d2d2d;
+}
+
+.new-chat-btn {
+  width: 100%;
+  padding: 10px;
+  background-color: transparent;
+  color: #e3e3e3;
+  border: 1px solid #2d2d2d;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background-color 0.2s;
+}
+
+.new-chat-btn:hover {
+  background-color: #2d2d2d;
+}
+
+.sidebar-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.session-item {
+  padding: 8px 12px;
+  background-color: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  color: #c5c5c5;
+  font-size: 14px;
+  transition: background-color 0.2s;
+  position: relative;
+}
+
+.session-item:hover {
+  background-color: #2d2d2d;
+}
+
+.session-item.active {
+  background-color: #2d2d2d;
+}
+
+.session-item .delete-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  transition: opacity 0.2s;
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.session-item:hover .delete-btn {
+  opacity: 1;
+}
+
+.session-item .delete-btn:hover {
+  color: #ff4444;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chat-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  max-width: 768px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding-bottom: 20px;
+}
+
+.message {
+  display: flex;
+  gap: 12px;
+  padding: 20px 0;
+}
+
+.message.user {
+  background-color: transparent;
+}
+
+.message.assistant {
+  background-color: #2f2f2f;
+  margin-left: -100vw;
+  margin-right: -100vw;
+  padding-left: 100vw;
+  padding-right: 100vw;
+}
+
+.message-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 4px;
+  background-color: #5436da;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: bold;
+  color: white;
+  flex-shrink: 0;
+}
+
+.message.assistant .message-avatar {
+  background-color: #19c37d;
+}
+
+.message-content {
+  flex: 1;
+  line-height: 1.5;
+}
+
+.message-content pre {
+  background-color: #1a1a1a;
+  border-radius: 6px;
+  padding: 12px;
+  overflow-x: auto;
+  margin: 10px 0;
+}
+
+.message-content code {
+  background-color: #1a1a1a;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 14px;
+}
+
+.input-container {
+  padding: 20px;
+  border-top: 1px solid #2d2d2d;
+  max-width: 768px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.input-wrapper {
+  display: flex;
+  gap: 12px;
+  background-color: #2f2f2f;
+  border: 1px solid #3d3d3d;
+  border-radius: 12px;
+  padding: 12px;
+  align-items: flex-end;
+}
+
+.message-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #e3e3e3;
+  font-size: 16px;
+  resize: none;
+  outline: none;
+  min-height: 24px;
+  max-height: 200px;
+  line-height: 1.5;
+}
+
+.message-input::placeholder {
+  color: #8e8e8e;
+}
+
+.input-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.input-btn {
+  background: transparent;
+  border: none;
+  color: #8e8e8e;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s;
+}
+
+.input-btn:hover {
+  background-color: #3d3d3d;
+  color: #e3e3e3;
+}
+
+.input-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.input-btn.send-btn {
+  background-color: #e3e3e3;
+  color: #171717;
+}
+
+.input-btn.send-btn:hover:not(:disabled) {
+  background-color: #ffffff;
+}
+
+.status-indicator {
+  padding: 8px 12px;
+  background-color: #2f2f2f;
+  border-radius: 6px;
+  font-size: 14px;
+  margin-bottom: 10px;
+}
+
+.status-indicator.queued {
+  border-left: 3px solid #f39c12;
+}
+
+.status-indicator.running {
+  border-left: 3px solid #3498db;
+}
+
+.status-indicator.completed {
+  border-left: 3px solid #2ecc71;
+}
+
+.status-indicator.failed {
+  border-left: 3px solid #e74c3c;
+}
+
+.loading-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.loading-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #8e8e8e;
+  animation: pulse 1.4s infinite;
+}
+
+.loading-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.loading-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes pulse {
+  0%, 60%, 100% {
+    opacity: 0.3;
+  }
+  30% {
+    opacity: 1;
+  }
+}
+
+.file-upload-area {
+  margin-top: 10px;
+  padding: 10px;
+  background-color: #1a1a1a;
+  border-radius: 6px;
+}
+
+.uploaded-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.uploaded-file {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background-color: #2f2f2f;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.remove-file-btn {
+  background: none;
+  border: none;
+  color: #8e8e8e;
+  cursor: pointer;
+  padding: 2px;
+}
+
+.remove-file-btn:hover {
+  color: #ff4444;
+}
+
+.context-menu {
+  position: fixed;
+  background-color: #2f2f2f;
+  border: 1px solid #3d3d3d;
+  border-radius: 6px;
+  padding: 4px 0;
+  z-index: 1000;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.context-menu-item {
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #e3e3e3;
+  transition: background-color 0.2s;
+}
+
+.context-menu-item:hover {
+  background-color: #3d3d3d;
+}
+
+.context-menu-item.delete {
+  color: #ff4444;
+}
