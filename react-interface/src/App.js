@@ -21,7 +21,7 @@ function App() {
   const chatContainerRef = useRef(null);
   const fileInputRef = useRef(null);
   const statusCheckInterval = useRef(null);
-  const apiClient = useRef(new ApiClient('http://localhost:8001'));
+  const apiClient = useRef(new ApiClient(process.env.REACT_APP_API_URL || 'http://52.192.211.135:8001'));
 
   useEffect(() => {
     loadSessions();

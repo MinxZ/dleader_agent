@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 class ApiClient {
-  constructor(baseUrl = 'http://localhost:8001') {
+  constructor(baseUrl = process.env.REACT_APP_API_URL || 'http://52.192.211.135:8001') {
     this.baseUrl = baseUrl;
     this.client = axios.create({
       baseURL: baseUrl,
