@@ -15,6 +15,7 @@ This FastAPI server provides:
 import asyncio
 import glob
 import json
+import logging
 import multiprocessing
 import os
 import queue
@@ -51,6 +52,14 @@ from dleader_agent.agent.a1 import A1
 from unified_session_manager import get_unified_session_manager
 # Import enhanced multi-turn handler
 from enhanced_multiturn_handler import EnhancedMultiTurnHandler
+
+# Configure logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# File size limits
+MAX_FILE_SIZE_MB = 10  # Maximum file size in MB
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024  # Convert to bytes
 
 # Language and timezone configurations
 JST = timezone(timedelta(hours=9))
@@ -930,11 +939,24 @@ class QueueManager:
                     enhanced_files = {}
                     for file_name, file_path in (files.items() if isinstance(files, dict) else enumerate(files)):
                         if isinstance(file_path, str):
-                            enhanced_files[file_name if isinstance(files, dict) else str(file_path)] = {
+                            file_metadata = {
                                 'path': file_path,
                                 'turn': turn_number,
                                 'created_at': datetime.now().isoformat()
                             }
+
+                            # Check if we have S3 metadata for this file
+                            turn_key = f"{session_id}_turn_{turn_number}"
+                            if hasattr(self, '_temp_s3_metadata') and turn_key in self._temp_s3_metadata:
+                                s3_metadata = self._temp_s3_metadata[turn_key].get(file_name, {})
+                                if s3_metadata:
+                                    file_metadata.update({
+                                        's3_key': s3_metadata.get('s3_key'),
+                                        'bucket': s3_metadata.get('bucket'),
+                                        'file_size': s3_metadata.get('file_size')
+                                    })
+
+                            enhanced_files[file_name if isinstance(files, dict) else str(file_path)] = file_metadata
                         else:
                             enhanced_files[file_name] = file_path
                     turn.files = enhanced_files
@@ -1079,41 +1101,89 @@ class QueueManager:
             # Handle uploaded files for this turn
             if user_request.uploaded_files:
                 user_request.progress_queue.put({"type": "status", "message": "Processing uploaded files..."})
+                print(f"Processing {len(user_request.uploaded_files)} uploaded files for session {user_request.session_id}")
+                print(f"Session path: {session_path}")
+
+                # Ensure session folder exists before copying files
+                os.makedirs(session_path, exist_ok=True)
+
                 # Copy files from temp_uploads to shared session folder
                 for file_path in user_request.uploaded_files:
                     if os.path.exists(file_path):
                         filename = os.path.basename(file_path)
                         new_path = os.path.join(session_path, filename)
+                        print(f"Copying {file_path} to {new_path}")
                         shutil.copy2(file_path, new_path)
+
+                        # Verify copy was successful
+                        if os.path.exists(new_path):
+                            print(f"Successfully copied {filename} to session folder")
+                        else:
+                            print(f"ERROR: Failed to copy {filename} to session folder")
+
                         # Clean up temp file
                         try:
                             os.remove(file_path)
                         except:
                             pass  # Ignore cleanup errors
+                    else:
+                        print(f"WARNING: Source file doesn't exist: {file_path}")
 
             # For multi-turn sessions, ensure all previous files are available
-            if user_request.is_continuation and hasattr(user_request, 'all_turn_files'):
+            if user_request.is_continuation and hasattr(user_request, 'original_session_id'):
                 user_request.progress_queue.put({"type": "status", "message": "Checking for files from previous turns..."})
-                # Use the enhanced handler to ensure all files are available
-                if hasattr(self, 'multiturn_handler'):
+
+                # Download files from S3 if cloud storage is configured
+                if cloud_storage_manager and cloud_storage_manager.s3_client:
                     try:
-                        import asyncio
-                        loop = asyncio.new_event_loop()
-                        local_files = loop.run_until_complete(
-                            self.multiturn_handler.ensure_files_available(
-                                session_id=getattr(user_request, 'original_session_id', user_request.session_id),
-                                required_files=user_request.all_turn_files,
-                                session_path=session_path
+                        user_request.progress_queue.put({"type": "status", "message": "Downloading files from previous turns..."})
+
+                        # Download all files from S3 for this session
+                        downloaded_files = asyncio.run(
+                            cloud_storage_manager.download_turn_files_from_s3(
+                                user_request.original_session_id,
+                                session_path
                             )
                         )
-                        loop.close()
-                        if local_files:
+
+                        if downloaded_files:
                             user_request.progress_queue.put({
                                 "type": "status",
-                                "message": f"Restored {len(local_files)} files from previous turns"
+                                "message": f"Downloaded {len(downloaded_files)} files from previous turns"
                             })
+                            print(f"Downloaded {len(downloaded_files)} files from S3: {list(downloaded_files.keys())}")
+                        else:
+                            print(f"No files to download from S3 for session {user_request.original_session_id}")
+
                     except Exception as e:
-                        print(f"Warning: Could not restore previous turn files: {e}")
+                        print(f"Error downloading files from S3: {e}")
+                        user_request.progress_queue.put({
+                            "type": "status",
+                            "message": f"Warning: Could not download some files from previous turns: {str(e)}"
+                        })
+
+                # Verify USER-UPLOADED files are available locally (not system files)
+                if hasattr(user_request, 'all_turn_files'):
+                    missing_user_files = []
+                    system_file_prefixes = ['query_', 'report_', 'thinking_process_', 'result_', 'snapshot_']
+
+                    for filename, file_info in user_request.all_turn_files.items():
+                        # Skip system-generated files (these are in MongoDB, not needed locally)
+                        if any(filename.startswith(prefix) for prefix in system_file_prefixes):
+                            continue
+                        if filename.endswith('.zip'):
+                            continue
+
+                        local_path = os.path.join(session_path, filename)
+                        if not os.path.exists(local_path):
+                            missing_user_files.append(filename)
+                            logger.warning(f"User file {filename} is still missing after S3 download")
+
+                    if missing_user_files:
+                        user_request.progress_queue.put({
+                            "type": "status",
+                            "message": f"Warning: {len(missing_user_files)} user files could not be retrieved: {', '.join(missing_user_files[:3])}"
+                        })
 
             # Load ALL files from session folder into agent's data lake (including previous turns)
             agent.data_lake_dict = {}
@@ -1157,9 +1227,21 @@ class QueueManager:
                         # Use the enhanced message with multi-turn context
                         base_message = user_request.enhanced_message
 
+                        # Get list of files in session folder
+                        available_files = []
+                        if os.path.exists(session_path):
+                            for filename in os.listdir(session_path):
+                                file_path = os.path.join(session_path, filename)
+                                if os.path.isfile(file_path) and not filename.startswith('.'):
+                                    available_files.append(f"{filename} (Path: {file_path})")
+
                         # Enhance message based on language
                         if user_request.language == Language.JP:
-                            enhanced_message = f"""{base_message}
+                            file_list_msg = ""
+                            if available_files:
+                                file_list_msg = "\n\n利用可能なファイル:\n" + "\n".join([f"- {f}" for f in available_files])
+
+                            enhanced_message = f"""{base_message}{file_list_msg}
 
 注意: アップロードされたファイルは次の作業フォルダに保存されています: {session_path} ファイルを生成あるいは保存する場合は、作業フォルダに保存してください。コメントはできるだけ日本語で記述し、最終レポートも日本語で作成すること。 use plt.rcParams['font.family'] = ['Noto Sans CJK JP', 'DejaVu Sans' ] when plot
 重要 - 深い思考と洞察のガイドライン:
@@ -1185,7 +1267,11 @@ class QueueManager:
   * 結合部位と分子相互作用を可視化する
   * ファーマコフォア特徴と重要な構造モチーフをハイライトする"""
                         else:
-                            enhanced_message = f"""{base_message}
+                            file_list_msg = ""
+                            if available_files:
+                                file_list_msg = "\n\nAvailable files in your working directory:\n" + "\n".join([f"- {f}" for f in available_files])
+
+                            enhanced_message = f"""{base_message}{file_list_msg}
 
 Note: The uploaded files are stored in the folder: {session_path}. If saving file, also save in it, it is the working folder.
 IMPORTANT - Enhanced Thinking and Insight Guidelines:
@@ -1899,6 +1985,18 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                 "content": "Agent initialized, processing message..."
             })
 
+            # Add explicit file information to the message if not already included
+            if session_path and os.path.exists(session_path):
+                files_in_session = []
+                for filename in os.listdir(session_path):
+                    file_path = os.path.join(session_path, filename)
+                    if os.path.isfile(file_path) and not filename.startswith('.'):
+                        files_in_session.append(f"{filename} (Path: {file_path})")
+
+                if files_in_session and "Available files" not in enhanced_message:
+                    file_info = "\n\nAvailable files in your working directory:\n" + "\n".join([f"- {f}" for f in files_in_session])
+                    enhanced_message = enhanced_message + file_info
+
             # Run agent (this blocks until complete)
             _, result = agent.go(enhanced_message)
 
@@ -2256,11 +2354,18 @@ async def start_chat_queue(
     session_id: Optional[str] = Form(None),
     files: List[UploadFile] = File(default=[])
 ):
-    """Add chat request to queue with optional file uploads"""
+    """Add chat request to queue with S3 file uploads"""
     session_id = session_id or str(uuid.uuid4())
 
-    # Handle file uploads
+    # Create or get multi-turn session first to get turn number
+    multiturn_session = queue_manager.create_or_get_multiturn_session(session_id, language, user_id)
+    turn_number = queue_manager.add_turn_to_session(session_id, message)
+
+    # Handle file uploads with S3 storage
     uploaded_file_paths = []
+    s3_file_metadata = {}  # Store S3 metadata for files
+    rejected_files = []  # Track rejected files
+
     if files and any(file.filename for file in files):
         # Create temporary upload directory for this session
         upload_dir = os.path.join(os.getcwd(), "temp_uploads", session_id)
@@ -2268,19 +2373,72 @@ async def start_chat_queue(
 
         for file in files:
             if file.filename:
-                file_path = os.path.join(upload_dir, file.filename)
-                with open(file_path, "wb") as buffer:
-                    content = await file.read()
+                # Read file content
+                content = await file.read()
+                file_size = len(content)
+                file_size_mb = file_size / (1024 * 1024)
+
+                # Check file size
+                if file_size > MAX_FILE_SIZE_BYTES:
+                    rejected_files.append({
+                        "filename": file.filename,
+                        "size_mb": round(file_size_mb, 2),
+                        "reason": f"File size {file_size_mb:.2f}MB exceeds maximum {MAX_FILE_SIZE_MB}MB"
+                    })
+                    logger.warning(f"Rejected file {file.filename}: size {file_size_mb:.2f}MB > {MAX_FILE_SIZE_MB}MB limit")
+                    continue
+
+                # Save file temporarily
+                temp_file_path = os.path.join(upload_dir, file.filename)
+                with open(temp_file_path, "wb") as buffer:
                     buffer.write(content)
-                uploaded_file_paths.append(file_path)
 
-    # Create or get multi-turn session
-    multiturn_session = queue_manager.create_or_get_multiturn_session(session_id, language, user_id)
+                # Upload to S3 if cloud storage is configured
+                if cloud_storage_manager and cloud_storage_manager.s3_client:
+                    try:
+                        # Generate S3 object name with session and turn context
+                        s3_object_name = f"sessions/{session_id}/turn{turn_number}_{file.filename}"
 
-    # Add first turn to session
-    turn_number = queue_manager.add_turn_to_session(session_id, message)
+                        # Upload to S3
+                        cloud_storage_manager.s3_client.upload_file(
+                            temp_file_path,
+                            cloud_storage_manager.bucket_name,
+                            s3_object_name
+                        )
 
-    # Create user request and add to queue
+                        # Store S3 metadata
+                        s3_file_metadata[file.filename] = {
+                            "s3_key": s3_object_name,
+                            "bucket": cloud_storage_manager.bucket_name,
+                            "local_path": temp_file_path,
+                            "turn_number": turn_number,
+                            "upload_time": datetime.now().isoformat(),
+                            "file_size": file_size,
+                            "file_size_mb": round(file_size_mb, 2)
+                        }
+
+                        logger.info(f"Uploaded {file.filename} to S3: {s3_object_name} (size: {file_size_mb:.2f}MB)")
+                    except Exception as e:
+                        logger.error(f"Failed to upload {file.filename} to S3: {e}")
+                        # Continue with local file path as fallback
+
+                uploaded_file_paths.append(temp_file_path)
+
+    # Check if all files were rejected
+    if rejected_files and not uploaded_file_paths:
+        error_msg = f"All files rejected due to size limits. Maximum file size is {MAX_FILE_SIZE_MB}MB. "
+        error_msg += "Rejected files: " + ", ".join([f"{f['filename']} ({f['size_mb']}MB)" for f in rejected_files])
+        raise HTTPException(status_code=413, detail=error_msg)
+
+    # Store S3 metadata in turn data for future retrieval
+    if s3_file_metadata:
+        # Store S3 metadata in the current turn (will be saved when turn completes)
+        # For now, store it temporarily in queue_manager for processing
+        if not hasattr(queue_manager, '_temp_s3_metadata'):
+            queue_manager._temp_s3_metadata = {}
+        queue_manager._temp_s3_metadata[f"{session_id}_turn_{turn_number}"] = s3_file_metadata
+
+    # Create user request with both local paths and S3 metadata
     user_request = UserRequest(
         session_id=session_id,
         message=message,
@@ -2290,20 +2448,31 @@ async def start_chat_queue(
         user_id=user_id
     )
 
+    # Store S3 metadata in user request for processing
+    user_request.s3_file_metadata = s3_file_metadata
+
     # Store reference to original multi-turn session
     user_request.original_session_id = session_id
 
     # Add to queue
     position = queue_manager.add_request(user_request)
 
-    return {
+    response = {
         "session_id": session_id,
         "turn_number": turn_number,
         "status": "queued",
         "position": position,
         "uploaded_files": len(uploaded_file_paths),
-        "message": "Request added to queue. Use /status/{session_id} to check progress."
+        "s3_files": list(s3_file_metadata.keys()) if s3_file_metadata else [],
+        "message": "Request added to queue. Files uploaded to S3. Use /status/{session_id} to check progress."
     }
+
+    # Add rejected files info if any
+    if rejected_files:
+        response["rejected_files"] = rejected_files
+        response["message"] = f"Request added to queue. {len(uploaded_file_paths)} files uploaded, {len(rejected_files)} rejected (>10MB)."
+
+    return response
 
 @app.get("/progress/{session_id}")
 async def get_progress(session_id: str, user_id: str):
@@ -2605,7 +2774,7 @@ async def continue_session(
     user_id: str = Form(...),
     files: List[UploadFile] = File(default=[])
 ):
-    """Continue an existing multi-turn session with a new query and optional file uploads"""
+    """Continue an existing multi-turn session with S3 file handling"""
     # Check if multi-turn session exists
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     if not multiturn_session:
@@ -2615,8 +2784,17 @@ async def continue_session(
     if multiturn_session.user_id and multiturn_session.user_id != user_id:
         raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-    # Handle file uploads
+    # Add new turn to session first to get turn number
+    try:
+        turn_number = queue_manager.add_turn_to_session(session_id, message)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Handle file uploads with S3 storage
     uploaded_file_paths = []
+    s3_file_metadata = {}  # Store S3 metadata for new files
+    rejected_files = []  # Track rejected files
+
     if files and any(file.filename for file in files):
         # Create temporary upload directory for this session
         upload_dir = os.path.join(os.getcwd(), "temp_uploads", session_id)
@@ -2624,27 +2802,94 @@ async def continue_session(
 
         for file in files:
             if file.filename:
-                # Add turn number to filename to avoid conflicts
-                filename = f"turn{multiturn_session.total_turns + 1}_{file.filename}"
-                file_path = os.path.join(upload_dir, filename)
-                with open(file_path, "wb") as buffer:
-                    content = await file.read()
+                # Read file content
+                content = await file.read()
+                file_size = len(content)
+                file_size_mb = file_size / (1024 * 1024)
+
+                # Check file size
+                if file_size > MAX_FILE_SIZE_BYTES:
+                    rejected_files.append({
+                        "filename": file.filename,
+                        "size_mb": round(file_size_mb, 2),
+                        "reason": f"File size {file_size_mb:.2f}MB exceeds maximum {MAX_FILE_SIZE_MB}MB"
+                    })
+                    logger.warning(f"Rejected file {file.filename}: size {file_size_mb:.2f}MB > {MAX_FILE_SIZE_MB}MB limit")
+                    continue
+
+                # Save file temporarily (without turn prefix for compatibility)
+                temp_file_path = os.path.join(upload_dir, file.filename)
+                with open(temp_file_path, "wb") as buffer:
                     buffer.write(content)
-                uploaded_file_paths.append(file_path)
 
-    # Add new turn to session
-    try:
-        turn_number = queue_manager.add_turn_to_session(session_id, message)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+                # Upload to S3 if cloud storage is configured
+                if cloud_storage_manager and cloud_storage_manager.s3_client:
+                    try:
+                        # Generate S3 object name with session and turn context
+                        s3_object_name = f"sessions/{session_id}/turn{turn_number}_{file.filename}"
 
-    # Build enhanced context using the handler
+                        # Upload to S3
+                        cloud_storage_manager.s3_client.upload_file(
+                            temp_file_path,
+                            cloud_storage_manager.bucket_name,
+                            s3_object_name
+                        )
+
+                        # Store S3 metadata
+                        s3_file_metadata[file.filename] = {
+                            "s3_key": s3_object_name,
+                            "bucket": cloud_storage_manager.bucket_name,
+                            "local_path": temp_file_path,
+                            "turn_number": turn_number,
+                            "upload_time": datetime.now().isoformat(),
+                            "file_size": file_size,
+                            "file_size_mb": round(file_size_mb, 2)
+                        }
+
+                        logger.info(f"Uploaded {file.filename} to S3: {s3_object_name} (size: {file_size_mb:.2f}MB)")
+                    except Exception as e:
+                        logger.error(f"Failed to upload {file.filename} to S3: {e}")
+
+                uploaded_file_paths.append(temp_file_path)
+
+    # Check if all files were rejected
+    if rejected_files and not uploaded_file_paths:
+        error_msg = f"All files rejected due to size limits. Maximum file size is {MAX_FILE_SIZE_MB}MB. "
+        error_msg += "Rejected files: " + ", ".join([f"{f['filename']} ({f['size_mb']}MB)" for f in rejected_files])
+        raise HTTPException(status_code=413, detail=error_msg)
+
+    # Store S3 metadata in turn data for future retrieval
+    if s3_file_metadata:
+        # Store S3 metadata in the current turn (will be saved when turn completes)
+        # For now, store it temporarily in queue_manager for processing
+        if not hasattr(queue_manager, '_temp_s3_metadata'):
+            queue_manager._temp_s3_metadata = {}
+        queue_manager._temp_s3_metadata[f"{session_id}_turn_{turn_number}"] = s3_file_metadata
+
+    # Build enhanced context that includes S3 file references
     enhanced_context = queue_manager.multiturn_handler.build_enhanced_context(
         multiturn_session=multiturn_session,
         current_message=message,
         uploaded_files=uploaded_file_paths,
         include_file_list=True
     )
+
+    # Add S3 metadata to context for file restoration
+    # Check if we have stored S3 metadata for previous turns
+    if hasattr(queue_manager, '_temp_s3_metadata'):
+        for key, turn_files in queue_manager._temp_s3_metadata.items():
+            if key.startswith(session_id):
+                # Extract turn number from key
+                turn_num = int(key.split('_turn_')[-1]) if '_turn_' in key else 1
+                for filename, metadata in turn_files.items():
+                    if filename not in enhanced_context.get('all_files', {}):
+                        enhanced_context['all_files'][filename] = {
+                            'turn': turn_num,
+                            's3_key': metadata['s3_key'],
+                            'bucket': metadata['bucket'],
+                            'type': 'file',
+                            'needs_download': True  # Flag for download from S3
+                        }
 
     # Create user request with enhanced context
     user_request = UserRequest(
@@ -2653,13 +2898,14 @@ async def continue_session(
         language=language,
         uploaded_files=uploaded_file_paths,
         is_continuation=True,
-        previous_context=enhanced_context['enhanced_message'],  # Use the enhanced message as context
+        previous_context=enhanced_context['enhanced_message'],
         turn_number=turn_number,
         user_id=user_id
     )
 
-    # Store file metadata for tracking
+    # Store file metadata including S3 references
     user_request.all_turn_files = enhanced_context.get('all_files', {})
+    user_request.s3_file_metadata = s3_file_metadata
 
     # Store reference to original multi-turn session
     user_request.original_session_id = session_id
@@ -2667,15 +2913,23 @@ async def continue_session(
     # Add to queue
     position = queue_manager.add_request(user_request)
 
-    return {
+    response = {
         "session_id": session_id,
         "turn_session_id": f"{session_id}_turn_{turn_number}",
         "turn_number": turn_number,
         "status": "queued",
         "position": position,
         "uploaded_files": len(uploaded_file_paths),
-        "message": f"Turn {turn_number} added to queue. Use /status/{session_id}_turn_{turn_number} to check progress."
+        "s3_files": list(s3_file_metadata.keys()) if s3_file_metadata else [],
+        "message": f"Turn {turn_number} added to queue with S3 storage. Use /status/{session_id}_turn_{turn_number} to check progress."
     }
+
+    # Add rejected files info if any
+    if rejected_files:
+        response["rejected_files"] = rejected_files
+        response["message"] = f"Turn {turn_number} added. {len(uploaded_file_paths)} files uploaded, {len(rejected_files)} rejected (>10MB)."
+
+    return response
 
 @app.get("/multiturn-session/{session_id}")
 async def get_multiturn_session(session_id: str, user_id: str):
@@ -2949,291 +3203,12 @@ async def health_check():
     }
 
 # ============= TRASH SYSTEM ENDPOINTS =============
+# Most trash management endpoints have been moved to trash_api.py
+# Only hard-delete remains here as it's a direct operation
 
-@app.post("/trash/{session_id}")
-async def move_to_trash(session_id: str, user_id: str):
-    """Soft delete - Move session to trash (mark as deleted but keep data)"""
-    try:
-        # Get unified session manager
-        unified_manager = get_unified_session_manager(queue_manager)
-
-        # Verify user owns this session
-        session_data = await unified_manager.get_session_by_id(session_id)
-        if not session_data:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        session_user_id = session_data.get("user_id")
-        if session_user_id and session_user_id != user_id:
-            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
-
-        # Mark as trashed (soft delete)
-        trashed_at = datetime.now().isoformat()
-
-        # Update session data with trash metadata
-        session_data["is_trashed"] = True
-        session_data["trashed_at"] = trashed_at
-        session_data["trashed_by"] = user_id
-
-        # Save updated session data
-        session_file = f"session_storage/{session_id}.json"
-        if os.path.exists(session_file):
-            with open(session_file, 'w') as f:
-                json.dump(session_data, f, indent=2)
-
-        # Also update cloud storage metadata if it exists
-        try:
-            await cloud_storage_manager.update_session_metadata(session_id, {
-                "is_trashed": True,
-                "trashed_at": trashed_at,
-                "trashed_by": user_id
-            })
-        except:
-            pass  # Cloud storage update is optional
-
-        return {
-            "status": "success",
-            "message": "Session moved to trash",
-            "session_id": session_id,
-            "trashed_at": trashed_at
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error moving session to trash: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/restore/{session_id}")
-async def restore_from_trash(session_id: str, user_id: str):
-    """Restore session from trash"""
-    try:
-        # Get unified session manager
-        unified_manager = get_unified_session_manager(queue_manager)
-
-        # Verify user owns this session
-        session_data = await unified_manager.get_session_by_id(session_id)
-        if not session_data:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        session_user_id = session_data.get("user_id")
-        if session_user_id and session_user_id != user_id:
-            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
-
-        if not session_data.get("is_trashed"):
-            raise HTTPException(status_code=400, detail="Session is not in trash")
-
-        # Remove trash metadata
-        session_data.pop("is_trashed", None)
-        session_data.pop("trashed_at", None)
-        session_data.pop("trashed_by", None)
-        session_data["restored_at"] = datetime.now().isoformat()
-
-        # Save updated session data
-        session_file = f"session_storage/{session_id}.json"
-        if os.path.exists(session_file):
-            with open(session_file, 'w') as f:
-                json.dump(session_data, f, indent=2)
-
-        # Also update cloud storage metadata if it exists
-        try:
-            await cloud_storage_manager.update_session_metadata(session_id, {
-                "is_trashed": False,
-                "restored_at": session_data["restored_at"]
-            })
-        except:
-            pass  # Cloud storage update is optional
-
-        return {
-            "status": "success",
-            "message": "Session restored from trash",
-            "session_id": session_id,
-            "restored_at": session_data["restored_at"]
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error restoring session from trash: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/permanent-delete/{session_id}")
-async def permanent_delete_session(session_id: str, user_id: str, confirm: bool = False):
-    """Permanently delete session - removes all data from S3, MongoDB, and local storage"""
-    try:
-        if not confirm:
-            raise HTTPException(status_code=400, detail="Must confirm permanent deletion with confirm=true")
-
-        # Get unified session manager
-        unified_manager = get_unified_session_manager(queue_manager)
-
-        # Verify user owns this session
-        session_data = await unified_manager.get_session_by_id(session_id)
-        if not session_data:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        session_user_id = session_data.get("user_id")
-        if session_user_id and session_user_id != user_id:
-            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
-
-        # Check if session is in trash (optional - can delete directly)
-        if not session_data.get("is_trashed"):
-            print(f"Warning: Permanently deleting session {session_id} that is not in trash")
-
-        deleted_items = {
-            "local_files": [],
-            "s3_files": [],
-            "mongodb_docs": []
-        }
-
-        # 1. Delete local files
-        # Delete session storage JSON
-        session_file = f"session_storage/{session_id}.json"
-        if os.path.exists(session_file):
-            os.remove(session_file)
-            deleted_items["local_files"].append(session_file)
-
-        # Delete multi-turn session file if exists
-        multiturn_file = f"multiturn_sessions/{session_id}.json"
-        if os.path.exists(multiturn_file):
-            os.remove(multiturn_file)
-            deleted_items["local_files"].append(multiturn_file)
-
-        # Delete any turn-specific files
-        import glob
-        turn_files = glob.glob(f"session_storage/{session_id}_turn_*.json")
-        for turn_file in turn_files:
-            if os.path.exists(turn_file):
-                os.remove(turn_file)
-                deleted_items["local_files"].append(turn_file)
-
-        # Delete zip files
-        zip_files = glob.glob(f"chat_zips/*{session_id[:8]}*.zip")
-        for zip_file in zip_files:
-            if os.path.exists(zip_file):
-                os.remove(zip_file)
-                deleted_items["local_files"].append(zip_file)
-
-        # Delete session folders
-        session_folders = glob.glob(f"chat_sessions/*{session_id[:8]}*")
-        for folder in session_folders:
-            if os.path.exists(folder):
-                import shutil
-                shutil.rmtree(folder)
-                deleted_items["local_files"].append(folder)
-
-        # 2. Delete from S3
-        try:
-            s3_deleted = await cloud_storage_manager.delete_session_from_s3(session_id)
-            deleted_items["s3_files"] = s3_deleted
-        except Exception as e:
-            print(f"S3 deletion error (continuing): {e}")
-
-        # 3. Delete from MongoDB
-        try:
-            mongo_deleted = await cloud_storage_manager.delete_session_from_mongodb(session_id)
-            deleted_items["mongodb_docs"] = mongo_deleted
-        except Exception as e:
-            print(f"MongoDB deletion error (continuing): {e}")
-
-        return {
-            "status": "success",
-            "message": "Session permanently deleted",
-            "session_id": session_id,
-            "deleted_items": deleted_items,
-            "deleted_at": datetime.now().isoformat()
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error permanently deleting session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/trash")
-async def get_trash_sessions(user_id: str):
-    """Get all sessions in trash for a user"""
-    try:
-        # Get unified session manager
-        unified_manager = get_unified_session_manager(queue_manager)
-
-        # Get all sessions (including trashed)
-        all_sessions = await unified_manager.get_all_sessions(include_cloud=True, user_id=user_id)
-
-        # Filter for trashed sessions
-        trashed_sessions = []
-        for session in all_sessions:
-            if session.get("is_trashed"):
-                # Add summary info
-                summary = {
-                    "session_id": session.get("session_id"),
-                    "query": session.get("query", "No query"),
-                    "status": session.get("status"),
-                    "created_at": session.get("created_at"),
-                    "trashed_at": session.get("trashed_at"),
-                    "trashed_by": session.get("trashed_by"),
-                    "user_id": session.get("user_id")
-                }
-                trashed_sessions.append(summary)
-
-        # Sort by trashed_at (most recent first)
-        trashed_sessions.sort(key=lambda x: x.get("trashed_at", ""), reverse=True)
-
-        return {
-            "status": "success",
-            "count": len(trashed_sessions),
-            "sessions": trashed_sessions
-        }
-
-    except Exception as e:
-        print(f"Error getting trash sessions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/empty-trash")
-async def empty_trash(user_id: str, confirm: bool = False):
-    """Empty all trash for a user - permanently delete all trashed sessions"""
-    try:
-        if not confirm:
-            raise HTTPException(status_code=400, detail="Must confirm emptying trash with confirm=true")
-
-        # Get all trashed sessions
-        trash_response = await get_trash_sessions(user_id)
-        trashed_sessions = trash_response.get("sessions", [])
-
-        if not trashed_sessions:
-            return {
-                "status": "success",
-                "message": "Trash is already empty",
-                "deleted_count": 0
-            }
-
-        deleted_sessions = []
-        failed_deletions = []
-
-        # Delete each trashed session
-        for session in trashed_sessions:
-            session_id = session["session_id"]
-            try:
-                # Call permanent delete
-                await permanent_delete_session(session_id, user_id, confirm=True)
-                deleted_sessions.append(session_id)
-            except Exception as e:
-                print(f"Failed to delete session {session_id}: {e}")
-                failed_deletions.append({"session_id": session_id, "error": str(e)})
-
-        return {
-            "status": "success" if not failed_deletions else "partial",
-            "message": f"Deleted {len(deleted_sessions)} sessions from trash",
-            "deleted_count": len(deleted_sessions),
-            "deleted_sessions": deleted_sessions,
-            "failed_deletions": failed_deletions,
-            "emptied_at": datetime.now().isoformat()
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error emptying trash: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# Import and include the trash router
+from trash_api import router as trash_router
+app.include_router(trash_router)
 
 @app.delete("/hard-delete/{session_id}")
 async def hard_delete_session(session_id: str, user_id: str, confirm: bool = False):

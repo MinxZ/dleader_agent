@@ -70,12 +70,14 @@ class EnhancedMultiTurnHandler:
                         }
 
         # Add current turn files
+        # NOTE: These are temp paths that will be moved to session folder
+        # Store only the filename, not the full path since path will change
         if uploaded_files:
             for file_path in uploaded_files:
                 file_name = os.path.basename(file_path)
                 all_available_files[file_name] = {
                     'turn': multiturn_session.total_turns + 1,
-                    'path': file_path,
+                    'path': file_name,  # Just store filename, full path will be constructed later
                     'type': self._get_file_type(file_name)
                 }
 

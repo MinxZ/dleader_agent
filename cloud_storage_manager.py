@@ -209,16 +209,39 @@ class CloudStorageManager:
                         target_list = other_files
 
                     try:
-                        # Upload file to S3
-                        self.s3_client.upload_file(str(file_path), self.bucket_name, s3_key)
+                        # Check if file already exists in S3 to avoid duplicate uploads
+                        # Files already uploaded in continue-session have keys like: sessions/{session_id}/turn{n}_{filename}
+                        turn_based_key = None
+                        for turn_num in range(1, 20):  # Check up to 20 turns
+                            potential_key = f"sessions/{session_id}/turn{turn_num}_{file_path.name}"
+                            try:
+                                self.s3_client.head_object(Bucket=self.bucket_name, Key=potential_key)
+                                turn_based_key = potential_key
+                                logger.info(f"File {file_path.name} already exists in S3 as {potential_key}, skipping upload")
+                                break
+                            except:
+                                continue
 
-                        # Add to appropriate list
-                        target_list.append({
-                            "filename": file_path.name,
-                            "s3_key": s3_key,
-                            "file_size": file_path.stat().st_size,
-                            "uploaded_at": datetime.now().isoformat()
-                        })
+                        if turn_based_key:
+                            # File already exists, just add to metadata
+                            target_list.append({
+                                "filename": file_path.name,
+                                "s3_key": turn_based_key,  # Use existing S3 key
+                                "file_size": file_path.stat().st_size if file_path.exists() else 0,
+                                "uploaded_at": datetime.now().isoformat(),
+                                "skipped_duplicate": True
+                            })
+                        else:
+                            # Upload file to S3
+                            self.s3_client.upload_file(str(file_path), self.bucket_name, s3_key)
+
+                            # Add to appropriate list
+                            target_list.append({
+                                "filename": file_path.name,
+                                "s3_key": s3_key,
+                                "file_size": file_path.stat().st_size,
+                                "uploaded_at": datetime.now().isoformat()
+                            })
 
                     except FileNotFoundError as e:
                         logger.warning(f"File not found during upload {file_path.name}: {e}")
@@ -447,6 +470,109 @@ class CloudStorageManager:
         except Exception as e:
             logger.error(f"Failed to list cloud sessions: {e}")
             return []
+
+    async def download_turn_files_from_s3(self, session_id: str, session_path: str) -> Dict[str, str]:
+        """
+        Download USER-UPLOADED files from previous turns in a multi-turn session from S3
+        Excludes system-generated files (query, report, thinking_process, result, snapshot)
+
+        Args:
+            session_id: The multi-turn session ID
+            session_path: Local path where files should be downloaded
+
+        Returns:
+            Dictionary mapping filenames to local paths
+        """
+        downloaded_files = {}
+
+        # System-generated file patterns to EXCLUDE from download
+        system_file_patterns = [
+            'query_*.txt',
+            'report_*.md',
+            'thinking_process_*.txt',
+            'result_*.json',
+            'snapshot_*.json',
+            '*.zip'
+        ]
+
+        def is_system_file(filename):
+            """Check if filename matches system-generated patterns"""
+            import fnmatch
+            for pattern in system_file_patterns:
+                if fnmatch.fnmatch(filename, pattern):
+                    return True
+            return False
+
+        try:
+            # Ensure session directory exists
+            os.makedirs(session_path, exist_ok=True)
+
+            # List all objects with the session prefix
+            prefix = f"sessions/{session_id}/"
+
+            paginator = self.s3_client.get_paginator('list_objects_v2')
+            page_iterator = paginator.paginate(
+                Bucket=self.bucket_name,
+                Prefix=prefix
+            )
+
+            for page in page_iterator:
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        s3_key = obj['Key']
+
+                        # Skip system-generated file directories
+                        if any(x in s3_key for x in ['/report_md/', '/thinking_process/', '/query_file/',
+                                                     '/result_json/', '/snapshots/', '/session_zip/']):
+                            logger.debug(f"Skipping system file: {s3_key}")
+                            continue
+
+                        # Extract filename from S3 key
+                        # Keys are like: sessions/{session_id}/turn{n}_{filename}
+                        # or sessions/{session_id}/images/{filename}
+                        filename_parts = s3_key.split('/')[-1]  # Get last part
+
+                        # Remove turn prefix if present (e.g., "turn1_file.txt" -> "file.txt")
+                        if filename_parts.startswith('turn'):
+                            # Find the underscore after turn number
+                            underscore_pos = filename_parts.find('_')
+                            if underscore_pos > 0:
+                                filename = filename_parts[underscore_pos + 1:]
+                            else:
+                                filename = filename_parts
+                        else:
+                            filename = filename_parts
+
+                        # Skip system-generated files
+                        if is_system_file(filename):
+                            logger.debug(f"Skipping system-generated file: {filename}")
+                            continue
+
+                        # Skip if file already exists locally
+                        local_path = os.path.join(session_path, filename)
+                        if os.path.exists(local_path):
+                            logger.info(f"File {filename} already exists locally, skipping download")
+                            downloaded_files[filename] = local_path
+                            continue
+
+                        # Download file from S3
+                        try:
+                            self.s3_client.download_file(
+                                self.bucket_name,
+                                s3_key,
+                                local_path
+                            )
+                            downloaded_files[filename] = local_path
+                            logger.info(f"Downloaded user file {filename} from S3 (key: {s3_key})")
+                        except Exception as e:
+                            logger.error(f"Failed to download {s3_key} from S3: {e}")
+
+            logger.info(f"Downloaded {len(downloaded_files)} user files from S3 for session {session_id}")
+
+        except Exception as e:
+            logger.error(f"Error downloading files from S3 for session {session_id}: {e}")
+
+        return downloaded_files
 
     def generate_presigned_url(self, s3_key: str, expiry_seconds: int = 7200) -> str:
         """Generate a presigned URL for an S3 object (2 hours default)"""
