@@ -48,10 +48,10 @@ sys.path.insert(0, os.getcwd())
 # Import cloud storage manager
 from cloud_storage_manager import cloud_storage_manager
 from dleader_agent.agent.a1 import A1
-# Import unified session manager
-from unified_session_manager import get_unified_session_manager
 # Import enhanced multi-turn handler
 from enhanced_multiturn_handler import EnhancedMultiTurnHandler
+# Import unified session manager
+from unified_session_manager import get_unified_session_manager
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -633,7 +633,7 @@ class QueueManager:
                 'requirements.txt', 'requirements_fastapi.txt', 'requirements-test.txt',
                 'pytest.ini', 'README.md', 'CLOUD_STORAGE_README.md', 'TEST_SUMMARY.md',
                 '.env', '.env.example', 'Dockerfile', 'docker-compose.yml', '.gitignore',
-                'setup.py', 'setup.cfg', 'pyproject.toml', 'Makefile', 'dleader_logo.jpg'
+                'setup.py', 'setup.cfg', 'pyproject.toml', 'Makefile', 'dleader_logo.png'
             }
 
             # Application Python files to skip
@@ -2051,7 +2051,7 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                 'requirements.txt', 'requirements_fastapi.txt', 'requirements-test.txt',
                 'pytest.ini', 'README.md', 'CLOUD_STORAGE_README.md', 'TEST_SUMMARY.md',
                 '.env', '.env.example', 'Dockerfile', 'docker-compose.yml', '.gitignore',
-                'setup.py', 'setup.cfg', 'pyproject.toml', 'Makefile', 'dleader_logo.jpg'
+                'setup.py', 'setup.cfg', 'pyproject.toml', 'Makefile', 'dleader_logo.png'
             }
 
             # Application Python files to skip
@@ -3208,6 +3208,7 @@ async def health_check():
 
 # Import and include the trash router
 from trash_api import router as trash_router
+
 app.include_router(trash_router)
 
 @app.delete("/hard-delete/{session_id}")

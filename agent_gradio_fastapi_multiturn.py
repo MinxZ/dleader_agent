@@ -295,7 +295,7 @@ class FastAPIClient:
 def load_logo():
     """Load the logo image"""
     try:
-        img = Image.open("dleader_logo.jpg")
+        img = Image.open("dleader_logo.png")
         return img
     except:
         return None
