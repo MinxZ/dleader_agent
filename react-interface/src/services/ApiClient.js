@@ -61,7 +61,8 @@ class ApiClient {
         });
       }
 
-      const response = await this.client.post(`/continue/${sessionId}`, formData, {
+      formData.append('session_id', sessionId);
+      const response = await this.client.post('/continue-session', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
@@ -120,7 +121,8 @@ class ApiClient {
 
   async getSessionHistory(sessionId, userId) {
     try {
-      const response = await this.client.get(`/session-history/${sessionId}`, {
+      // Use the multiturn-session endpoint to get session details
+      const response = await this.client.get(`/multiturn-session/${sessionId}`, {
         params: { user_id: userId },
       });
       if (response.status === 200) {
@@ -153,7 +155,8 @@ class ApiClient {
 
   async deleteSession(sessionId, userId) {
     try {
-      const response = await this.client.delete(`/session/${sessionId}`, {
+      // Use the hard-delete endpoint
+      const response = await this.client.delete(`/hard-delete/${sessionId}`, {
         params: { user_id: userId },
       });
       return response.status === 200;
@@ -174,6 +177,51 @@ class ApiClient {
       return null;
     } catch (error) {
       console.error('Error getting snapshots:', error);
+      return null;
+    }
+  }
+
+  async getDownloadUrls(sessionId, userId) {
+    try {
+      const response = await this.client.get(`/download-urls/${sessionId}`, {
+        params: { user_id: userId },
+      });
+      if (response.status === 200) {
+        return response.data;
+      }
+      return null;
+    } catch (error) {
+      console.error('Error getting download URLs:', error);
+      return null;
+    }
+  }
+
+  async getMultiturnSession(sessionId, userId) {
+    try {
+      const response = await this.client.get(`/multiturn-session/${sessionId}`, {
+        params: { user_id: userId },
+      });
+      if (response.status === 200) {
+        return response.data;
+      }
+      return null;
+    } catch (error) {
+      console.error('Error getting multi-turn session:', error);
+      return null;
+    }
+  }
+
+  async getResults(sessionId, userId) {
+    try {
+      const response = await this.client.get(`/results/${sessionId}`, {
+        params: { user_id: userId },
+      });
+      if (response.status === 200) {
+        return response.data;
+      }
+      return null;
+    } catch (error) {
+      console.error('Error getting results:', error);
       return null;
     }
   }
