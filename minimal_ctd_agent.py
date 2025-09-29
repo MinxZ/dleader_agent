@@ -47,8 +47,6 @@ def create_minimal_image_agent():
     
     return agent
 
-
-
 def example_url_image_analysis():
     """Example using image URL analysis with different modes."""
     
@@ -109,59 +107,3 @@ if __name__ == "__main__":
     print("🧬 Minimal dleader_agent Agent - Image Analysis Only")
     print("="*60)
     example_url_image_analysis()
-    
-    # # Run examples
-    # examples = [
-    #     # ("Local Image Analysis", example_local_image_analysis),
-    #     ("URL Image Analysis", example_url_image_analysis), 
-    #     # ("Text Extraction (OCR)", example_text_extraction),
-    # ]
-    
-    # results = {}
-    
-    # for name, example_func in examples:
-    #     try:
-    #         print(f"\n🔄 Running: {name}")
-    #         log, result = example_func()
-    #         if log and result:
-    #             results[name] = {"status": "success"}
-    #             print(f"✅ Completed: {name}")
-    #         else:
-    #             results[name] = {"status": "skipped"}
-    #             print(f"⏭️ Skipped: {name}")
-    #     except Exception as e:
-    #         print(f"❌ Error in {name}: {str(e)}")
-    #         results[name] = {"status": "failed", "error": str(e)}
-    
-    # # Summary
-    # print("\n" + "="*60)
-    # print("📊 EXECUTION SUMMARY")
-    # print("="*60)
-    
-    # for name, result in results.items():
-    #     status_icons = {"success": "✅", "failed": "❌", "skipped": "⏭️"}
-    #     icon = status_icons.get(result["status"], "❓")
-    #     print(f"{icon} {name}")
-    #     if "error" in result:
-    #         print(f"   └─ Error: {result['error']}")
-    
-    # print("\n🔧 Image Function Usage:")
-    # print("   • read_and_summarize_image(image_source, mode, prompt, model)")
-    # print("   • Modes: 'general', 'scientific', 'medical', 'data_viz', 'text_extraction', 'custom'")
-    # print("   • Supports both local paths and URLs")
-    # print("   • Uses get_llm() for flexible model selection")
-    # print("   • Custom prompts override mode-based analysis")
-    
-    # print("\n💡 Usage Pattern:")
-    # print("   ```python")
-    # print("   from dleader_agent.tool.support_tools import read_and_summarize_image")
-    # print("   ")
-    # print("   # Local file")
-    # print("   result = read_and_summarize_image('./image.jpg', mode='scientific')")
-    # print("   ")
-    # print("   # URL with custom model")
-    # print("   result = read_and_summarize_image('https://...', mode='medical', model='gpt-4o')")
-    # print("   ")
-    # print("   # Custom prompt")
-    # print("   result = read_and_summarize_image(url, prompt='Identify all species in this image')")
-    # print("   ```")
