@@ -425,7 +425,7 @@ def get_uce_embeddings_scRNA(
 
         steps.append("Successfully imported UCE main function")
     except Exception:
-        steps.append("Please install the UCE package first. Follow https://github.com/snap-stanford/UCE.git.")
+        steps.append("Please install the UCE package first. Follow https://github.com/MinxZ/UCE.git.")
         return "\n".join(steps)
 
     from accelerate import Accelerator

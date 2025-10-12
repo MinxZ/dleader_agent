@@ -484,7 +484,7 @@ def format_files_info(files):
 def load_logo():
     """ロゴ画像を読み込み"""
     try:
-        img = Image.open("dleader_logo.jpg")
+        img = Image.open("dleader_logo.png")
         return img
     except:
         return None

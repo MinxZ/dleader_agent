@@ -15,8 +15,8 @@ requires-python = ">=3.11"
 dependencies = ["pydantic", "langchain", "python-dotenv"]
 
 [project.urls]
-Homepage = "https://github.com/snap-stanford/dleader_agent"
-Repository = "https://github.com/snap-stanford/dleader_agent"
+Homepage = "https://github.com/MinxZ/dleader_agent"
+Repository = "https://github.com/MinxZ/dleader_agent"
 
 [tool.setuptools]
 include-package-data = true

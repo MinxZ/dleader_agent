@@ -4,7 +4,7 @@ This directory contains scripts and configuration files to set up a comprehensiv
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/snap-stanford/dleader_agent.git
+   git clone https://github.com/MinxZ/dleader_agent.git
    cd dleader_agent/dleader_agent_env
    ```
 

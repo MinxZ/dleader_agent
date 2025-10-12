@@ -52,7 +52,7 @@ pip install dleader_agent --upgrade
 For the latest update, install from the github source version, or do:
 
 ```bash
-pip install git+https://github.com/snap-stanford/dleader_agent.git@main
+pip install git+https://github.com/MinxZ/dleader_agent.git@main
 ```
 
 Lastly, configure your API keys using one of the following methods:
