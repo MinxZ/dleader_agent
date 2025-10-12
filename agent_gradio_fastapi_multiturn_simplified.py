@@ -587,120 +587,18 @@ def create_interface(default_fastapi_url: str = "http://localhost:8001"):
         # Server configuration section
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### ⚙️ Server Configuration")
-                with gr.Row():
-                    server_url = gr.Textbox(
-                        label="FastAPI Server URL",
-                        value=default_fastapi_url,
-                        placeholder=default_fastapi_url
-                    )
-                    language_choice = gr.Dropdown(
-                        label="Language",
-                        choices=[("English", "en"), ("Japanese", "jp")],
-                        value="en"
-                    )
-                    user_id_input = gr.Dropdown(
-                        label="User ID",
-                        choices=["Chen", "Yuan", "Zhang", "Test user", "Tom"],
-                        value="Chen",
-                        allow_custom_value=True,
-                        info="Select a user or type a custom ID"
-                    )
+                gr.Markdown("### ⚙️ User Configuration")
+                server_url = gr.State(value=default_fastapi_url)  # Hidden state variable
+                user_id_input = gr.Dropdown(
+                    label="User ID",
+                    choices=["Test user", "Chen", "Yuan", "Zhang", "Tom"],
+                    value="Test user",
+                    allow_custom_value=True,
+                    info="Select a user or type a custom ID"
+                )
 
         # Main interface with tabs
         with gr.Tabs():
-
-            # Check Status Tab
-            with gr.Tab("🔍 Check Status"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        gr.Markdown("## 🔍 Check Request Status")
-
-                        with gr.Group():
-                            gr.Markdown("### 📋 Session Selection")
-
-                            # Refresh session list button
-                            refresh_status_history_btn = gr.Button("🔄 Refresh Session List", variant="secondary")
-
-                            # Session selector dropdown
-                            status_session_selector = gr.Dropdown(
-                                label="Select a session to check status",
-                                choices=[],  # Will be populated when user_id is provided
-                                value="",
-                                interactive=True,
-                                allow_custom_value=True
-                            )
-
-                            with gr.Row():
-                                check_btn = gr.Button("🔍 Check Status", variant="primary", scale=2)
-                                clear_status_btn = gr.Button("🗑️ Clear", variant="secondary", scale=1)
-
-                    with gr.Column(scale=1):
-                        gr.Markdown("## 📋 Status Results")
-
-                        status_results = gr.Markdown(
-                            """## 📋 Status Check
-
-Select a session from the dropdown to check status and view complete snapshots.
-
-**Features:**
-- Real-time status updates
-- Complete snapshots view (no truncation)
-- Full session history with scrollable window
-- Direct download button when completed
-
-**Instructions:**
-1. Click "🔄 Refresh Session List" to load all sessions
-2. Select a session from the dropdown (shows both active and completed sessions)
-3. Click "🔍 Check Status"
-
-For completed sessions, direct download URLs will appear.""",
-                            max_height="600px"
-                        )
-
-            # Stop Task Tab
-            with gr.Tab("🛑 Stop Task"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        gr.Markdown("## 🛑 Stop Running Task")
-
-                        with gr.Group():
-                            gr.Markdown("### 📋 Select Session")
-
-                            # Refresh history button
-                            refresh_stop_history_btn = gr.Button("🔄 Refresh Session List", variant="secondary")
-
-                            # History selector dropdown
-                            stop_session_selector = gr.Dropdown(
-                                label="Select a session to stop",
-                                choices=[],  # Will be populated when user_id is provided
-                                value="",
-                                interactive=True,
-                                allow_custom_value=True
-                            )
-
-                            with gr.Row():
-                                stop_task_btn = gr.Button("🛑 Stop Selected Task", variant="primary", scale=2)
-                                clear_stop_btn = gr.Button("🗑️ Clear", variant="secondary", scale=1)
-
-                    with gr.Column(scale=1):
-                        gr.Markdown("## 📋 Stop Results")
-
-                        stop_results = gr.Markdown(
-                            """## 🛑 Stop Task
-
-Select a session from the dropdown above to stop a running or queued task.
-
-**Instructions:**
-1. Click "Refresh Session List" to update the list
-2. Select a session from the dropdown
-3. Click "Stop Selected Task"
-4. Confirmation will appear here
-
-**Note:** You can only stop tasks that are currently queued or processing.
-Completed tasks cannot be stopped.""",
-                            height=400
-                        )
 
             # Multi-Turn Conversation Tab
             with gr.Tab("💬 Multi-Turn Chat"):
@@ -832,6 +730,98 @@ Choose to start a new conversation or continue an existing one from the left pan
                         multiturn_session_info = gr.Markdown(
                             "",
                             visible=False
+                        )
+
+            # Check Status Tab
+            with gr.Tab("🔍 Check Status"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("## 🔍 Check Request Status")
+
+                        with gr.Group():
+                            gr.Markdown("### 📋 Session Selection")
+
+                            # Refresh session list button
+                            refresh_status_history_btn = gr.Button("🔄 Refresh Session List", variant="secondary")
+
+                            # Session selector dropdown
+                            status_session_selector = gr.Dropdown(
+                                label="Select a session to check status",
+                                choices=[],  # Will be populated when user_id is provided
+                                value="",
+                                interactive=True,
+                                allow_custom_value=True
+                            )
+
+                            with gr.Row():
+                                check_btn = gr.Button("🔍 Check Status", variant="primary", scale=2)
+                                clear_status_btn = gr.Button("🗑️ Clear", variant="secondary", scale=1)
+
+                    with gr.Column(scale=1):
+                        gr.Markdown("## 📋 Status Results")
+
+                        status_results = gr.Markdown(
+                            """## 📋 Status Check
+
+Select a session from the dropdown to check status and view complete snapshots.
+
+**Features:**
+- Real-time status updates
+- Complete snapshots view (no truncation)
+- Full session history with scrollable window
+- Direct download button when completed
+
+**Instructions:**
+1. Click "🔄 Refresh Session List" to load all sessions
+2. Select a session from the dropdown (shows both active and completed sessions)
+3. Click "🔍 Check Status"
+
+For completed sessions, direct download URLs will appear.""",
+                            max_height="600px"
+                        )
+
+            # Stop Task Tab
+            with gr.Tab("🛑 Stop Task"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("## 🛑 Stop Running Task")
+
+                        with gr.Group():
+                            gr.Markdown("### 📋 Select Session")
+
+                            # Refresh history button
+                            refresh_stop_history_btn = gr.Button("🔄 Refresh Session List", variant="secondary")
+
+                            # History selector dropdown
+                            stop_session_selector = gr.Dropdown(
+                                label="Select a session to stop",
+                                choices=[],  # Will be populated when user_id is provided
+                                value="",
+                                interactive=True,
+                                allow_custom_value=True
+                            )
+
+                            with gr.Row():
+                                stop_task_btn = gr.Button("🛑 Stop Selected Task", variant="primary", scale=2)
+                                clear_stop_btn = gr.Button("🗑️ Clear", variant="secondary", scale=1)
+
+                    with gr.Column(scale=1):
+                        gr.Markdown("## 📋 Stop Results")
+
+                        stop_results = gr.Markdown(
+                            """## 🛑 Stop Task
+
+Select a session from the dropdown above to stop a running or queued task.
+
+**Instructions:**
+1. Click "Refresh Session List" to update the list
+2. Select a session from the dropdown
+3. Click "Stop Selected Task"
+4. Confirmation will appear here
+
+**Note:** You can only stop tasks that are currently queued or processing.
+Completed tasks cannot be stopped.""",
+                            height=400
                         )
 
 
