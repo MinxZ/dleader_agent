@@ -2,12 +2,15 @@ import os
 import re
 import time
 from io import BytesIO
+from typing import Optional
 from urllib.parse import urljoin
 
 import PyPDF2
 import requests
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 from googlesearch import search
+from openai import OpenAI
 
 
 def fetch_supplementary_info_from_doi(doi: str, output_dir: str = "supplementary_info"):
@@ -55,7 +58,8 @@ def fetch_supplementary_info_from_doi(doi: str, output_dir: str = "supplementary
         if "supplementary" in text or "supplemental" in text or "appendix" in text:
             full_url = urljoin(publisher_url, href)
             supplementary_links.append(full_url)
-            research_log.append(f"Found supplementary material link: {full_url}")
+            research_log.append(
+                f"Found supplementary material link: {full_url}")
 
     if not supplementary_links:
         log_message = f"No supplementary materials found for DOI {doi}."
@@ -80,7 +84,8 @@ def fetch_supplementary_info_from_doi(doi: str, output_dir: str = "supplementary
             research_log.append(f"Failed to download file from {link}")
 
     if downloaded_files:
-        research_log.append(f"Successfully downloaded {len(downloaded_files)} file(s).")
+        research_log.append(
+            f"Successfully downloaded {len(downloaded_files)} file(s).")
     else:
         research_log.append(f"No files could be downloaded for DOI {doi}.")
 
@@ -104,8 +109,10 @@ def query_arxiv(query: str, max_papers: int = 10) -> str:
 
     try:
         client = arxiv.Client()
-        search = arxiv.Search(query=query, max_results=max_papers, sort_by=arxiv.SortCriterion.Relevance)
-        results = "\n\n".join([f"Title: {paper.title}\nSummary: {paper.summary}" for paper in client.results(search)])
+        search = arxiv.Search(
+            query=query, max_results=max_papers, sort_by=arxiv.SortCriterion.Relevance)
+        results = "\n\n".join(
+            [f"Title: {paper.title}\nSummary: {paper.summary}" for paper in client.results(search)])
         return results if results else "No papers found on arXiv."
     except Exception as e:
         return f"Error querying arXiv: {e}"
@@ -153,7 +160,8 @@ def query_pubmed(query: str, max_papers: int = 10, max_retries: int = 3) -> str:
     from pymed import PubMed
 
     try:
-        pubmed = PubMed(tool="MyTool", email="your-email@example.com")  # Update with a valid email address
+        # Update with a valid email address
+        pubmed = PubMed(tool="MyTool", email="your-email@example.com")
 
         # Initial attempt
         papers = list(pubmed.query(query, max_results=max_papers))
@@ -163,9 +171,11 @@ def query_pubmed(query: str, max_papers: int = 10, max_retries: int = 3) -> str:
         while not papers and retries < max_retries:
             retries += 1
             # Simplify query with each retry by removing the last word
-            simplified_query = " ".join(query.split()[:-retries]) if len(query.split()) > retries else query
+            simplified_query = " ".join(
+                query.split()[:-retries]) if len(query.split()) > retries else query
             time.sleep(1)  # Add delay between requests
-            papers = list(pubmed.query(simplified_query, max_results=max_papers))
+            papers = list(pubmed.query(
+                simplified_query, max_results=max_papers))
 
         if papers:
             results = "\n\n".join(
@@ -264,13 +274,16 @@ def extract_pdf_content(url: str) -> str:
             response = requests.get(url, timeout=30)
             if response.status_code == 200:
                 # Look for PDF links in the HTML content
-                pdf_links = re.findall(r'href=[\'"]([^\'"]+\.pdf)[\'"]', response.text)
+                pdf_links = re.findall(
+                    r'href=[\'"]([^\'"]+\.pdf)[\'"]', response.text)
                 if pdf_links:
                     # Use the first PDF link found
                     if not pdf_links[0].startswith("http"):
                         # Handle relative URLs
                         base_url = "/".join(url.split("/")[:3])
-                        url = base_url + pdf_links[0] if pdf_links[0].startswith("/") else base_url + "/" + pdf_links[0]
+                        url = base_url + \
+                            pdf_links[0] if pdf_links[0].startswith(
+                                "/") else base_url + "/" + pdf_links[0]
                     else:
                         url = pdf_links[0]
                 else:
@@ -308,3 +321,232 @@ def extract_pdf_content(url: str) -> str:
         return f"Error downloading PDF: {str(e)}"
     except Exception as e:
         return f"Error extracting text from PDF: {str(e)}"
+
+
+def extract_patent_html(html_file_path: str) -> str:
+    """Extract the text content of a patent HTML file using Trafilatura.
+
+    Args:
+        html_file_path: Path to local HTML file to extract content from
+
+    Returns:
+        Text content of the patent document with maximum information preservation
+
+    """
+    try:
+        import trafilatura
+    except ImportError:
+        raise ImportError(
+            "trafilatura not installed. Run: pip install trafilatura")
+
+    with open(html_file_path, 'r', encoding='utf-8') as f:
+        html_content = f.read()
+
+    result = trafilatura.extract(html_content,
+                                 include_comments=True,
+                                 include_tables=True,
+                                 include_links=True
+                                 )
+
+    return result.strip() if result else ""
+
+
+def extract_patent_image_from_urls(html_content: str, output_file: str = "patent_images.json") -> list:
+    """Extract all patent image URLs from HTML content and save to JSON.
+
+    Args:
+        html_content: HTML content as string
+        output_file: Path to save the JSON file (default: "patent_images.json")
+
+    Returns:
+        List of URLs that start with https://patentimages.storage.googleapis.com and end with .png
+    """
+    import json
+    import re
+
+    # Extract URLs using regex pattern
+    url_pattern = r'https://patentimages\.storage\.googleapis\.com[^\s"\'<>]*\.png'
+    all_matches = re.findall(url_pattern, html_content)
+    
+    # Remove duplicates and sort
+    filtered_urls = sorted(list(set(all_matches)))
+
+    # Save to JSON file
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(filtered_urls, f, indent=2, ensure_ascii=False)
+
+    return filtered_urls
+    
+
+def image_QA(image_url: str, question: str) -> str:
+    """Extract answers from patent images using vision-language models.
+
+    Args:
+        image_url: URL of the patent image to analyze
+        question: Question to ask about the image
+
+    Returns:
+        Answer text from the model
+    """
+    try:
+        # Load API key from .env file
+        load_dotenv()
+        api_key = os.getenv("QWEN_API")
+
+        if not api_key:
+            return "Error: QWEN_API key not found in .env file. Please check your configuration."
+
+        # Validate image URL
+        if not image_url.startswith(("http://", "https://")):
+            return f"Error: Invalid image URL. Must start with http:// or https://. Got: {image_url}"
+
+        # Initialize OpenAI client
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key
+        )
+
+        # Call the model
+        completion = client.chat.completions.create(
+            extra_headers={
+                "HTTP-Referer": "https://localhost",
+                "X-Title": "Patent Image Q&A"
+            },
+            model="qwen/qwen3-vl-235b-a22b-thinking",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": question},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": image_url}
+                        }
+                    ]
+                }
+            ],
+            temperature=0.1
+        )
+
+        # Extract and return the answer
+        answer = completion.choices[0].message.content
+        return answer.strip()
+
+    except Exception as e:
+        return f"Error processing image Q&A: {str(e)}"
+
+
+def extract_entities_with_qwen_max(
+    text: str,
+    extraction_types: list[str],
+    description: str = None,
+    examples: list[dict] = None
+) -> dict:
+    """Extract entities and structured information from text using Qwen-Max LLM.
+
+    Args:
+        text: The text to extract information from
+        extraction_types: List of entity types to extract (e.g., ["Gene", "Protein", "Disease"])
+        description: Optional description of what to extract. If None, auto-generates based on extraction_types
+        examples: List of example dicts. Format:
+                  [{"text": "example text", "extractions": [{"class": "Gene", "text": "BRCA1", "attributes": {...}}]}]
+
+    Returns:
+        Dictionary with extraction results grouped by type
+    """
+    import logging
+    import os
+    from collections import defaultdict
+
+    import langextract as lx
+    from dotenv import load_dotenv
+    from langextract.providers.openai import OpenAILanguageModel
+
+    try:
+        # Load API key
+        load_dotenv()
+        api_key = os.getenv("QWEN_API")
+
+        if not api_key:
+            return {"error": "QWEN_API key not found in .env file", "success": False}
+
+        # Validate inputs
+        if not text or not text.strip():
+            return {"error": "Text cannot be empty", "success": False}
+
+        if not extraction_types or len(extraction_types) == 0:
+            return {"error": "extraction_types cannot be empty", "success": False}
+
+        if not examples or len(examples) == 0:
+            return {"error": "examples cannot be empty. Please provide at least one example.", "success": False}
+
+        # Auto-generate description if not provided
+        if description is None:
+            types_str = ", ".join(extraction_types)
+            description = f"Extract {types_str} from the text. Use exact text from the original and provide meaningful attributes."
+
+        # Parse custom examples
+        parsed_examples = []
+        for example in examples:
+            if "text" not in example or "extractions" not in example:
+                continue
+            extractions = []
+            for ext in example["extractions"]:
+                if "class" not in ext or "text" not in ext:
+                    continue
+                extractions.append(
+                    lx.data.Extraction(
+                        extraction_class=ext["class"],
+                        extraction_text=ext["text"],
+                        attributes=ext.get("attributes", {})
+                    )
+                )
+            parsed_examples.append(
+                lx.data.ExampleData(
+                    text=example["text"], extractions=extractions)
+            )
+
+        if len(parsed_examples) == 0:
+            return {"error": "No valid examples provided. Check example format.", "success": False}
+
+        # Configure model with Qwen-Max
+        model = OpenAILanguageModel(
+            model_id='qwen/qwen3-max',
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1"
+        )
+
+        # Suppress warnings
+        logging.getLogger('absl').setLevel(logging.ERROR)
+
+        # Extract
+        result = lx.extract(
+            text_or_documents=text,
+            prompt_description=description,
+            examples=parsed_examples,
+            model=model,
+            fence_output=True,
+            use_schema_constraints=False,
+            align_extractions=False
+        )
+
+        # Format results
+        grouped = defaultdict(list)
+        for extraction in result.extractions:
+            grouped[extraction.extraction_class].append({
+                "text": extraction.extraction_text,
+                "attributes": extraction.attributes if extraction.attributes else {}
+            })
+
+        # Convert to regular dict and add summary
+        output = dict(grouped)
+        output["summary"] = {
+            "total_entities": len(result.extractions),
+            "types_found": list(grouped.keys())
+        }
+        output["success"] = True
+
+        return output
+
+    except Exception as e:
+        return {"error": f"Error during extraction: {str(e)}", "success": False}

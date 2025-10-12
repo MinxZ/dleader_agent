@@ -132,4 +132,90 @@ description = [
             }
         ],
     },
+    {
+        "description": "Extract the text content of a patent HTML file using Trafilatura with maximum information preservation.",
+        "name": "extract_patent_html",
+        "optional_parameters": [],
+        "required_parameters": [
+            {
+                "default": None,
+                "description": "Path to local HTML file to extract content from",
+                "name": "html_file_path",
+                "type": "str",
+            }
+        ],
+    },
+
+    {
+        "description": "Answer questions about images using vision-language models.",
+        "name": "image_QA",
+        "optional_parameters": [],
+        "required_parameters": [
+            {
+                "default": None,
+                "description": "URL of the image to analyze",
+                "name": "image_url",
+                "type": "str",
+            },
+            {
+                "default": None,
+                "description": "Question to ask about the image",
+                "name": "question",
+                "type": "str",
+            }
+        ],
+    },
+    {
+        "description": "Extract all patent image URLs from HTML content and save to JSON file.",
+        "name": "extract_patent_image_from_urls",
+        "optional_parameters": [
+            {
+                "default": "patent_images.json",
+                "description": "Path to save the JSON file containing extracted URLs",
+                "name": "output_file",
+                "type": "str",
+            }
+        ],
+        "required_parameters": [
+            {
+                "default": None,
+                "description": "HTML content as string to extract patent image URLs from",
+                "name": "html_content",
+                "type": "str",
+            }
+        ],
+    },
+
+    {
+        "description": "Extract entities and structured information from text using Qwen-Max LLM with custom examples. Requires user to provide examples for few-shot learning. Returns JSON with extracted entities grouped by type with attributes.",
+        "name": "extract_entities_with_qwen_max",
+        "optional_parameters": [
+            {
+                "default": None,
+                "description": "Custom description of extraction task. Example: 'Extract genes, proteins and diseases from biotech patent text'",
+                "name": "description",
+                "type": "str",
+            }
+        ],
+        "required_parameters": [
+            {
+                "default": None,
+                "description": "Text to extract information from",
+                "name": "text",
+                "type": "str",
+            },
+            {
+                "default": None,
+                "description": "List of entity types to extract. Examples: ['Gene', 'Protein', 'Disease'], ['Patent Number', 'Inventor']",
+                "name": "extraction_types",
+                "type": "list",
+            },
+            {
+                "default": None,
+                "description": "List of example dicts for few-shot learning (REQUIRED). Format: [{'text': 'example text', 'extractions': [{'class': 'Gene', 'text': 'BRCA1', 'attributes': {'function': 'tumor suppressor'}}]}]",
+                "name": "examples",
+                "type": "list",
+            }
+        ],
+    }
 ]

@@ -1,10 +1,9 @@
 import os
-from typing import Literal, Optional
+from typing import Literal
 
-import openai
 from langchain_core.language_models.chat_models import BaseChatModel
 
-SourceType = Literal["OpenAI", "AzureOpenAI", "Anthropic", "Ollama", "Gemini", "Bedrock", "Groq", "Custom"]
+SourceType = Literal["OpenAI", "AzureOpenAI", "Anthropic", "Ollama", "Gemini", "Bedrock", "Groq", "OpenRouter", "Custom"]
 ALLOWED_SOURCES: set[str] = set(SourceType.__args__)
 
 
@@ -23,10 +22,10 @@ def get_llm(
         model (str): The model name to use
         temperature (float): Temperature setting for generation
         stop_sequences (list): Sequences that will stop generation
-        source (str): Source provider: "OpenAI", "AzureOpenAI", "Anthropic", "Ollama", "Gemini", "Bedrock", or "Custom"
+        source (str): Source provider: "OpenAI", "AzureOpenAI", "Anthropic", "Ollama", "Gemini", "Bedrock", "Groq", "OpenRouter", or "Custom"
                       If None, will attempt to auto-detect from model name
         base_url (str): The base URL for custom model serving (e.g., "http://localhost:8000/v1"), default is None
-        api_key (str): The API key for the custom llm
+        api_key (str): The API key for the custom llm or OpenRouter
     """
     # Auto-detect source from model name if not specified
     if source is None:
@@ -78,6 +77,37 @@ def get_llm(
                 "langchain-openai package is required for OpenAI models. Install with: pip install langchain-openai"
             )
         return ChatOpenAI(model=model, temperature=temperature, stop_sequences=stop_sequences)
+    
+    elif source == "OpenRouter":
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError:
+            raise ImportError(  # noqa: B904
+                "langchain-openai package is required for OpenRouter models. Install with: pip install langchain-openai"
+            )
+
+        # Get API key from parameter or environment
+        openrouter_api_key = api_key if api_key != "EMPTY" else os.getenv("OPENROUTER_API_KEY")
+        if not openrouter_api_key:
+            raise ValueError(
+                "OpenRouter API key not provided. "
+                "Please set OPENROUTER_API_KEY environment variable or pass api_key parameter"
+            )
+
+        # Set up headers for OpenRouter
+        default_headers = {
+            "HTTP-Referer": os.getenv("OPENROUTER_REFERER", "http://localhost:3000"),
+            "X-Title": os.getenv("OPENROUTER_APP_NAME", "LangChain OpenRouter App")
+        }
+
+        return ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            api_key=openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+            stop_sequences=stop_sequences,
+            default_headers=default_headers
+        )
 
     elif source == "AzureOpenAI":
         try:
@@ -193,5 +223,5 @@ def get_llm(
 
     else:
         raise ValueError(
-            f"Invalid source: {source}. Valid options are 'OpenAI', 'AzureOpenAI', 'Anthropic', 'Gemini', 'Groq', 'Bedrock', or 'Ollama'"
+            f"Invalid source: {source}. Valid options are 'OpenAI', 'AzureOpenAI', 'Anthropic', 'Gemini', 'Groq', 'Bedrock', 'OpenRouter', 'Ollama', or 'Custom'"
         )
