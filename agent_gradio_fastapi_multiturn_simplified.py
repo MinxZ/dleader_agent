@@ -449,9 +449,7 @@ No snapshots available yet."""
 {download_url}
 ```
 
-**Direct Download Link**: [Download ZIP]({download_url})
-
-*Copy the URL above to download directly, or click the link*
+*Copy the URL above and paste in another windows to download*
 """
 
             return result_display, gr.update(visible=False)

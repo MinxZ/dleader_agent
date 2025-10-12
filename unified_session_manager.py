@@ -375,6 +375,7 @@ class UnifiedSessionManager:
         for session_id, session in self.queue_manager.multiturn_sessions.items():
             session_data = {
                 "session_id": session_id,
+                "session_name": getattr(session, 'session_name', ""),
                 "created_at": session.created_at,
                 "last_updated": session.last_updated,
                 "total_turns": session.total_turns,

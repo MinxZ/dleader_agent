@@ -233,3 +233,4 @@ session_storage/
 multiturn_sessions/
 *.csv
 functions_test/
+templates/

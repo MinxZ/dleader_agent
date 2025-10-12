@@ -649,6 +649,7 @@ class CloudStorageManager:
             metadata = {
                 "_id": session_id,
                 "session_id": session_id,
+                "session_name": multiturn_session_data.get("session_name", ""),
                 "created_at": multiturn_session_data.get("created_at"),
                 "last_updated": multiturn_session_data.get("last_updated"),
                 "total_turns": multiturn_session_data.get("total_turns", 0),

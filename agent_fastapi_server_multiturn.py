@@ -112,6 +112,7 @@ class ConversationTurn(BaseModel):
 
 class MultiTurnSession(BaseModel):
     session_id: str
+    session_name: str = ""  # Name for the multi-session (default: first 30 chars of first query)
     created_at: str
     last_updated: str
     language: Language
@@ -145,6 +146,27 @@ class ContinueRequest(BaseModel):
     message: str
     language: Language = Language.EN
     user_id: Optional[str] = None
+
+class RenameMultiSessionRequest(BaseModel):
+    session_id: str
+    new_name: str
+    user_id: str
+
+# Template Models
+class Template(BaseModel):
+    title: str
+    running_time: str
+    tools: int
+    description: str
+    prompt: Optional[str] = None
+
+class TemplateListRequest(BaseModel):
+    templates: List[Template]
+
+class TemplateResponse(BaseModel):
+    success: bool
+    message: str
+    total_templates: Optional[int] = None
 
 # Sharing Models
 class ShareSessionRequest(BaseModel):
@@ -878,15 +900,21 @@ class QueueManager:
         except Exception as e:
             print(f"Error saving multi-turn session {session.session_id}: {e}")
 
-    def create_or_get_multiturn_session(self, session_id: str, language: Language, user_id: str = None) -> MultiTurnSession:
+    def create_or_get_multiturn_session(self, session_id: str, language: Language, user_id: str = None, initial_query: str = None) -> MultiTurnSession:
         """Create new multi-turn session or get existing one"""
         if session_id in self.multiturn_sessions:
             return self.multiturn_sessions[session_id]
 
         # Create new multi-turn session
         now = datetime.now().isoformat()
+        # Generate initial session name from first 30 characters of query
+        session_name = ""
+        if initial_query:
+            session_name = initial_query[:30]
+
         session = MultiTurnSession(
             session_id=session_id,
+            session_name=session_name,
             created_at=now,
             last_updated=now,
             language=language,
@@ -2358,7 +2386,7 @@ async def start_chat_queue(
     session_id = session_id or str(uuid.uuid4())
 
     # Create or get multi-turn session first to get turn number
-    multiturn_session = queue_manager.create_or_get_multiturn_session(session_id, language, user_id)
+    multiturn_session = queue_manager.create_or_get_multiturn_session(session_id, language, user_id, initial_query=message)
     turn_number = queue_manager.add_turn_to_session(session_id, message)
 
     # Handle file uploads with S3 storage
@@ -2653,29 +2681,51 @@ async def download_session_zip(session_id: str, user_id: str):
 @app.get("/results/{session_id}")
 async def get_session_results(session_id: str, user_id: str):
     """Get structured JSON results for a completed session"""
-    progress = queue_manager.get_session_progress(session_id)
-    if not progress:
+    # Use unified session manager to check both local and cloud storage
+    unified_manager = get_unified_session_manager(queue_manager)
+    session_data = await unified_manager.get_session_by_id(session_id)
+
+    if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
 
     # Verify user owns this session
-    session_user_id = progress.get("user_id")
+    session_user_id = session_data.get("user_id")
     if session_user_id and session_user_id != user_id:
         raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-    if not progress.get("is_complete", False):
+    if not session_data.get("is_complete", False):
         raise HTTPException(status_code=400, detail="Session is not yet complete")
 
-    json_result = progress.get("json_result")
+    # For cloud sessions, retrieve from MongoDB
+    storage_location = session_data.get("_storage_location", "unknown")
+    if storage_location == "cloud":
+        # Get full session data from cloud
+        cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+        if cloud_session:
+            # Return structured result with thinking_process and final_report
+            return {
+                "session_id": session_id,
+                "status": cloud_session.get("status", "completed"),
+                "content": {
+                    "thinking_content": cloud_session.get("thinking_process", ""),
+                    "final_report": cloud_session.get("final_report", "")
+                },
+                "s3_files": cloud_session.get("s3_files", {}),
+                "result_summary": cloud_session.get("result_summary", {})
+            }
+
+    # For local/active sessions, use existing json_result
+    json_result = session_data.get("json_result")
     if not json_result:
         # Session completed but no JSON result (possibly old session or error)
         return {
             "session_id": session_id,
-            "status": progress.get("status", "unknown"),
+            "status": session_data.get("status", "unknown"),
             "error": "No structured results available for this session",
             "legacy_result": {
-                "result": progress.get("result"),
-                "error": progress.get("error"),
-                "created_at": progress.get("created_at")
+                "result": session_data.get("result"),
+                "error": session_data.get("error"),
+                "created_at": session_data.get("created_at")
             }
         }
 
@@ -2711,19 +2761,51 @@ async def stop_task(session_id: str, user_id: str):
 @app.get("/snapshots/{session_id}")
 async def get_session_snapshots(session_id: str, user_id: str):
     """Get all periodic snapshots for a session"""
-    progress = queue_manager.get_session_progress(session_id)
-    if not progress:
+    # Use unified session manager to check both local and cloud storage
+    unified_manager = get_unified_session_manager(queue_manager)
+    session_data = await unified_manager.get_session_by_id(session_id)
+
+    if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
 
     # Verify user owns this session
-    session_user_id = progress.get("user_id")
+    session_user_id = session_data.get("user_id")
     if session_user_id and session_user_id != user_id:
         raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
+    # For cloud sessions, get snapshots from S3
+    storage_location = session_data.get("_storage_location", "unknown")
+    if storage_location == "cloud":
+        cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+        if cloud_session:
+            s3_files = cloud_session.get("s3_files", {})
+            snapshots_info = s3_files.get("snapshots", [])
+
+            # Generate presigned URLs for snapshot files
+            snapshots_with_urls = []
+            for snapshot in snapshots_info:
+                if isinstance(snapshot, dict) and "s3_key" in snapshot:
+                    url = cloud_storage_manager.generate_presigned_url(snapshot["s3_key"])
+                    snapshots_with_urls.append({
+                        "filename": snapshot.get("filename"),
+                        "url": url,
+                        "file_size": snapshot.get("file_size", 0),
+                        "uploaded_at": snapshot.get("uploaded_at")
+                    })
+
+            return {
+                "session_id": session_id,
+                "snapshot_count": len(snapshots_with_urls),
+                "snapshots": snapshots_with_urls,
+                "storage_location": "cloud"
+            }
+
+    # For local/active sessions, use existing snapshots
     return {
         "session_id": session_id,
-        "snapshot_count": progress.get("snapshot_count", 0),
-        "snapshots": progress.get("periodic_snapshots", [])
+        "snapshot_count": len(session_data.get("periodic_snapshots", [])),
+        "snapshots": session_data.get("periodic_snapshots", []),
+        "storage_location": storage_location
     }
 
 
@@ -3125,6 +3207,181 @@ async def unshare_session(session_id: str, user_id: str):
         print(f"Error unsharing session: {e}")
         raise HTTPException(status_code=500, detail=f"Error unsharing session: {str(e)}")
 
+@app.post("/rename-multisession")
+async def rename_multisession(request: RenameMultiSessionRequest):
+    """Rename a multi-turn session"""
+    try:
+        session_id = request.session_id
+        new_name = request.new_name
+        user_id = request.user_id
+
+        # Get the multi-turn session from local storage first
+        multiturn_session = queue_manager.multiturn_sessions.get(session_id)
+
+        # If not in memory, try to load from local storage
+        if not multiturn_session:
+            multiturn_file = os.path.join(queue_manager.multiturn_storage_dir, f"{session_id}.json")
+            if os.path.exists(multiturn_file):
+                with open(multiturn_file, 'r', encoding='utf-8') as f:
+                    session_data = json.load(f)
+                    multiturn_session = MultiTurnSession(**session_data)
+                    queue_manager.multiturn_sessions[session_id] = multiturn_session
+
+        if not multiturn_session:
+            raise HTTPException(status_code=404, detail="Multi-turn session not found")
+
+        # Verify user owns this session
+        if multiturn_session.user_id and multiturn_session.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        # Update the session name
+        multiturn_session.session_name = new_name
+        multiturn_session.last_updated = datetime.now().isoformat()
+
+        # Save to local storage
+        queue_manager.multiturn_sessions[session_id] = multiturn_session
+        queue_manager._save_multiturn_session(multiturn_session)
+
+        # Update in MongoDB if the session has been uploaded to cloud
+        if cloud_storage_manager:
+            try:
+                from s3_mongodb.func_mongodb import get_mongodb_collection
+                collection = get_mongodb_collection(
+                    os.getenv("SESSION_DB_NAME", "dleader_agent"),
+                    "multiturn_sessions"
+                )
+                if collection:
+                    # Check if session exists in cloud
+                    cloud_session = collection.find_one({"session_id": session_id})
+                    if cloud_session:
+                        # Update the session_name and last_updated in MongoDB
+                        collection.update_one(
+                            {"session_id": session_id},
+                            {"$set": {
+                                "session_name": new_name,
+                                "last_updated": multiturn_session.last_updated
+                            }}
+                        )
+            except Exception as cloud_error:
+                print(f"Warning: Could not update session name in cloud: {cloud_error}")
+                # Don't fail the request if cloud update fails
+
+        return {
+            "success": True,
+            "session_id": session_id,
+            "new_name": new_name,
+            "message": "Session renamed successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error renaming session: {e}")
+        raise HTTPException(status_code=500, detail=f"Error renaming session: {str(e)}")
+
+@app.post("/upload-template")
+async def upload_template(request: TemplateListRequest):
+    """Upload workflow templates to MongoDB"""
+    try:
+        from s3_mongodb.func_mongodb import get_mongodb_collection
+        from s3_mongodb.mongodb_upsert import upsert_wrapper
+
+        # Get MongoDB collection
+        collection = get_mongodb_collection(
+            os.getenv("SESSION_DB_NAME", "dleader_agent"),
+            "workflow_templates"
+        )
+
+        if not collection:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        # Prepare templates for MongoDB
+        templates_to_upload = []
+        for template in request.templates:
+            template_data = template.dict()
+            # Use title as _id for easy upsert
+            template_data["_id"] = template.title
+            template_data["uploaded_at"] = datetime.now().isoformat()
+            templates_to_upload.append(template_data)
+
+        # Upsert templates to MongoDB
+        event = {
+            "database_name": os.getenv("SESSION_DB_NAME", "dleader_agent"),
+            "collection_name": "workflow_templates",
+            "items": templates_to_upload,
+            "id_field": "_id"
+        }
+
+        result = upsert_wrapper(event)
+
+        if result.get("statusCode") != 200:
+            raise Exception(f"MongoDB upsert failed: {result}")
+
+        # Also save to local as backup
+        templates_dir = os.path.join(os.getcwd(), "templates")
+        os.makedirs(templates_dir, exist_ok=True)
+        templates_file = os.path.join(templates_dir, "workflow_templates.json")
+        templates_data = {"templates": [template.dict() for template in request.templates]}
+        with open(templates_file, 'w', encoding='utf-8') as f:
+            json.dump(templates_data, f, ensure_ascii=False, indent=2)
+
+        return TemplateResponse(
+            success=True,
+            message="Templates uploaded successfully to MongoDB",
+            total_templates=len(request.templates)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error uploading templates: {e}")
+        raise HTTPException(status_code=500, detail=f"Error uploading templates: {str(e)}")
+
+@app.get("/templates")
+async def get_templates():
+    """Get all workflow templates from MongoDB"""
+    try:
+        from s3_mongodb.func_mongodb import get_mongodb_collection
+
+        # Try to get from MongoDB first
+        collection = get_mongodb_collection(
+            os.getenv("SESSION_DB_NAME", "dleader_agent"),
+            "workflow_templates"
+        )
+
+        if collection:
+            templates = list(collection.find({}).sort("title", 1))
+            # Remove MongoDB _id field from response
+            for template in templates:
+                if "_id" in template:
+                    template.pop("_id", None)
+                if "uploaded_at" in template:
+                    template.pop("uploaded_at", None)
+
+            return {
+                "templates": templates,
+                "total": len(templates),
+                "source": "mongodb"
+            }
+
+        # Fallback to local file if MongoDB not available
+        templates_file = os.path.join(os.getcwd(), "templates", "workflow_templates.json")
+        if not os.path.exists(templates_file):
+            return {"templates": [], "total": 0, "source": "none"}
+
+        with open(templates_file, 'r', encoding='utf-8') as f:
+            templates_data = json.load(f)
+
+        return {
+            "templates": templates_data.get("templates", []),
+            "total": len(templates_data.get("templates", [])),
+            "source": "local_backup"
+        }
+
+    except Exception as e:
+        print(f"Error retrieving templates: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving templates: {str(e)}")
+
 @app.post("/search-shared-sessions")
 async def search_shared_sessions(request: SearchSharedSessionsRequest):
     """Search for shared sessions in the community"""
@@ -3325,123 +3582,95 @@ async def hard_delete_session(session_id: str, user_id: str, confirm: bool = Fal
         print(f"Error hard deleting session: {e}")
         raise HTTPException(status_code=500, detail=f"Error hard deleting session: {str(e)}")
 
+
+@app.get("/download-urls/{session_id}")
+async def get_session_download_urls(session_id: str, user_id: str):
+    """Get download URLs for session files (always prefer S3/cloud)"""
+    try:
+        # Wait briefly to ensure S3 upload completed
+        await asyncio.sleep(1)
+
+        # For multi-turn sessions, extract base session ID
+        base_session_id = session_id
+        if "_turn_" in session_id:
+            base_session_id = session_id.split("_turn_")[0]
+            print(f"Multi-turn session detected: {session_id} -> base: {base_session_id}")
+
+        # Use unified session manager to check both local and cloud storage
+        unified_manager = get_unified_session_manager(queue_manager)
+
+        # Try both session IDs (with and without turn suffix)
+        session_data = await unified_manager.get_session_by_id(session_id)
+        if not session_data and base_session_id != session_id:
+            session_data = await unified_manager.get_session_by_id(base_session_id)
+
+        if not session_data:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # Verify user owns this session
+        session_user_id = session_data.get("user_id")
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        storage_location = session_data.get("_storage_location", "unknown")
+
+        # For cloud sessions, get presigned URLs from S3
+        if storage_location == "cloud":
+            download_data = await cloud_storage_manager.get_session_download_urls(base_session_id)
+            if download_data:
+                return download_data
+            else:
+                raise HTTPException(status_code=500, detail="Failed to generate download URLs from cloud storage")
+
+        # For local sessions, try to create/find local zip
+        session_path = session_data.get("session_path")
+        if not session_path and session_data.get("is_complete"):
+            # Try to find session folder
+            import glob
+            patterns = [
+                f"chat_sessions/*{session_id[:8]}*",
+                f"chat_sessions/multiturn_*{session_id[:8]}*"
+            ]
+            for pattern in patterns:
+                matches = glob.glob(pattern)
+                if matches:
+                    session_path = matches[0]
+                    break
+
+        if session_path and os.path.exists(session_path):
+            # Create zip if it doesn't exist
+            zip_filename = f"session_{session_id[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            zip_path = os.path.join("chat_zips", zip_filename)
+
+            if not os.path.exists(zip_path):
+                zip_path = create_session_zip(session_path, save_to_chat_zips=True)
+
+            # Return local download URL
+            return {
+                "session_id": session_id,
+                "download_url": f"/download/{session_id}?user_id={user_id}",
+                "zip_available": True,
+                "storage_type": storage_location
+            }
+
+        # No files found
+        raise HTTPException(status_code=404, detail="No downloadable files found for session")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting download URLs for session {session_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error generating download URLs: {str(e)}")
+
+
+# Note: Cloud storage is now integrated transparently into all endpoints
+# Sessions are automatically uploaded to cloud when completed
+# Use the standard endpoints (/all-sessions, /status/{id}, etc.) to access both local and cloud data
+
 if __name__ == "__main__":
     import argparse
-
-    # Additional endpoint for getting fresh download URLs for cloud sessions
-    @app.get("/download-urls/{session_id}")
-    async def get_session_download_urls(session_id: str, user_id: str):
-        """Get download URLs for session files (always prefer S3/cloud)"""
-        try:
-            # Wait briefly to ensure S3 upload completed
-            await asyncio.sleep(1)
-
-            # For multi-turn sessions, extract base session ID
-            base_session_id = session_id
-            if "_turn_" in session_id:
-                base_session_id = session_id.split("_turn_")[0]
-                print(f"Multi-turn session detected: {session_id} -> base: {base_session_id}")
-
-            # Try to get from cloud storage directly using base session ID
-            try:
-                download_data = await cloud_storage_manager.get_session_download_urls(base_session_id)
-                if download_data:
-                    # Verify user ownership
-                    session_info = await cloud_storage_manager.get_session_info(base_session_id)
-                    if session_info:
-                        session_user_id = session_info.get("user_id")
-                        if session_user_id and session_user_id != user_id:
-                            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
-
-                    return download_data
-            except Exception as e:
-                print(f"Cloud storage check failed for {base_session_id}: {e}")
-
-            # Fallback: Get unified session manager
-            unified_manager = get_unified_session_manager(queue_manager)
-
-            # Check if session exists locally (try both session IDs)
-            session_data = await unified_manager.get_session_by_id(session_id)
-            if not session_data and base_session_id != session_id:
-                session_data = await unified_manager.get_session_by_id(base_session_id)
-
-            if not session_data:
-                # Check if in active sessions and trigger upload
-                if session_id in queue_manager.active_sessions:
-                    user_request = queue_manager.active_sessions[session_id]
-                    if user_request.is_complete:
-                        queue_manager._trigger_s3_upload_for_session(user_request)
-                        # Wait for upload
-                        await asyncio.sleep(3)
-                        # Try cloud again
-                        try:
-                            download_data = await cloud_storage_manager.get_session_download_urls(session_id)
-                            if download_data:
-                                return download_data
-                        except:
-                            pass
-
-                if not session_data:
-                    raise HTTPException(status_code=404, detail="Session not found")
-
-            # Verify user owns this session
-            session_user_id = session_data.get("user_id")
-            if session_user_id and session_user_id != user_id:
-                raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
-
-            storage_location = session_data.get("_storage_location", "unknown")
-
-            # Try cloud first
-            if storage_location == "cloud":
-                download_data = await cloud_storage_manager.get_session_download_urls(session_id)
-                if download_data:
-                    return download_data
-
-            # For local sessions or if cloud failed, try to create/find local zip
-            session_path = session_data.get("session_path")
-            if not session_path and session_data.get("is_complete"):
-                # Try to find session folder
-                import glob
-                patterns = [
-                    f"chat_sessions/*{session_id[:8]}*",
-                    f"chat_sessions/multiturn_*{session_id[:8]}*"
-                ]
-                for pattern in patterns:
-                    matches = glob.glob(pattern)
-                    if matches:
-                        session_path = matches[0]
-                        break
-
-            if session_path and os.path.exists(session_path):
-                # Create zip if it doesn't exist
-                zip_filename = f"session_{session_id[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-                zip_path = os.path.join("chat_zips", zip_filename)
-
-                if not os.path.exists(zip_path):
-                    zip_path = create_session_zip(session_path, save_to_chat_zips=True)
-
-                # Return local download URL
-                return {
-                    "session_id": session_id,
-                    "download_url": f"/download/{session_id}?user_id={user_id}",
-                    "zip_available": True,
-                    "storage_type": storage_location
-                }
-
-            # No files found
-            raise HTTPException(status_code=404, detail="No downloadable files found for session")
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"Error getting download URLs for session {session_id}: {e}")
-            import traceback
-            traceback.print_exc()
-            raise HTTPException(status_code=500, detail=f"Error generating download URLs: {str(e)}")
-
-    # Note: Cloud storage is now integrated transparently into all endpoints
-    # Sessions are automatically uploaded to cloud when completed
-    # Use the standard endpoints (/all-sessions, /status/{id}, etc.) to access both local and cloud data
 
     parser = argparse.ArgumentParser(description="FastAPI Agent Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
