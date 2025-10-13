@@ -2461,6 +2461,10 @@ async def start_chat_queue(
     files: List[UploadFile] = File(default=[])
 ):
     """Add chat request to queue with S3 file uploads"""
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
     session_id = session_id or str(uuid.uuid4())
 
     # Create or get multi-turn session first to get turn number
@@ -2588,6 +2592,10 @@ async def get_progress(session_id: str, user_id: str):
 @app.get("/status/{session_id}")
 async def get_status(session_id: str, user_id: str):
     """Get current status and progress for a session from local or cloud storage"""
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
     try:
         # Get unified session manager
         unified_manager = get_unified_session_manager(queue_manager)
@@ -2675,6 +2683,10 @@ async def get_status(session_id: str, user_id: str):
 @app.get("/download/{session_id}")
 async def download_session_zip(session_id: str, user_id: str):
     """Download session zip file from local or cloud storage"""
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
     import requests
     from fastapi.responses import RedirectResponse
 
@@ -2759,6 +2771,10 @@ async def download_session_zip(session_id: str, user_id: str):
 @app.get("/results/{session_id}")
 async def get_session_results(session_id: str, user_id: str):
     """Get structured JSON results for a completed session"""
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
     # Use unified session manager to check both local and cloud storage
     unified_manager = get_unified_session_manager(queue_manager)
     session_data = await unified_manager.get_session_by_id(session_id)
@@ -2813,6 +2829,10 @@ async def get_session_results(session_id: str, user_id: str):
 @app.post("/stop/{session_id}")
 async def stop_task(session_id: str, user_id: str):
     """Stop a running or queued task"""
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
     # First verify user owns this session
     if session_id in queue_manager.active_sessions:
         session_user_id = getattr(queue_manager.active_sessions[session_id], 'user_id', None)
@@ -2839,6 +2859,10 @@ async def stop_task(session_id: str, user_id: str):
 @app.get("/snapshots/{session_id}")
 async def get_session_snapshots(session_id: str, user_id: str):
     """Get all periodic snapshots for a session"""
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
     # Use unified session manager to check both local and cloud storage
     unified_manager = get_unified_session_manager(queue_manager)
     session_data = await unified_manager.get_session_by_id(session_id)
@@ -2891,10 +2915,14 @@ async def get_session_snapshots(session_id: str, user_id: str):
 async def get_all_sessions(user_id: Optional[str] = None):
     """Get all sessions from both local and cloud storage"""
     try:
+        # Require user_id for security - prevent unauthorized access to all sessions
+        if not user_id or user_id.strip() == "":
+            return {"sessions": [], "error": "user_id is required", "message": "Please provide a valid user_id"}
+
         # Get unified session manager
         unified_manager = get_unified_session_manager(queue_manager)
 
-        # Get all sessions (local + cloud) filtered by user_id if provided
+        # Get all sessions (local + cloud) filtered by user_id
         all_sessions = await unified_manager.get_all_sessions(include_cloud=True, user_id=user_id)
 
         # Convert to expected format for compatibility
@@ -2935,6 +2963,10 @@ async def continue_session(
     files: List[UploadFile] = File(default=[])
 ):
     """Continue an existing multi-turn session with S3 file handling"""
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
     # Check if multi-turn session exists
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     if not multiturn_session:
@@ -3108,10 +3140,14 @@ async def get_multiturn_session(session_id: str, user_id: str):
 async def get_all_multiturn_sessions(user_id: Optional[str] = None):
     """Get all multi-turn sessions from both local and cloud storage"""
     try:
+        # Require user_id for security - prevent unauthorized access to all sessions
+        if not user_id or user_id.strip() == "":
+            return {"sessions": [], "error": "user_id is required", "message": "Please provide a valid user_id"}
+
         # Get unified session manager
         unified_manager = get_unified_session_manager(queue_manager)
 
-        # Get all multi-turn sessions (local + cloud) filtered by user_id if provided
+        # Get all multi-turn sessions (local + cloud) filtered by user_id
         all_sessions = await unified_manager.get_multiturn_sessions(include_cloud=True, user_id=user_id)
 
         return {"sessions": all_sessions}
@@ -3520,6 +3556,10 @@ async def hard_delete_session(session_id: str, user_id: str, confirm: bool = Fal
     Hard delete - Immediately and permanently delete a session without moving to trash
     This action cannot be undone!
     """
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
     try:
         if not confirm:
             raise HTTPException(
