@@ -659,6 +659,9 @@ class CloudStorageManager:
                 "latest_query": multiturn_session_data.get("latest_query", ""),
                 "user_id": multiturn_session_data.get("user_id"),
                 "turns": multiturn_session_data.get("turns", []),
+                # Sharing metadata
+                "is_shared": multiturn_session_data.get("is_shared", False),
+                "shared_at": multiturn_session_data.get("shared_at"),
                 "uploaded_to_cloud_at": datetime.now().isoformat()
             }
 

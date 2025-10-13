@@ -366,12 +366,11 @@ class UnifiedSessionManager:
         }
 
     async def get_multiturn_sessions(self, include_cloud: bool = True, user_id: str = None) -> List[Dict[str, Any]]:
-        """Get all multi-turn sessions from both local and cloud"""
+        """Get all multi-turn sessions from MongoDB only"""
         all_sessions = []
         session_ids_seen = set()
 
-        # 1. Get local multi-turn sessions
-        local_multiturn = []
+        # 1. Get in-memory active multi-turn sessions (currently being processed)
         for session_id, session in self.queue_manager.multiturn_sessions.items():
             session_data = {
                 "session_id": session_id,
@@ -384,13 +383,15 @@ class UnifiedSessionManager:
                 "first_query": session.first_query,
                 "latest_query": session.latest_query,
                 "user_id": getattr(session, 'user_id', None),
-                "_storage_location": "local"
+                # Sharing metadata
+                "is_shared": getattr(session, 'is_shared', False),
+                "shared_at": getattr(session, 'shared_at', None),
+                "_storage_location": "memory"
             }
-            local_multiturn.append(session_data)
             all_sessions.append(session_data)
             session_ids_seen.add(session_id)
 
-        # 2. Get cloud multi-turn sessions if requested
+        # 2. Get multi-turn sessions from MongoDB (all persisted sessions)
         if include_cloud:
             try:
                 # Get from MongoDB multiturn collection
@@ -400,20 +401,20 @@ class UnifiedSessionManager:
                     os.getenv("SESSION_DB_NAME", "dleader_agent"),
                     "multiturn_sessions"
                 )
-                if collection:
+                if collection is not None:
                     # Build query for multiturn sessions
                     query = {}
                     if user_id:
                         query["user_id"] = user_id
-                    cloud_sessions = list(collection.find(query).sort("created_at", -1).limit(1000))
-                    for session in cloud_sessions:
+                    mongodb_sessions = list(collection.find(query).sort("created_at", -1).limit(1000))
+                    for session in mongodb_sessions:
                         session_id = session.get("session_id")
                         if session_id and session_id not in session_ids_seen:
-                            session["_storage_location"] = "cloud"
+                            session["_storage_location"] = "mongodb"
                             all_sessions.append(session)
                             session_ids_seen.add(session_id)
             except Exception as e:
-                print(f"Warning: Could not fetch cloud multi-turn sessions: {e}")
+                print(f"Warning: Could not fetch MongoDB multi-turn sessions: {e}")
 
         # Filter by user_id if provided
         if user_id:

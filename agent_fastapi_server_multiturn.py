@@ -37,10 +37,11 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import uvicorn
 from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
-                     WebSocketDisconnect)
+                     WebSocketDisconnect, Request)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Add current directory to path for imports
 sys.path.insert(0, os.getcwd())
@@ -126,10 +127,6 @@ class MultiTurnSession(BaseModel):
     # Sharing metadata
     is_shared: bool = False
     shared_at: Optional[str] = None
-    share_tags: List[str] = []
-    share_title: Optional[str] = None
-    share_description: Optional[str] = None
-    share_visibility: str = "private"  # private, public, community
 
     @property
     def first_query(self) -> str:
@@ -171,10 +168,6 @@ class TemplateResponse(BaseModel):
 # Sharing Models
 class ShareSessionRequest(BaseModel):
     session_id: str
-    title: str
-    description: Optional[str] = None
-    tags: List[str] = []
-    visibility: str = "community"  # private, public, community
     user_id: Optional[str] = None
 
 class SharedSessionInfo(BaseModel):
@@ -189,13 +182,6 @@ class SharedSessionInfo(BaseModel):
     language: str
     first_query: str
     last_query: str
-
-class SearchSharedSessionsRequest(BaseModel):
-    tags: Optional[List[str]] = None
-    search_query: Optional[str] = None
-    visibility: Optional[str] = "community"
-    limit: int = 50
-    offset: int = 0
 
 # Queue Management System
 class UserRequest:
@@ -267,7 +253,8 @@ class QueueManager:
 
         # Load existing sessions from storage
         self._load_sessions_from_storage()
-        self._load_multiturn_sessions()
+        # Note: Multi-turn sessions are now loaded from MongoDB on-demand, not from local files
+        # self._load_multiturn_sessions()  # REMOVED: No longer loading from local JSON files
 
         # Start the queue processor
         self.processor_thread = threading.Thread(target=self._process_queue, daemon=True)
@@ -871,39 +858,77 @@ class QueueManager:
         except Exception as e:
             print(f"Error loading sessions from storage: {e}")
 
-    def _load_multiturn_sessions(self):
-        """Load all existing multi-turn sessions from storage on startup"""
-        try:
-            if not os.path.exists(self.multiturn_storage_dir):
-                return
-
-            for filename in os.listdir(self.multiturn_storage_dir):
-                if filename.endswith('.json'):
-                    session_id = filename[:-5]  # Remove .json extension
-                    try:
-                        session_file = os.path.join(self.multiturn_storage_dir, filename)
-                        with open(session_file, 'r', encoding='utf-8') as f:
-                            session_data = json.load(f)
-                            multiturn_session = MultiTurnSession(**session_data)
-                            self.multiturn_sessions[session_id] = multiturn_session
-                    except Exception as e:
-                        print(f"Error loading multi-turn session {session_id}: {e}")
-        except Exception as e:
-            print(f"Error loading multi-turn sessions from storage: {e}")
+    # REMOVED: No longer loading multi-turn sessions from local JSON files
+    # Multi-turn sessions are now stored in MongoDB only and loaded on-demand
+    # def _load_multiturn_sessions(self):
+    #     """Load all existing multi-turn sessions from storage on startup"""
+    #     try:
+    #         if not os.path.exists(self.multiturn_storage_dir):
+    #             return
+    #
+    #         for filename in os.listdir(self.multiturn_storage_dir):
+    #             if filename.endswith('.json'):
+    #                 session_id = filename[:-5]  # Remove .json extension
+    #                 try:
+    #                     session_file = os.path.join(self.multiturn_storage_dir, filename)
+    #                     with open(session_file, 'r', encoding='utf-8') as f:
+    #                         session_data = json.load(f)
+    #                         multiturn_session = MultiTurnSession(**session_data)
+    #                         self.multiturn_sessions[session_id] = multiturn_session
+    #                 except Exception as e:
+    #                     print(f"Error loading multi-turn session {session_id}: {e}")
+    #     except Exception as e:
+    #         print(f"Error loading multi-turn sessions from storage: {e}")
 
     def _save_multiturn_session(self, session: MultiTurnSession):
-        """Save multi-turn session to persistent storage"""
+        """Save multi-turn session to MongoDB only (no local JSON)"""
         try:
-            session_file = os.path.join(self.multiturn_storage_dir, f"{session.session_id}.json")
-            with open(session_file, 'w', encoding='utf-8') as f:
-                json.dump(session.dict(), f, ensure_ascii=False, indent=2)
+            from s3_mongodb.func_mongodb import get_mongodb_collection
+            from s3_mongodb.mongodb_upsert import upsert_wrapper
+
+            # Prepare session data for MongoDB
+            session_data = session.dict()
+            session_data["_id"] = session.session_id
+            session_data["last_updated"] = datetime.now().isoformat()
+
+            # Save to MongoDB
+            event = {
+                "database_name": os.getenv("SESSION_DB_NAME", "dleader_agent"),
+                "collection_name": "multiturn_sessions",
+                "items": [session_data],
+                "id_field": "_id"
+            }
+
+            result = upsert_wrapper(event)
+            if result.get("statusCode") != 200:
+                print(f"Warning: MongoDB save failed for session {session.session_id}: {result}")
         except Exception as e:
-            print(f"Error saving multi-turn session {session.session_id}: {e}")
+            print(f"Error saving multi-turn session {session.session_id} to MongoDB: {e}")
 
     def create_or_get_multiturn_session(self, session_id: str, language: Language, user_id: str = None, initial_query: str = None) -> MultiTurnSession:
-        """Create new multi-turn session or get existing one"""
+        """Create new multi-turn session or get existing one from MongoDB"""
+        # Check in-memory cache first
         if session_id in self.multiturn_sessions:
             return self.multiturn_sessions[session_id]
+
+        # Try to load from MongoDB
+        try:
+            from s3_mongodb.func_mongodb import get_mongodb_collection
+            collection = get_mongodb_collection(
+                os.getenv("SESSION_DB_NAME", "dleader_agent"),
+                "multiturn_sessions"
+            )
+            if collection is not None:
+                session_data = collection.find_one({"session_id": session_id})
+                if session_data:
+                    # Remove MongoDB _id field
+                    session_data.pop("_id", None)
+                    session_data.pop("uploaded_to_cloud_at", None)
+                    session = MultiTurnSession(**session_data)
+                    self.multiturn_sessions[session_id] = session
+                    return session
+        except Exception as e:
+            print(f"Error loading session {session_id} from MongoDB: {e}")
 
         # Create new multi-turn session
         now = datetime.now().isoformat()
@@ -2357,17 +2382,70 @@ def create_agent():
     )
     return agent
 
+# Custom CORS middleware to ensure headers are always present
+class CORSHeaderMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Handle preflight OPTIONS requests
+        if request.method == "OPTIONS":
+            return JSONResponse(
+                content={"message": "OK"},
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+                    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key, Accept, Origin, X-Requested-With, Access-Control-Request-Method, Access-Control-Request-Headers",
+                    "Access-Control-Max-Age": "3600",
+                    "Access-Control-Allow-Credentials": "true",
+                }
+            )
+
+        # Process the request
+        response = await call_next(request)
+
+        # Add CORS headers to all responses
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, x-api-key, Accept, Origin, X-Requested-With"
+
+        return response
+
 # FastAPI App
 app = FastAPI(title="Agent Chat API", description="Multi-user agent chat with queue management")
 
-# Add CORS middleware
+# Add CORS middleware with explicit configuration for API Gateway and custom headers
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allow all origins (adjust for production security)
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],  # Explicit methods
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "x-api-key",  # Explicitly allow x-api-key header
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers",
+    ],
+    expose_headers=["*"],  # Allow frontend to read response headers
+    max_age=3600,  # Cache preflight requests for 1 hour
 )
+
+# Add custom CORS header middleware (belt and suspenders approach)
+app.add_middleware(CORSHeaderMiddleware)
+
+# Global OPTIONS handler for CORS preflight requests
+@app.options("/{full_path:path}")
+async def options_handler(full_path: str):
+    """Handle OPTIONS preflight requests for all routes"""
+    return {
+        "message": "OK",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key, Accept, Origin, X-Requested-With",
+        "Access-Control-Max-Age": "3600"
+    }
 
 # API Endpoints
 # REMOVED: /chat endpoint - legacy blocking endpoint, use /chat-queue for modern queue-based multi-turn chat
@@ -3125,24 +3203,16 @@ async def share_session(request: ShareSessionRequest):
         # Update sharing metadata
         multiturn_session.is_shared = True
         multiturn_session.shared_at = datetime.now().isoformat()
-        multiturn_session.share_tags = request.tags
-        multiturn_session.share_title = request.title
-        multiturn_session.share_description = request.description
-        multiturn_session.share_visibility = request.visibility
 
-        # Save updated session
+        # Save updated session (in-memory cache + MongoDB)
         queue_manager.multiturn_sessions[request.session_id] = multiturn_session
         queue_manager._save_multiturn_session(multiturn_session)
 
-        # Upload to cloud storage for community access
+        # Also upload to cloud storage for community access (separate collection)
         if cloud_storage_manager:
             # Prepare shared session data
             shared_data = {
                 "session_id": multiturn_session.session_id,
-                "title": request.title,
-                "description": request.description,
-                "tags": request.tags,
-                "visibility": request.visibility,
                 "shared_by": request.user_id,
                 "shared_at": multiturn_session.shared_at,
                 "total_turns": multiturn_session.total_turns,
@@ -3185,9 +3255,9 @@ async def unshare_session(session_id: str, user_id: str):
 
         # Update sharing metadata
         multiturn_session.is_shared = False
-        multiturn_session.share_visibility = "private"
+        multiturn_session.shared_at = None
 
-        # Save updated session
+        # Save updated session (in-memory cache + MongoDB)
         queue_manager.multiturn_sessions[session_id] = multiturn_session
         queue_manager._save_multiturn_session(multiturn_session)
 
@@ -3206,6 +3276,47 @@ async def unshare_session(session_id: str, user_id: str):
     except Exception as e:
         print(f"Error unsharing session: {e}")
         raise HTTPException(status_code=500, detail=f"Error unsharing session: {str(e)}")
+
+@app.get("/shared-sessions")
+async def get_shared_sessions(limit: int = 50, offset: int = 0):
+    """Get all publicly shared sessions from the community"""
+    try:
+        if not cloud_storage_manager:
+            return {"sessions": [], "total": 0, "limit": limit, "offset": offset}
+
+        # Get from MongoDB community_sessions collection
+        from s3_mongodb.func_mongodb import get_mongodb_collection
+        collection = get_mongodb_collection(
+            os.getenv("SESSION_DB_NAME", "dleader_agent"),
+            "community_sessions"
+        )
+
+        if collection is None:
+            return {"sessions": [], "total": 0, "limit": limit, "offset": offset}
+
+        # Query all shared sessions, sorted by shared_at (newest first)
+        total_count = collection.count_documents({})
+        shared_sessions = list(
+            collection.find({})
+            .sort("shared_at", -1)
+            .skip(offset)
+            .limit(limit)
+        )
+
+        # Remove MongoDB _id field from results
+        for session in shared_sessions:
+            session.pop("_id", None)
+
+        return {
+            "sessions": shared_sessions,
+            "total": total_count,
+            "limit": limit,
+            "offset": offset
+        }
+
+    except Exception as e:
+        print(f"Error getting shared sessions: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving shared sessions: {str(e)}")
 
 @app.post("/rename-multisession")
 async def rename_multisession(request: RenameMultiSessionRequest):
@@ -3381,71 +3492,6 @@ async def get_templates():
     except Exception as e:
         print(f"Error retrieving templates: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving templates: {str(e)}")
-
-@app.post("/search-shared-sessions")
-async def search_shared_sessions(request: SearchSharedSessionsRequest):
-    """Search for shared sessions in the community"""
-    try:
-        if not cloud_storage_manager:
-            return {"sessions": [], "total": 0}
-
-        # Search in cloud storage
-        results = await cloud_storage_manager.search_shared_sessions(
-            tags=request.tags,
-            search_query=request.search_query,
-            visibility=request.visibility,
-            limit=request.limit,
-            offset=request.offset
-        )
-
-        return {
-            "sessions": results.get("sessions", []),
-            "total": results.get("total", 0),
-            "limit": request.limit,
-            "offset": request.offset
-        }
-
-    except Exception as e:
-        print(f"Error searching shared sessions: {e}")
-        raise HTTPException(status_code=500, detail=f"Error searching sessions: {str(e)}")
-
-@app.get("/shared-session/{session_id}")
-async def get_shared_session(session_id: str):
-    """Get a specific shared session (public access)"""
-    try:
-        if not cloud_storage_manager:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        # Get from cloud storage
-        session_data = await cloud_storage_manager.get_shared_session(session_id)
-        if not session_data:
-            raise HTTPException(status_code=404, detail="Shared session not found")
-
-        # Check if session is actually shared
-        if not session_data.get("visibility") or session_data["visibility"] == "private":
-            raise HTTPException(status_code=403, detail="Session is not publicly shared")
-
-        return session_data
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error getting shared session: {e}")
-        raise HTTPException(status_code=500, detail=f"Error retrieving session: {str(e)}")
-
-@app.get("/popular-tags")
-async def get_popular_tags(limit: int = 20):
-    """Get popular tags used in shared sessions"""
-    try:
-        if not cloud_storage_manager:
-            return {"tags": []}
-
-        tags = await cloud_storage_manager.get_popular_tags(limit=limit)
-        return {"tags": tags}
-
-    except Exception as e:
-        print(f"Error getting popular tags: {e}")
-        return {"tags": []}
 
 @app.get("/health")
 async def health_check():
