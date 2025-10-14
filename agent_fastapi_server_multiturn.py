@@ -888,8 +888,7 @@ class QueueManager:
     def _save_multiturn_session(self, session: MultiTurnSession):
         """Save multi-turn session to MongoDB only (no local JSON)"""
         try:
-            from s3_mongodb.func_mongodb import get_mongodb_collection
-            from s3_mongodb.mongodb_upsert import upsert_wrapper
+            from s3_mongodb.func_mongodb import get_mongodb_collection, upsert_wrapper
 
             # Prepare session data for MongoDB
             session_data = session.dict()
