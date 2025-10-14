@@ -1117,6 +1117,142 @@ Please wait while I process your follow-up request..."""
             outputs=[continue_query, continue_files]
         )
 
+        # MetaAgent Tab - Complex Multi-Step Tasks
+        with gr.Tab("🧬 MetaAgent (Complex Tasks)"):
+            gr.Markdown("""
+            # 🧬 MetaAgent: Process Multiple Items in Parallel or Sequential Mode
+
+            Perfect for tasks like:
+            - "Analyze 1000 papers about X"
+            - "Process 500 clinical records"
+            - Any task requiring many files/items
+
+            **Two Modes:**
+            - **Parallel**: Fast, multiple workers simultaneously
+            - **Sequential**: One batch at a time, full control, rate limiting support
+            """)
+
+            with gr.Row():
+                with gr.Column():
+                    meta_query = gr.Textbox(
+                        label="Complex Query with File List",
+                        placeholder="""Example:
+Analyze these papers:
+[paper1.pdf, paper2.pdf, paper3.pdf, ..., paper100.pdf]
+
+For each paper extract: title, authors, key findings""",
+                        lines=8
+                    )
+
+                    meta_mode = gr.Radio(
+                        label="Execution Mode",
+                        choices=["parallel", "sequential"],
+                        value="parallel",
+                        info="Parallel: faster. Sequential: more control, rate limiting."
+                    )
+
+                    # Parallel settings
+                    with gr.Group(visible=True) as meta_parallel_settings:
+                        gr.Markdown("### ⚡ Parallel Mode Settings")
+                        meta_workers = gr.Slider(1, 10, value=3, step=1, label="Max Workers")
+                        meta_batch_size = gr.Slider(10, 200, value=50, step=10, label="Batch Size")
+
+                    # Sequential settings
+                    with gr.Group(visible=False) as meta_sequential_settings:
+                        gr.Markdown("### 🔄 Sequential Mode Settings")
+                        meta_items_per_batch = gr.Slider(5, 100, value=10, step=5, label="Items per Batch")
+                        meta_pause = gr.Slider(0, 30, value=0, step=1, label="Pause Between Batches (s)")
+
+                    meta_submit_btn = gr.Button("🚀 Submit Meta-Task", variant="primary")
+
+                with gr.Column():
+                    meta_session_output = gr.Textbox(label="Meta-Session ID", interactive=False)
+                    meta_status_output = gr.Markdown("Ready to submit meta-task")
+
+            gr.Markdown("""
+            ### 📋 Supported File Formats:
+            - List: `[file1.pdf, file2.pdf, ...]`
+            - Keyword: `Files: paper1.pdf, paper2.pdf, ...`
+            - Paths: `./data/file1.csv, /path/to/file2.txt`
+            - URLs: `https://example.com/paper.pdf`
+
+            The MetaAgent will automatically detect files and assign them to workers!
+            """)
+
+            # Helper functions for MetaAgent
+            def toggle_meta_mode(mode):
+                if mode == "parallel":
+                    return gr.update(visible=True), gr.update(visible=False)
+                else:
+                    return gr.update(visible=False), gr.update(visible=True)
+
+            def submit_meta_task(query, mode, workers, batch_size, items_per_batch, pause, url, user_id):
+                """Submit a meta-task"""
+                if not query.strip():
+                    return "", "❌ Please enter a query"
+
+                try:
+                    request_data = {
+                        "query": query,
+                        "user_id": user_id,
+                        "mode": mode
+                    }
+
+                    if mode == "parallel":
+                        request_data["max_workers"] = int(workers)
+                        request_data["max_batch_size"] = int(batch_size)
+                    else:
+                        request_data["items_per_batch"] = int(items_per_batch)
+                        request_data["pause_between_batches"] = float(pause)
+
+                    response = requests.post(
+                        f"{url}/meta-task/submit",
+                        json=request_data,
+                        timeout=10
+                    )
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        session_id = data["meta_session_id"]
+                        message = data.get("message", "Submitted")
+
+                        status_md = f"""## ✅ Meta-Task Submitted!
+
+**Session ID:** `{session_id}`
+**Mode:** {mode.upper()}
+**Message:** {message}
+
+**Next Steps:**
+1. Use the session ID to check status: `/meta-task/{session_id}/status`
+2. The task will be processed in the background
+3. You can monitor progress via API or wait for completion
+
+**Status Check:**
+```bash
+curl {url}/meta-task/{session_id}/status
+```
+"""
+                        return session_id, status_md
+                    else:
+                        return "", f"❌ Error: {response.text}"
+
+                except Exception as e:
+                    return "", f"❌ Failed to submit: {str(e)}"
+
+            # Wire up MetaAgent events
+            meta_mode.change(
+                fn=toggle_meta_mode,
+                inputs=[meta_mode],
+                outputs=[meta_parallel_settings, meta_sequential_settings]
+            )
+
+            meta_submit_btn.click(
+                fn=submit_meta_task,
+                inputs=[meta_query, meta_mode, meta_workers, meta_batch_size,
+                       meta_items_per_batch, meta_pause, server_url, user_id_input],
+                outputs=[meta_session_output, meta_status_output]
+            )
+
         # Delete Management Tab (Simplified - Hard Delete Only)
         with gr.Tab("🗑️ Delete Sessions"):
             with gr.Row():
