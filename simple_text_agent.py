@@ -3,6 +3,7 @@ Simple text-based agent for answering questions
 """
 
 import time
+
 from dleader_agent.agent.a1 import A1
 
 
@@ -13,7 +14,7 @@ def create_text_agent():
     agent = A1(
         use_tool_retriever=True,
         download_data_lake=False,
-        llm='claude-sonnet-4-20250514'
+        llm='claude-sonnet-4-5-20250929'
     )
 
     # Clear default data lake

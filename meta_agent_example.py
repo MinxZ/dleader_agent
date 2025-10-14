@@ -54,7 +54,7 @@ def example_paper_analysis():
         agent_config={
             "use_tool_retriever": True,
             "download_data_lake": False,
-            "llm": "claude-sonnet-4-20250514"
+            "llm": "claude-sonnet-4-5-20250929"
         }
     )
 

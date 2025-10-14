@@ -14,7 +14,7 @@ def create_minimal_preprocessing_agent():
     # Initialize agent without downloading default data lake
     agent = A1(
         use_tool_retriever=True,
-        download_data_lake=False, llm='claude-sonnet-4-20250514'
+        download_data_lake=False, llm='claude-sonnet-4-5-20250929'
     )
     
     # Clear default data lake to avoid distractions

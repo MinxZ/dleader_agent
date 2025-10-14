@@ -27,7 +27,7 @@ Tools are implemented as Python functions in `dleader_agent/tool/XXX.py`, organi
    from dleader_agent.utils import function_to_api_schema
    from dleader_agent.llm import get_llm
 
-   llm = get_llm('claude-sonnet-4-20250514')
+   llm = get_llm('claude-sonnet-4-5-20250929')
    desc = function_to_api_schema(function_code, llm)
    ```
 4. **Create a test prompt** that uses your tool and verify the agent works correctly

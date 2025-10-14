@@ -141,7 +141,7 @@ MetaAgent(
     agent_config={           # Configuration passed to A1 agents
         "use_tool_retriever": True,
         "download_data_lake": False,
-        "llm": "claude-sonnet-4-20250514"
+        "llm": "claude-sonnet-4-5-20250929"
     },
     llm=None                 # Custom LLM for decomposition/aggregation
 )

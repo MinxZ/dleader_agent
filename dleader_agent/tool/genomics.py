@@ -15,7 +15,7 @@ def annotate_celltype_scRNA(
     data_info,
     data_lake_path,
     cluster="leiden",
-    llm="claude-sonnet-4-20250514",
+    llm="claude-sonnet-4-5-20250929",
     composition=None,
 ):
     """Annotate cell types based on gene markers and transferred labels using LLM.

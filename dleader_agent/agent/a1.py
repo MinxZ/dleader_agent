@@ -19,10 +19,11 @@ from dleader_agent.llm import SourceType, get_llm
 from dleader_agent.model.retriever import ToolRetriever
 from dleader_agent.tool.support_tools import run_python_repl
 from dleader_agent.tool.tool_registry import ToolRegistry
-from dleader_agent.utils import (check_and_download_s3_files, download_and_unzip,
-                          function_to_api_schema, pretty_print,
-                          read_module2api, run_bash_script, run_r_code,
-                          run_with_timeout, textify_api_dict)
+from dleader_agent.utils import (check_and_download_s3_files,
+                                 download_and_unzip, function_to_api_schema,
+                                 pretty_print, read_module2api,
+                                 run_bash_script, run_r_code, run_with_timeout,
+                                 textify_api_dict)
 
 if os.path.exists(".env"):
     load_dotenv(".env", override=False)
@@ -38,7 +39,7 @@ class A1:
     def __init__(
         self,
         path="./data",
-        llm="claude-sonnet-4-20250514",
+        llm="claude-sonnet-4-5-20250929",
         source: SourceType | None = None,
         use_tool_retriever=True,
         timeout_seconds=600,

@@ -67,7 +67,7 @@ def read_function_source_code(function_name: str) -> str:
         return f"Error: Could not find function '{function_name}'. Details: {str(e)}"
 
 
-def read_and_summarize_image(image_source: str, mode: str = "general", prompt: str = None, model: str = "claude-sonnet-4-20250514") -> str:
+def read_and_summarize_image(image_source: str, mode: str = "general", prompt: str = None, model: str = "claude-sonnet-4-5-20250929") -> str:
     """Read an image from URL or local path using LLM and provide a summary of its contents.
 
     Parameters

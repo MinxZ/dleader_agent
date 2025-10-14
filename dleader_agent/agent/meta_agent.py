@@ -105,7 +105,7 @@ class TaskDecomposer:
         Args:
             llm: Language model to use for task decomposition. If None, uses default from get_llm()
         """
-        self.llm = llm or get_llm("claude-sonnet-4-20250514")
+        self.llm = llm or get_llm("claude-sonnet-4-5-20250929")
 
     def extract_file_list(self, query: str) -> list[str]:
         """Extract file paths or URLs from the query
@@ -398,7 +398,7 @@ class ResultAggregator:
         Args:
             llm: Language model to use for result synthesis
         """
-        self.llm = llm or get_llm("claude-sonnet-4-20250514")
+        self.llm = llm or get_llm("claude-sonnet-4-5-2025092914")
 
     def aggregate(self, original_query: str, subtask_results: list[dict]) -> str:
         """Aggregate results from multiple subtasks

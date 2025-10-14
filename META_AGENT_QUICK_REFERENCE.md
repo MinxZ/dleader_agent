@@ -136,7 +136,7 @@ result = meta_agent.execute_complex_task_sequential(
 meta_agent = MetaAgent(
     max_workers=10,
     max_batch_size=100,
-    agent_config={"llm": "claude-sonnet-4-20250514"}
+    agent_config={"llm": "claude-sonnet-4-5-20250929"}
 )
 ```
 

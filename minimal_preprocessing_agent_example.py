@@ -143,7 +143,7 @@ if __name__ == "__main__":
     
     # print("\n💡 Usage Pattern:")
     # print("   ```python")
-    # print("   agent = A1(download_data_lake=False, llm='apac.anthropic.claude-sonnet-4-20250514-v1:0')")
+    # print("   agent = A1(download_data_lake=False, llm='apac.anthropic.claude-sonnet-4-5-20250929-v1:0')")
     # print("   agent.data_lake_dict = {}  # Clear defaults")
     # print("   agent.library_content_dict = {'pandas': 'Data analysis'}")
     # print("   agent.module2api = {'dleader_agent.tool.preprocessing': tools}")

@@ -5,15 +5,17 @@ This example shows how to configure the dleader_agent agent to use only
 image analysis tools without default data lake and packages.
 """
 
-import time
-import sys
-import tiktoken
-import json
-from datetime import datetime
-import os
-from tqdm import tqdm
 import glob
+import json
+import os
+import sys
+import time
+from datetime import datetime
+
 import pandas as pd
+import tiktoken
+from tqdm import tqdm
+
 sys.path.insert(0, os.getcwd())
 
 from dleader_agent.agent.a1 import A1
@@ -53,6 +55,7 @@ sys.path.insert(0, os.getcwd())
 
 from dleader_agent.agent.a1 import A1
 
+
 def create_agent():
     """Create an agent configured only for image analysis tasks."""
     
@@ -60,7 +63,7 @@ def create_agent():
     agent = A1(
         use_tool_retriever=True,
         download_data_lake=False, 
-        llm='claude-sonnet-4-20250514'
+        llm='claude-sonnet-4-5-20250929'
     )
     
     return agent

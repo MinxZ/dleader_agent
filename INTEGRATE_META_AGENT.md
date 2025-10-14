@@ -190,7 +190,7 @@ meta_agent = MetaAgent(
     agent_config={
         "use_tool_retriever": True,
         "download_data_lake": False,
-        "llm": "claude-opus-4-20250514",  # Use better model
+        "llm": "claude-opus-4-20250929",  # Use better model
         "timeout_seconds": 1200  # 20 minute timeout
     }
 )

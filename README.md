@@ -140,7 +140,7 @@ Once inside the environment, you can start using dleader_agent:
 from dleader_agent.agent import A1
 
 # Initialize the agent with data path, Data lake will be automatically downloaded on first run (~11GB)
-agent = A1(path='./data', llm='claude-sonnet-4-20250514')
+agent = A1(path='./data', llm='claude-sonnet-4-5-20250929')
 
 # Execute biomedical tasks using natural language
 agent.go("Plan a CRISPR screen to identify genes that regulate T cell exhaustion, generate 32 genes that maximize the perturbation effect.")

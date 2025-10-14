@@ -24,7 +24,7 @@ def main():
     # Initialize the agent
     # The data lake will be downloaded on first run (~11GB)
     # You can use different LLM models:
-    # - 'claude-sonnet-4-20250514' (default)
+    # - 'claude-sonnet-4-5-20250929' (default)
     # - 'gpt-4o-mini'
     # - 'azure-o4-mini'
     # - other supported models
@@ -32,7 +32,7 @@ def main():
     print("\nInitializing A1 agent...")
     agent = A1(
         path='./data',  # Data directory
-        llm='claude-sonnet-4-20250514',  # LLM model to use
+        llm='claude-sonnet-4-5-2025092914',  # LLM model to use
         download_data_lake=False  # Set to True on first run to download data
     )
 
@@ -85,7 +85,7 @@ def advanced_example():
 
     agent = A1(
         path='./data',
-        llm='claude-sonnet-4-20250514',
+        llm='claude-sonnet-4-5-2025092914',
         download_data_lake=False
     )
 

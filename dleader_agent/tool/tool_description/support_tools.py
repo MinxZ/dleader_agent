@@ -44,7 +44,7 @@ description = [
                 "type": "str",
             },
             {
-                "default": "claude-sonnet-4-20250514",
+                "default": "claude-sonnet-4-5-20250929",
                 "description": "LLM model to use for image analysis",
                 "name": "model",
                 "type": "str",

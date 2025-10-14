@@ -10,6 +10,9 @@ This FastAPI server provides:
 - Real-time streaming of agent responses
 - Thread-safe queue management
 - Conversation history and turn-based interactions
+- Integration with cloud storage for session persistence
+- Template-based workflow initiation
+- Enhanced error handling and logging
 """
 
 import asyncio
@@ -36,10 +39,10 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import uvicorn
-from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
-                     WebSocketDisconnect, Request)
+from fastapi import (FastAPI, File, Form, HTTPException, Request, UploadFile,
+                     WebSocket, WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -51,6 +54,8 @@ from cloud_storage_manager import cloud_storage_manager
 from dleader_agent.agent.a1 import A1
 # Import enhanced multi-turn handler
 from enhanced_multiturn_handler import EnhancedMultiTurnHandler
+# Import template retriever for workflow template matching
+from template_retriever import TemplateRetriever
 # Import unified session manager
 from unified_session_manager import get_unified_session_manager
 
@@ -1280,6 +1285,44 @@ class QueueManager:
                         # Use the enhanced message with multi-turn context
                         base_message = user_request.enhanced_message
 
+                        # === TEMPLATE MATCHING & QUERY AUGMENTATION ===
+                        # Try to match the query to a workflow template
+                        retriever = get_template_retriever()
+                        if retriever:
+                            try:
+                                user_request.progress_queue.put({"type": "status", "message": "Checking for relevant workflow templates..."})
+
+                                # Match query to templates
+                                match_result = retriever.match_template(base_message)
+
+                                if match_result.get("matched"):
+                                    template_title = match_result.get("template", {}).get("title", "Unknown")
+                                    confidence = match_result.get("confidence", "unknown")
+
+                                    user_request.progress_queue.put({
+                                        "type": "template_matched",
+                                        "message": f"Matched to template: {template_title} (confidence: {confidence})",
+                                        "template_title": template_title,
+                                        "confidence": confidence,
+                                        "reasoning": match_result.get("reasoning", "")
+                                    })
+
+                                    # Augment the query with template prompt
+                                    augmentation_result = retriever.augment_query_with_template(base_message, match_result)
+                                    base_message = augmentation_result["augmented_query"]
+
+                                    print(f"✓ Template matched: {template_title} (confidence: {confidence})")
+                                    if augmentation_result.get("modification_applied"):
+                                        print(f"  Modification: {augmentation_result['modification_applied']}")
+                                else:
+                                    print(f"✗ No template matched: {match_result.get('reasoning', 'Unknown reason')}")
+
+                            except Exception as e:
+                                print(f"Warning: Template matching failed: {e}")
+                                # Continue without template matching
+
+                        # === END TEMPLATE MATCHING ===
+
                         # Get list of files in session folder
                         available_files = []
                         if os.path.exists(session_path):
@@ -2378,9 +2421,24 @@ def create_agent():
     agent = A1(
         use_tool_retriever=True,
         download_data_lake=False,
-        llm='claude-sonnet-4-20250514'
+        llm='claude-sonnet-4-5-20250929'
     )
     return agent
+
+# Global template retriever instance (initialized once, reused for all requests)
+template_retriever = None
+
+def get_template_retriever():
+    """Get or create the global template retriever instance"""
+    global template_retriever
+    if template_retriever is None:
+        try:
+            template_retriever = TemplateRetriever()
+            print("Initialized template retriever")
+        except Exception as e:
+            print(f"Warning: Could not initialize template retriever: {e}")
+            template_retriever = None
+    return template_retriever
 
 # Custom CORS middleware to ensure headers are always present
 class CORSHeaderMiddleware(BaseHTTPMiddleware):
@@ -3430,8 +3488,8 @@ async def rename_multisession(request: RenameMultiSessionRequest):
 async def upload_template(request: TemplateListRequest):
     """Upload workflow templates to MongoDB"""
     try:
-        from s3_mongodb.func_mongodb import get_mongodb_collection
-        from s3_mongodb.mongodb_upsert import upsert_wrapper
+        from s3_mongodb.func_mongodb import (get_mongodb_collection,
+                                             upsert_wrapper)
 
         # Get MongoDB collection
         collection = get_mongodb_collection(
@@ -3439,7 +3497,7 @@ async def upload_template(request: TemplateListRequest):
             "workflow_templates"
         )
 
-        if not collection:
+        if collection is None:
             raise HTTPException(status_code=503, detail="MongoDB connection not available")
 
         # Prepare templates for MongoDB
@@ -3496,7 +3554,7 @@ async def get_templates():
             "workflow_templates"
         )
 
-        if collection:
+        if collection is not None:
             templates = list(collection.find({}).sort("title", 1))
             # Remove MongoDB _id field from response
             for template in templates:

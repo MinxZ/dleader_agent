@@ -10,18 +10,20 @@ Scenario:
 - Junior researcher: Their own recording style, some data lost
 """
 
-import pandas as pd
-import numpy as np
-import random
 import json
-from datetime import datetime, timedelta
-from dleader_agent.llm import get_llm
+import random
 import re
+from datetime import datetime, timedelta
+
+import numpy as np
+import pandas as pd
+
+from dleader_agent.llm import get_llm
 
 
 class ComplexExperimentDataGenerator:
     def __init__(self):
-        self.llm = get_llm('claude-sonnet-4-20250514')
+        self.llm = get_llm('claude-sonnet-4-5-20250929')
         self.compound_ids = []
         self.researcher_a_data = []
         self.researcher_b_data = []

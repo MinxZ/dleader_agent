@@ -181,7 +181,7 @@ def process_large_dataset(filepath):
 agent = A1(
     use_tool_retriever=True,      # Auto-select tools
     download_data_lake=False,     # Clean processing
-    llm='claude-sonnet-4-20250514' # Advanced reasoning
+    llm='claude-sonnet-4-5-20250929' # Advanced reasoning
 )
 ```
 

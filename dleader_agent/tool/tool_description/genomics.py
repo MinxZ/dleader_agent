@@ -13,7 +13,7 @@ description = [
                 "type": "str",
             },
             {
-                "default": "claude-sonnet-4-20250514",
+                "default": "claude-sonnet-4-5-20250929",
                 "description": "Language model instance for cell type prediction",
                 "name": "llm",
                 "type": "str",

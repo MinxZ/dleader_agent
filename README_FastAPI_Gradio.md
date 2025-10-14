@@ -196,7 +196,7 @@ GRADIO_PORT=7861
 GRADIO_SHARE=True
 
 # Agent Configuration
-LLM_MODEL=claude-sonnet-4-20250514
+LLM_MODEL=claude-sonnet-4-5-20250929
 USE_TOOL_RETRIEVER=True
 DOWNLOAD_DATA_LAKE=False
 ```
