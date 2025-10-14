@@ -221,6 +221,14 @@ class UserRequest:
         self.turn_number = turn_number
         self.enhanced_message = self._build_enhanced_message()
 
+        # Template matching attributes
+        self.template_matched = False
+        self.template_title = None
+        self.template_confidence = None
+        self.template_reasoning = None
+        self.template_modification = None
+        self.augmented_query = None
+
     def _build_enhanced_message(self):
         """Build enhanced message with previous context for multi-turn conversations"""
         # For backward compatibility, keep the simple version
@@ -398,6 +406,25 @@ class QueueManager:
         cleaned_content = re.sub(pattern, replace_human_message, thinking_content, flags=re.DOTALL)
         return cleaned_content
 
+    def _add_template_header(self, thinking_content: str, user_request: UserRequest) -> str:
+        """Add template information header to thinking content if template was matched"""
+        if not user_request.template_matched:
+            return thinking_content
+
+        template_header = f"""{'='*80}
+WORKFLOW TEMPLATE MATCHED
+{'='*80}
+
+Template: {user_request.template_title}
+Confidence: {user_request.template_confidence}
+Reasoning: {user_request.template_reasoning}
+"""
+        if user_request.template_modification:
+            template_header += f"Modification Applied: {user_request.template_modification}\n"
+
+        template_header += f"\n{'='*80}\n\n"
+        return template_header + thinking_content
+
     def create_json_snapshot(self, user_request: UserRequest, accumulated_thinking: str = "", session_path: str = "") -> dict:
         """Create a JSON snapshot of current progress"""
         # Collect image files from session if path exists
@@ -408,8 +435,9 @@ class QueueManager:
                 if any(file.lower().endswith(ext) for ext in image_extensions):
                     image_files.append(os.path.join(session_path, file))
 
-        # Clean the thinking content to show only original user message
+        # Clean the thinking content to show only original user message and add template header
         cleaned_thinking = self._clean_thinking_content(accumulated_thinking, user_request.message)
+        cleaned_thinking = self._add_template_header(cleaned_thinking, user_request)
 
         snapshot = {
             "session_id": user_request.session_id,
@@ -1298,6 +1326,12 @@ class QueueManager:
                                     template_title = match_result.get("template", {}).get("title", "Unknown")
                                     confidence = match_result.get("confidence", "unknown")
 
+                                    # Store template information in UserRequest for later use
+                                    user_request.template_matched = True
+                                    user_request.template_title = template_title
+                                    user_request.template_confidence = confidence
+                                    user_request.template_reasoning = match_result.get("reasoning", "")
+
                                     user_request.progress_queue.put({
                                         "type": "template_matched",
                                         "message": f"Matched to template: {template_title} (confidence: {confidence})",
@@ -1309,6 +1343,8 @@ class QueueManager:
                                     # Augment the query with template prompt
                                     augmentation_result = retriever.augment_query_with_template(base_message, match_result)
                                     base_message = augmentation_result["augmented_query"]
+                                    user_request.augmented_query = base_message
+                                    user_request.template_modification = augmentation_result.get("modification_applied")
 
                                     print(f"✓ Template matched: {template_title} (confidence: {confidence})")
                                     if augmentation_result.get("modification_applied"):
@@ -1703,8 +1739,10 @@ When working with molecules or chemical compounds, you MUST:
                 with open(report_path, 'w', encoding='utf-8') as f:
                     f.write(final_report_content)
 
-                # Save thinking process (cleaned version)
+                # Save thinking process (cleaned version with template info)
                 cleaned_thinking = queue_manager._clean_thinking_content(accumulated_thinking, user_request.message)
+                cleaned_thinking = queue_manager._add_template_header(cleaned_thinking, user_request)
+
                 thinking_filename = f"thinking_process_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
                 thinking_path = os.path.join(session_path, thinking_filename)
                 with open(thinking_path, 'w', encoding='utf-8') as f:
@@ -1790,8 +1828,9 @@ When working with molecules or chemical compounds, you MUST:
             # Trigger S3 upload for completed session
             queue_manager._trigger_s3_upload_for_session(user_request)
 
-            # Clean thinking content for completion update
+            # Clean thinking content for completion update and add template header
             cleaned_thinking = queue_manager._clean_thinking_content(accumulated_thinking, user_request.message)
+            cleaned_thinking = queue_manager._add_template_header(cleaned_thinking, user_request)
             completion_update = {
                 "type": "completion",
                 "final_report": final_report_content,
