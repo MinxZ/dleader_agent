@@ -1300,168 +1300,6 @@ Reasoning: {user_request.template_reasoning}
                     "message": f"Loaded {len(agent.data_lake_dict)} files from session folder"
                 })
             
-            # Set up streaming capture
-            stream_capture = StreamingCapture()
-            
-            # Process with agent
-            user_request.progress_queue.put({"type": "status", "message": "Agent processing started..."})
-            
-            def run_agent():
-                try:
-                    with redirect_stdout(stream_capture):
-                        # Use the enhanced message with multi-turn context
-                        base_message = user_request.enhanced_message
-
-                        # === TEMPLATE MATCHING & QUERY AUGMENTATION ===
-                        # Try to match the query to a workflow template
-                        retriever = get_template_retriever()
-                        if retriever:
-                            try:
-                                user_request.progress_queue.put({"type": "status", "message": "Checking for relevant workflow templates..."})
-
-                                # Match query to templates
-                                match_result = retriever.match_template(base_message)
-
-                                if match_result.get("matched"):
-                                    template_title = match_result.get("template", {}).get("title", "Unknown")
-                                    confidence = match_result.get("confidence", "unknown")
-
-                                    # Store template information in UserRequest for later use
-                                    user_request.template_matched = True
-                                    user_request.template_title = template_title
-                                    user_request.template_confidence = confidence
-                                    user_request.template_reasoning = match_result.get("reasoning", "")
-
-                                    user_request.progress_queue.put({
-                                        "type": "template_matched",
-                                        "message": f"Matched to template: {template_title} (confidence: {confidence})",
-                                        "template_title": template_title,
-                                        "confidence": confidence,
-                                        "reasoning": match_result.get("reasoning", "")
-                                    })
-
-                                    # Augment the query with template prompt
-                                    augmentation_result = retriever.augment_query_with_template(base_message, match_result)
-                                    base_message = augmentation_result["augmented_query"]
-                                    user_request.augmented_query = base_message
-                                    user_request.template_modification = augmentation_result.get("modification_applied")
-
-                                    print(f"✓ Template matched: {template_title} (confidence: {confidence})")
-                                    if augmentation_result.get("modification_applied"):
-                                        print(f"  Modification: {augmentation_result['modification_applied']}")
-                                else:
-                                    print(f"✗ No template matched: {match_result.get('reasoning', 'Unknown reason')}")
-
-                            except Exception as e:
-                                print(f"Warning: Template matching failed: {e}")
-                                # Continue without template matching
-
-                        # === END TEMPLATE MATCHING ===
-
-                        # Get list of files in session folder
-                        available_files = []
-                        if os.path.exists(session_path):
-                            for filename in os.listdir(session_path):
-                                file_path = os.path.join(session_path, filename)
-                                if os.path.isfile(file_path) and not filename.startswith('.'):
-                                    available_files.append(f"{filename} (Path: {file_path})")
-
-                        # Enhance message based on language
-                        if user_request.language == Language.JP:
-                            file_list_msg = ""
-                            if available_files:
-                                file_list_msg = "\n\n利用可能なファイル:\n" + "\n".join([f"- {f}" for f in available_files])
-
-                            enhanced_message = f"""{base_message}{file_list_msg}
-
-注意: アップロードされたファイルは次の作業フォルダに保存されています: {session_path} ファイルを生成あるいは保存する場合は、作業フォルダに保存してください。コメントはできるだけ日本語で記述し、最終レポートも日本語で作成すること。 use plt.rcParams['font.family'] = ['Noto Sans CJK JP', 'DejaVu Sans' ] when plot
-重要 - 深い思考と洞察のガイドライン:
-あなたの役割は、直接的な質問への回答を超えて、深く思考し価値ある洞察を提供することです。以下を心がけてください：
-- 常により広範な含意と潜在的な改善点を考慮する
-- データ分析（分子特性、データセットなど）では、違いやパターンを示すためのプロットや可視化を作成する
-- 結果をどのように最適化または改善できるかについて一歩先まで考える
-- 分析に基づいて実行可能な洞察と推奨事項を提供する
-
-重要 - 分子解析の必須要件:
-分子や化学化合物を扱う際は、以下を必ず実行してください：
-- RDKit、py3Dmol等のツールを使用して分子構造をプロットし可視化する
-- 重要な官能基や構造的特徴を視覚的に強調表示する
-- 化合物間の違いを示す比較分子プロットを作成する
-- 重要な構造要素を強調するためにカラーコーディングと注釈を使用する
-- 官能基をハイライトした2D分子図を生成する
-- 結合や相互作用の理解に関連する場合は3D分子可視化を作成する
-- 分子特性分布（分子量、LogP、極性表面積など）をプロットする
-- 分子プロットを通じて構造活性相関を可視化する
-- 例：薬物分子を分析する場合：
-  * 官能基を色分けした分子構造をプロットする
-  * 活性化合物と非活性化合物の比較オーバーレイプロットを作成する
-  * 結合部位と分子相互作用を可視化する
-  * ファーマコフォア特徴と重要な構造モチーフをハイライトする"""
-                        else:
-                            file_list_msg = ""
-                            if available_files:
-                                file_list_msg = "\n\nAvailable files in your working directory:\n" + "\n".join([f"- {f}" for f in available_files])
-
-                            enhanced_message = f"""{base_message}{file_list_msg}
-
-Note: The uploaded files are stored in the folder: {session_path}. If saving file, also save in it, it is the working folder.
-IMPORTANT - Enhanced Thinking and Insight Guidelines:
-Your role is to think deeply and provide valuable insights beyond just answering the direct question. You should:
-- Always consider the broader implications and potential improvements
-- When analyzing data (e.g., molecular features, datasets), create visualizations and plots to show differences and patterns
-- Think one step further about how results could be optimized or improved
-- Provide actionable insights and recommendations based on your analysis
-
-CRITICAL - Molecular Analysis Requirements:
-When working with molecules or chemical compounds, you MUST:
-- Plot and visualize molecular structures using tools like RDKit, py3Dmol, or similar libraries
-- Highlight important functional groups and structural features visually
-- Create comparative molecular plots showing differences between compounds
-- Use color coding and annotations to emphasize key structural elements
-- Generate 2D molecular diagrams with functional group highlighting
-- Create 3D molecular visualizations when relevant for understanding binding or interactions
-- Plot molecular property distributions (MW, LogP, polar surface area, etc.)
-- Visualize structure-activity relationships through molecular plots
-- For example, if analyzing drug molecules:
-  * Plot molecular structures with functional groups color-coded
-  * Create overlay plots comparing active vs inactive compounds
-  * Visualize binding sites and molecular interactions
-  * Highlight pharmacophore features and important structural motifs
-
-🚨 CRITICAL REQUIREMENT - SAVING PLOTS AND FILES 🚨
-- YOU MUST SAVE ALL PLOTS TO FILES - THIS IS ABSOLUTELY MANDATORY
-- REPLACE plt.show() WITH plt.savefig() - ALWAYS!
-- STEP-BY-STEP PROCESS FOR EVERY PLOT:
-  1. Create your plot with plt.figure() or plt.subplots()
-  2. Add your data and formatting
-  3. SAVE the plot: plt.savefig('filename.svg', format='svg', bbox_inches='tight')
-  4. Close the plot: plt.close()
-  5. Verify file exists: print(f"Plot saved: {os.path.exists('filename.svg')}")
-
-- NEVER EVER use plt.show() - it only displays but DOES NOT SAVE files
-- ALWAYS use plt.savefig() or fig.savefig() to SAVE plots to files
-- REPLACE any plt.show() with plt.savefig('descriptive_name.svg', format='svg', bbox_inches='tight')
-
-- FORMAT EXAMPLES:
-  * JPG for all charts/graphs: plt.savefig('molecular_structures.jpg', format='jpeg', dpi=300, bbox_inches='tight')
-  * PNG only for transparency: plt.savefig('overlay_plot.png', format='png', dpi=300, bbox_inches='tight', transparent=True)
-
-- MANDATORY VERIFICATION: After plt.savefig(), ALWAYS check:
-  print(f"File saved successfully: {os.path.exists('your_filename.svg')}")
-
-- THE USER CANNOT SEE plt.show() - THEY NEED SAVED FILES!"""
-#   * SVG for all charts/graphs: plt.savefig('tpsa_pesticide_analysis.svg', format='svg', bbox_inches='tight')
-                        _, result = agent.go(enhanced_message)
-                        user_request.result = result
-                except Exception as e:
-                    import traceback
-
-                    # Get detailed traceback information
-                    tb_str = traceback.format_exc()
-                    error_details = f"Agent execution error: {str(e)}\n\nFull traceback:\n{tb_str}"
-                    user_request.error = error_details
-                    print(f"Detailed agent error for session {user_request.session_id}:\n{error_details}")
-            
             # Use process-based execution for true termination capability
             # Create multiprocessing queues for communication
             message_queue = MPQueue()
@@ -1509,6 +1347,20 @@ When working with molecules or chemical compounds, you MUST:
                             user_request.progress_queue.put({
                                 "type": "status",
                                 "message": msg["content"]
+                            })
+                        elif msg["type"] == "template_matched":
+                            # Store template information in UserRequest
+                            user_request.template_matched = True
+                            user_request.template_title = msg.get("template_title")
+                            user_request.template_confidence = msg.get("confidence")
+                            user_request.template_reasoning = msg.get("reasoning")
+                            # Forward to progress queue
+                            user_request.progress_queue.put({
+                                "type": "template_matched",
+                                "message": msg["content"],
+                                "template_title": msg.get("template_title"),
+                                "confidence": msg.get("confidence"),
+                                "reasoning": msg.get("reasoning")
                             })
                         elif msg["type"] == "thinking_update":
                             accumulated_thinking = msg["content"]
@@ -1574,6 +1426,15 @@ When working with molecules or chemical compounds, you MUST:
                     if msg["type"] == "result":
                         user_request.result = msg["content"]
                         accumulated_thinking = msg.get("output", accumulated_thinking)
+                        # Extract template info from final result
+                        if "template_info" in msg:
+                            template_info = msg["template_info"]
+                            if template_info.get("matched"):
+                                user_request.template_matched = True
+                                user_request.template_title = template_info.get("title")
+                                user_request.template_confidence = template_info.get("confidence")
+                                user_request.template_reasoning = template_info.get("reasoning")
+                                user_request.template_modification = template_info.get("modification")
                     elif msg["type"] == "error":
                         user_request.error = msg["content"]
             except:
@@ -2119,6 +1980,65 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                 "content": "Agent initialized, processing message..."
             })
 
+            # === TEMPLATE MATCHING & QUERY AUGMENTATION ===
+            # Try to match the query to a workflow template
+            base_message = enhanced_message
+            template_info = {
+                "matched": False,
+                "title": None,
+                "confidence": None,
+                "reasoning": None,
+                "modification": None
+            }
+
+            try:
+                result_queue.put({
+                    "type": "status",
+                    "content": "Checking for relevant workflow templates..."
+                })
+
+                from agent_fastapi_server_multiturn import get_template_retriever
+                retriever = get_template_retriever()
+
+                if retriever:
+                    # Match query to templates
+                    match_result = retriever.match_template(base_message)
+
+                    if match_result.get("matched"):
+                        template_title = match_result.get("template", {}).get("title", "Unknown")
+                        confidence = match_result.get("confidence", "unknown")
+
+                        # Store template info for later
+                        template_info["matched"] = True
+                        template_info["title"] = template_title
+                        template_info["confidence"] = confidence
+                        template_info["reasoning"] = match_result.get("reasoning", "")
+                        template_info["modification"] = match_result.get("modification")
+
+                        result_queue.put({
+                            "type": "template_matched",
+                            "content": f"Matched to template: {template_title} (confidence: {confidence})",
+                            "template_title": template_title,
+                            "confidence": confidence,
+                            "reasoning": match_result.get("reasoning", "")
+                        })
+
+                        # Augment the query with template prompt
+                        augmentation_result = retriever.augment_query_with_template(base_message, match_result)
+                        enhanced_message = augmentation_result["augmented_query"]
+
+                        print(f"✓ Template matched: {template_title} (confidence: {confidence})")
+                        if augmentation_result.get("modification_applied"):
+                            print(f"  Modification: {augmentation_result['modification_applied']}")
+                    else:
+                        print(f"✗ No template matched: {match_result.get('reasoning', 'Unknown reason')}")
+
+            except Exception as e:
+                print(f"Warning: Template matching failed: {e}")
+                # Continue without template matching
+
+            # === END TEMPLATE MATCHING ===
+
             # Add explicit file information to the message if not already included
             if session_path and os.path.exists(session_path):
                 files_in_session = []
@@ -2141,11 +2061,12 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
             with output_lock:
                 final_output = output_buffer.getvalue()
 
-            # Send final result with complete output
+            # Send final result with complete output and template info
             result_queue.put({
                 "type": "result",
                 "content": result,
-                "output": final_output
+                "output": final_output,
+                "template_info": template_info
             })
 
             # Send final snapshot
@@ -2153,7 +2074,8 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                 "type": "final_snapshot",
                 "content": final_output,
                 "result": result,
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "template_info": template_info
             })
 
     except Exception as e:
