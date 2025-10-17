@@ -3143,16 +3143,29 @@ async def continue_session(
 
 @app.get("/multiturn-session/{session_id}")
 async def get_multiturn_session(session_id: str, user_id: str):
-    """Get complete multi-turn session history"""
-    multiturn_session = queue_manager.multiturn_sessions.get(session_id)
-    if not multiturn_session:
-        raise HTTPException(status_code=404, detail="Multi-turn session not found")
+    """Get complete multi-turn session history using Unified Session Manager"""
+    try:
+        # Use Unified Session Manager to get session from any storage location
+        unified_manager = get_unified_session_manager(queue_manager)
+        session = await unified_manager.get_multiturn_session_by_id(session_id)
 
-    # Verify user owns this session
-    if multiturn_session.user_id and multiturn_session.user_id != user_id:
-        raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+        if not session:
+            raise HTTPException(status_code=404, detail="Multi-turn session not found")
 
-    return multiturn_session
+        # Verify user owns this session
+        session_user_id = session.get("user_id")
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        return session
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting multiturn session: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error retrieving session: {str(e)}")
 
 @app.get("/multiturn-sessions")
 async def get_all_multiturn_sessions(user_id: Optional[str] = None):

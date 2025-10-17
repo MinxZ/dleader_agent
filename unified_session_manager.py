@@ -471,7 +471,7 @@ class UnifiedSessionManager:
                 os.getenv("SESSION_DB_NAME", "dleader_agent"),
                 "multiturn_sessions"
             )
-            if collection:
+            if collection is not None:
                 session_data = collection.find_one({"session_id": session_id})
                 if session_data:
                     session_data["_storage_location"] = "mongodb"
@@ -526,7 +526,7 @@ class UnifiedSessionManager:
                 os.getenv("SESSION_DB_NAME", "dleader_agent"),
                 "multiturn_sessions"
             )
-            if collection:
+            if collection is not None:
                 result = collection.update_one(
                     {"session_id": session_id},
                     {"$set": updates}
