@@ -430,6 +430,114 @@ class UnifiedSessionManager:
 
         return all_sessions
 
+    async def get_multiturn_session_by_id(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get a specific multi-turn session by ID from any storage location"""
+
+        # 1. Check in-memory first (currently active)
+        if session_id in self.queue_manager.multiturn_sessions:
+            session = self.queue_manager.multiturn_sessions[session_id]
+            return {
+                "session_id": session_id,
+                "session_name": getattr(session, 'session_name', ""),
+                "created_at": session.created_at,
+                "last_updated": session.last_updated,
+                "total_turns": session.total_turns,
+                "language": session.language,
+                "session_status": session.session_status,
+                "first_query": session.first_query,
+                "latest_query": session.latest_query,
+                "user_id": getattr(session, 'user_id', None),
+                "is_shared": getattr(session, 'is_shared', False),
+                "shared_at": getattr(session, 'shared_at', None),
+                "_storage_location": "memory",
+                "_session_object": session  # Include the actual object for updates
+            }
+
+        # 2. Check local storage
+        multiturn_file = os.path.join(self.queue_manager.multiturn_storage_dir, f"{session_id}.json")
+        if os.path.exists(multiturn_file):
+            try:
+                with open(multiturn_file, 'r', encoding='utf-8') as f:
+                    session_data = json.load(f)
+                    session_data["_storage_location"] = "local"
+                    return session_data
+            except Exception as e:
+                print(f"Error loading multiturn session from local storage: {e}")
+
+        # 3. Check MongoDB (primary storage)
+        try:
+            from s3_mongodb.func_mongodb import get_mongodb_collection
+            collection = get_mongodb_collection(
+                os.getenv("SESSION_DB_NAME", "dleader_agent"),
+                "multiturn_sessions"
+            )
+            if collection:
+                session_data = collection.find_one({"session_id": session_id})
+                if session_data:
+                    session_data["_storage_location"] = "mongodb"
+                    return session_data
+        except Exception as e:
+            print(f"Error loading multiturn session from MongoDB: {e}")
+
+        return None
+
+    async def update_multiturn_session(self, session_id: str, updates: Dict[str, Any], user_id: str = None) -> bool:
+        """Update a multi-turn session in all storage locations"""
+
+        # Get the session first
+        session = await self.get_multiturn_session_by_id(session_id)
+        if not session:
+            return False
+
+        # Verify user ownership if user_id is provided
+        if user_id and session.get("user_id") != user_id:
+            raise PermissionError("Access denied: Session belongs to different user")
+
+        storage_location = session.get("_storage_location")
+
+        # Update timestamp
+        updates["last_updated"] = datetime.now().isoformat()
+
+        # 1. Update in-memory if it exists there
+        if storage_location == "memory":
+            session_obj = session.get("_session_object")
+            if session_obj:
+                for key, value in updates.items():
+                    setattr(session_obj, key, value)
+                # Save to local storage
+                self.queue_manager._save_multiturn_session(session_obj)
+
+        # 2. Update local file if it exists
+        multiturn_file = os.path.join(self.queue_manager.multiturn_storage_dir, f"{session_id}.json")
+        if os.path.exists(multiturn_file):
+            try:
+                with open(multiturn_file, 'r', encoding='utf-8') as f:
+                    session_data = json.load(f)
+                session_data.update(updates)
+                with open(multiturn_file, 'w', encoding='utf-8') as f:
+                    json.dump(session_data, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                print(f"Warning: Could not update local multiturn session file: {e}")
+
+        # 3. Always update MongoDB (primary storage)
+        try:
+            from s3_mongodb.func_mongodb import get_mongodb_collection
+            collection = get_mongodb_collection(
+                os.getenv("SESSION_DB_NAME", "dleader_agent"),
+                "multiturn_sessions"
+            )
+            if collection:
+                result = collection.update_one(
+                    {"session_id": session_id},
+                    {"$set": updates}
+                )
+                return result.modified_count > 0 or result.matched_count > 0
+        except Exception as e:
+            print(f"Error updating multiturn session in MongoDB: {e}")
+            return False
+
+        return True
+
 
 # Global instance to be used by FastAPI endpoints
 unified_session_manager = None

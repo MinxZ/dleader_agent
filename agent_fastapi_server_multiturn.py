@@ -3374,74 +3374,55 @@ async def get_shared_sessions(limit: int = 50, offset: int = 0):
 
 @app.post("/rename-multisession")
 async def rename_multisession(request: RenameMultiSessionRequest):
-    """Rename a multi-turn session"""
+    """Rename a multi-turn session using Unified Session Manager"""
     try:
         session_id = request.session_id
         new_name = request.new_name
         user_id = request.user_id
 
-        # Get the multi-turn session from local storage first
-        multiturn_session = queue_manager.multiturn_sessions.get(session_id)
+        # Use Unified Session Manager to get and update the session
+        unified_manager = get_unified_session_manager(queue_manager)
 
-        # If not in memory, try to load from local storage
-        if not multiturn_session:
-            multiturn_file = os.path.join(queue_manager.multiturn_storage_dir, f"{session_id}.json")
-            if os.path.exists(multiturn_file):
-                with open(multiturn_file, 'r', encoding='utf-8') as f:
-                    session_data = json.load(f)
-                    multiturn_session = MultiTurnSession(**session_data)
-                    queue_manager.multiturn_sessions[session_id] = multiturn_session
+        # Get the session from any storage location (memory, local, or MongoDB)
+        session = await unified_manager.get_multiturn_session_by_id(session_id)
 
-        if not multiturn_session:
+        if not session:
             raise HTTPException(status_code=404, detail="Multi-turn session not found")
 
         # Verify user owns this session
-        if multiturn_session.user_id and multiturn_session.user_id != user_id:
+        session_user_id = session.get("user_id")
+        if session_user_id and session_user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-        # Update the session name
-        multiturn_session.session_name = new_name
-        multiturn_session.last_updated = datetime.now().isoformat()
+        # Update the session using Unified Session Manager
+        # This will update memory, local storage, and MongoDB automatically
+        try:
+            updates = {"session_name": new_name}
+            success = await unified_manager.update_multiturn_session(
+                session_id=session_id,
+                updates=updates,
+                user_id=user_id
+            )
 
-        # Save to local storage
-        queue_manager.multiturn_sessions[session_id] = multiturn_session
-        queue_manager._save_multiturn_session(multiturn_session)
+            if not success:
+                raise HTTPException(status_code=500, detail="Failed to update session")
 
-        # Update in MongoDB if the session has been uploaded to cloud
-        if cloud_storage_manager:
-            try:
-                from s3_mongodb.func_mongodb import get_mongodb_collection
-                collection = get_mongodb_collection(
-                    os.getenv("SESSION_DB_NAME", "dleader_agent"),
-                    "multiturn_sessions"
-                )
-                if collection:
-                    # Check if session exists in cloud
-                    cloud_session = collection.find_one({"session_id": session_id})
-                    if cloud_session:
-                        # Update the session_name and last_updated in MongoDB
-                        collection.update_one(
-                            {"session_id": session_id},
-                            {"$set": {
-                                "session_name": new_name,
-                                "last_updated": multiturn_session.last_updated
-                            }}
-                        )
-            except Exception as cloud_error:
-                print(f"Warning: Could not update session name in cloud: {cloud_error}")
-                # Don't fail the request if cloud update fails
+            return {
+                "success": True,
+                "session_id": session_id,
+                "new_name": new_name,
+                "message": "Session renamed successfully"
+            }
 
-        return {
-            "success": True,
-            "session_id": session_id,
-            "new_name": new_name,
-            "message": "Session renamed successfully"
-        }
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e))
 
     except HTTPException:
         raise
     except Exception as e:
         print(f"Error renaming session: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error renaming session: {str(e)}")
 
 @app.post("/upload-template")
