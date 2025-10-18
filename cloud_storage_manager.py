@@ -429,19 +429,33 @@ class CloudStorageManager:
         """Delete session documents from MongoDB"""
         deleted_docs = []
         try:
+            # Delete from 'sessions' collection
             collection = get_mongodb_collection(self.database_name, self.sessions_collection)
             if collection is not None:
                 # Delete main session document
                 result = collection.delete_one({"_id": session_id})
                 if result.deleted_count > 0:
-                    deleted_docs.append(f"session:{session_id}")
+                    deleted_docs.append(f"sessions:{session_id}")
 
                 # Also delete any turn-specific documents
                 turn_result = collection.delete_many({"_id": {"$regex": f"^{session_id}_turn_"}})
                 if turn_result.deleted_count > 0:
-                    deleted_docs.append(f"turn_documents:{turn_result.deleted_count}")
+                    deleted_docs.append(f"sessions_turns:{turn_result.deleted_count}")
 
-                logger.info(f"Deleted MongoDB documents for session {session_id}: {deleted_docs}")
+            # Also delete from 'multiturn_sessions' collection
+            multiturn_collection = get_mongodb_collection(self.database_name, "multiturn_sessions")
+            if multiturn_collection is not None:
+                # Try deleting by session_id field
+                multiturn_result = multiturn_collection.delete_one({"session_id": session_id})
+                if multiturn_result.deleted_count > 0:
+                    deleted_docs.append(f"multiturn_sessions:{session_id}")
+                else:
+                    # Also try deleting by _id in case it's stored that way
+                    multiturn_id_result = multiturn_collection.delete_one({"_id": session_id})
+                    if multiturn_id_result.deleted_count > 0:
+                        deleted_docs.append(f"multiturn_sessions_by_id:{session_id}")
+
+            logger.info(f"Deleted MongoDB documents for session {session_id}: {deleted_docs}")
 
         except Exception as e:
             logger.error(f"Failed to delete MongoDB documents for session {session_id}: {e}")
