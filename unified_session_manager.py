@@ -410,8 +410,23 @@ class UnifiedSessionManager:
                     for session in mongodb_sessions:
                         session_id = session.get("session_id")
                         if session_id and session_id not in session_ids_seen:
-                            session["_storage_location"] = "mongodb"
-                            all_sessions.append(session)
+                            # Extract only necessary metadata (exclude heavy content like turns data)
+                            session_metadata = {
+                                "session_id": session_id,
+                                "session_name": session.get("session_name", ""),
+                                "user_id": session.get("user_id"),
+                                "total_turns": session.get("total_turns", 0),
+                                "created_at": session.get("created_at"),
+                                "last_updated": session.get("last_updated"),
+                                "language": session.get("language", "en"),
+                                "session_status": session.get("session_status", "active"),
+                                "first_query": session.get("first_query", ""),
+                                "latest_query": session.get("latest_query", ""),
+                                "is_shared": session.get("is_shared", False),
+                                "shared_at": session.get("shared_at"),
+                                "_storage_location": "mongodb"
+                            }
+                            all_sessions.append(session_metadata)
                             session_ids_seen.add(session_id)
             except Exception as e:
                 print(f"Warning: Could not fetch MongoDB multi-turn sessions: {e}")

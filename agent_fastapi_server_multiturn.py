@@ -2786,6 +2786,75 @@ async def download_session_zip(session_id: str, user_id: str):
 # Use session-specific download endpoints with user_id validation instead
 
 
+def generate_file_urls(files_data, session_id: str = None):
+    """
+    Helper function to convert file paths/S3 keys to accessible URLs
+
+    Args:
+        files_data: Dictionary or list of file information (can be paths, dicts, or mixed)
+        session_id: Optional session ID for generating download URLs
+
+    Returns:
+        Enhanced files_data with 'url' fields added
+    """
+    from datetime import datetime, timedelta
+
+    def process_file_item(file_item):
+        """Process a single file item to add URL"""
+        # Handle string paths (convert to dict with URL)
+        if isinstance(file_item, str):
+            filename = file_item.split("/")[-1]
+            return {
+                "path": file_item,
+                "filename": filename,
+                "download_url": f"/download/{session_id}" if session_id else None
+            }
+
+        if not isinstance(file_item, dict):
+            return file_item
+
+        result = file_item.copy()
+
+        # If it has S3 key, generate presigned URL
+        if "s3_key" in file_item:
+            try:
+                url = cloud_storage_manager.generate_presigned_url(
+                    file_item["s3_key"],
+                    expiry_seconds=7200  # 2 hours
+                )
+                result["url"] = url
+                result["expires_at"] = (datetime.now() + timedelta(hours=2)).isoformat()
+            except Exception as e:
+                print(f"Warning: Failed to generate presigned URL for {file_item.get('filename', 'unknown')}: {e}")
+
+        # If it's a local file path, provide download endpoint URL
+        elif "path" in file_item and session_id:
+            filename = file_item.get("filename") or file_item["path"].split("/")[-1]
+            result["download_url"] = f"/download/{session_id}"
+            result["filename"] = filename
+
+        return result
+
+    # Handle different data structures
+    if isinstance(files_data, list):
+        return [process_file_item(item) for item in files_data]
+    elif isinstance(files_data, dict):
+        result = {}
+        for key, value in files_data.items():
+            if isinstance(value, list):
+                result[key] = [process_file_item(item) for item in value]
+            elif isinstance(value, dict):
+                result[key] = process_file_item(value)
+            elif isinstance(value, str):
+                # Handle single string path
+                result[key] = process_file_item(value)
+            else:
+                result[key] = value
+        return result
+    else:
+        return files_data
+
+
 @app.get("/results/{session_id}")
 async def get_session_results(session_id: str, user_id: str):
     """Get structured JSON results for a completed session"""
@@ -2814,6 +2883,10 @@ async def get_session_results(session_id: str, user_id: str):
         # Get full session data from cloud
         cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
         if cloud_session:
+            # Generate URLs for S3 files
+            s3_files = cloud_session.get("s3_files", {})
+            s3_files_with_urls = generate_file_urls(s3_files, session_id)
+
             # Return structured result with thinking_process and final_report
             return {
                 "session_id": session_id,
@@ -2822,7 +2895,7 @@ async def get_session_results(session_id: str, user_id: str):
                     "thinking_content": cloud_session.get("thinking_process", ""),
                     "final_report": cloud_session.get("final_report", "")
                 },
-                "s3_files": cloud_session.get("s3_files", {}),
+                "s3_files": s3_files_with_urls,
                 "result_summary": cloud_session.get("result_summary", {})
             }
 
@@ -2840,6 +2913,12 @@ async def get_session_results(session_id: str, user_id: str):
                 "created_at": session_data.get("created_at")
             }
         }
+
+    # Generate URLs for any files in the result
+    if "files" in json_result:
+        json_result["files"] = generate_file_urls(json_result["files"], session_id)
+    if "s3_files" in json_result:
+        json_result["s3_files"] = generate_file_urls(json_result["s3_files"], session_id)
 
     return json_result
 
@@ -3156,6 +3235,12 @@ async def get_multiturn_session(session_id: str, user_id: str):
         session_user_id = session.get("user_id")
         if session_user_id and session_user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        # Generate URLs for files in each turn
+        if "turns" in session and isinstance(session["turns"], list):
+            for turn in session["turns"]:
+                if "files" in turn:
+                    turn["files"] = generate_file_urls(turn["files"], session_id)
 
         return session
 
