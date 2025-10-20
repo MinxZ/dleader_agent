@@ -550,11 +550,16 @@ async def view_specific_turn(session_id: str, turn_number: int, server_url: str,
                         print(f"Downloading {len(file_list)} images for turn {turn_num}...")
                         turn_images = download_images_from_urls(file_list)
 
+        # Add note about images being displayed below
+        if turn_images:
+            result_display += f"\n**📸 {len(turn_images)} images from this turn (shown below)**\n\n"
+
         # Step 2: For completed turns, get thinking process from /snapshots separately
         if status == 'completed':
             snapshots_data = client.get_snapshots(session_id, user_id, turn_number=turn_number)
-            if snapshots_data and 'snapshots' in snapshots_data:
-                snapshots = snapshots_data['snapshots']
+            if snapshots_data:
+                # The API returns 'turn_snapshot' not 'snapshots'
+                snapshots = snapshots_data.get('turn_snapshot', [])
                 if snapshots:
                     snapshot_count = len(snapshots)
                     result_display += f"""
@@ -671,8 +676,11 @@ async def check_status_with_history(session_id: str, server_url: str, user_id: s
 
             # Step 2: For completed sessions, get thinking process from /snapshots separately
             snapshots_data = client.get_snapshots(session_id, user_id)
-            if snapshots_data and 'snapshots' in snapshots_data:
-                snapshots = snapshots_data['snapshots']
+
+            if snapshots_data:
+                # The API returns 'turn_snapshot' not 'snapshots'
+                snapshots = snapshots_data.get('turn_snapshot', [])
+
                 if snapshots:
                     snapshot_count = len(snapshots)
                     result_display += f"""
@@ -747,8 +755,9 @@ async def check_status_with_history(session_id: str, server_url: str, user_id: s
         else:
             # Get current thinking process from /snapshots for in-progress sessions
             snapshots_data = client.get_snapshots(session_id, user_id)
-            if snapshots_data and 'snapshots' in snapshots_data:
-                snapshots = snapshots_data['snapshots']
+            if snapshots_data:
+                # The API returns 'turn_snapshot' not 'snapshots'
+                snapshots = snapshots_data.get('turn_snapshot', [])
                 if snapshots:
                     snapshot_count = len(snapshots)
                     result_display += f"""
@@ -1500,16 +1509,19 @@ Completed tasks cannot be stopped."""  # Reset stop results
             if 'images' in files and files['images']:
                 print(f"Found {len(files['images'])} images for turn {turn_num}")
                 turn_images = download_images_from_urls(files['images'])
-                result_display += f"\n\n**📸 {len(turn_images)} images from this turn**\n\n"
+                result_display += f"\n**📸 {len(turn_images)} images from this turn (shown below)**\n\n"
 
             # Step 2: For completed sessions, get thinking process from /snapshots separately
             if status == 'completed':
                 snapshots_data = client.get_snapshots(session_id, user_id, turn_number=turn_number)
-                if snapshots_data and 'snapshots' in snapshots_data:
-                    snapshots = snapshots_data['snapshots']
+                if snapshots_data:
+                    # The API returns 'turn_snapshot' not 'snapshots'
+                    snapshots = snapshots_data.get('turn_snapshot', [])
                     if snapshots:
                         snapshot_count = len(snapshots)
-                        result_display += f"""## 🧠 Thinking Process ({snapshot_count} steps)
+                        result_display += f"""
+
+## 🧠 Thinking Process ({snapshot_count} steps)
 
 """
                         for idx, snapshot in enumerate(snapshots, 1):
