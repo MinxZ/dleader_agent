@@ -107,6 +107,25 @@ class UnifiedSessionManager:
         except Exception as e:
             print(f"Warning: Could not fetch session {session_id} from cloud: {e}")
 
+        # 4. Check multiturn_sessions collection
+        try:
+            from s3_mongodb.func_mongodb import get_mongodb_collection
+            import os
+            multiturn_collection = get_mongodb_collection(
+                os.getenv("SESSION_DB_NAME", "dleader_agent"),
+                "multiturn_sessions"
+            )
+            if multiturn_collection is not None:
+                # Try both session_id field and _id field
+                multiturn_session = multiturn_collection.find_one({"session_id": session_id})
+                if not multiturn_session:
+                    multiturn_session = multiturn_collection.find_one({"_id": session_id})
+                if multiturn_session:
+                    multiturn_session["_storage_location"] = "mongodb_multiturn"
+                    return multiturn_session
+        except Exception as e:
+            print(f"Warning: Could not fetch session {session_id} from multiturn collection: {e}")
+
         return None
 
     async def get_session_status(self, session_id: str) -> Optional[Dict[str, Any]]:
