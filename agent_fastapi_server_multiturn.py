@@ -244,7 +244,13 @@ Please provide a response that builds upon the previous analysis and addresses t
         return self.message
 
 class QueueManager:
-    def __init__(self):
+    def __init__(self, skip_startup_session_check: bool = False):
+        """Initialize QueueManager
+
+        Args:
+            skip_startup_session_check: If True, skip scanning local session files on startup.
+                                        This is safe since sessions are loaded on-demand from cloud storage.
+        """
         self.request_queue = queue.Queue()
         self.active_sessions = {}  # session_id -> UserRequest
         self.session_history = {}  # session_id -> SessionManager
@@ -264,8 +270,11 @@ class QueueManager:
         os.makedirs(self.sessions_storage_dir, exist_ok=True)
         os.makedirs(self.multiturn_storage_dir, exist_ok=True)
 
-        # Load existing sessions from storage
-        self._load_sessions_from_storage()
+        # Load existing sessions from storage (optional - can be skipped for faster startup)
+        if not skip_startup_session_check:
+            self._load_sessions_from_storage()
+        else:
+            print("Skipping startup session check (sessions loaded on-demand from cloud storage)")
         # Note: Multi-turn sessions are now loaded from MongoDB on-demand, not from local files
         # self._load_multiturn_sessions()  # REMOVED: No longer loading from local JSON files
 
@@ -841,8 +850,13 @@ Reasoning: {user_request.template_reasoning}
         except Exception as e:
             print(f"Error moving generated files for session {user_request.session_id}: {e}")
 
-    def _load_session_from_storage(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Load session data from persistent storage"""
+    def _load_session_from_storage(self, session_id: str, silent_errors: bool = False) -> Optional[Dict[str, Any]]:
+        """Load session data from persistent storage
+
+        Args:
+            session_id: The session ID to load
+            silent_errors: If True, silently skip corrupted files instead of printing errors
+        """
         try:
             session_file = os.path.join(self.sessions_storage_dir, f"{session_id}.json")
             if not os.path.exists(session_file):
@@ -867,29 +881,57 @@ Reasoning: {user_request.template_reasoning}
                 "session_path": session_data.get("session_path"),  # Include session path
                 "user_id": session_data.get("user_id")  # Include user_id
             }
+        except json.JSONDecodeError as e:
+            # JSON parsing error - file is corrupted
+            if not silent_errors:
+                print(f"Skipping corrupted session file {session_id}: JSON parse error")
+            return None
         except Exception as e:
-            print(f"Error loading session {session_id} from storage: {e}")
+            if not silent_errors:
+                print(f"Error loading session {session_id} from storage: {e}")
             return None
 
     def _load_sessions_from_storage(self):
-        """Load all existing sessions from storage on startup"""
+        """Load all existing sessions from storage on startup
+
+        Note: This function validates session files but doesn't restore them to active sessions.
+        Sessions are now loaded on-demand from MongoDB/cloud storage.
+        Corrupted/incomplete local JSON files are skipped gracefully.
+        """
         try:
             if not os.path.exists(self.sessions_storage_dir):
                 return
 
+            total_files = 0
+            corrupted_files = 0
+            incomplete_sessions = 0
+
             for filename in os.listdir(self.sessions_storage_dir):
                 if filename.endswith('.json'):
+                    total_files += 1
                     session_id = filename[:-5]  # Remove .json extension
                     try:
-                        session_data = self._load_session_from_storage(session_id)
-                        if session_data and not session_data.get("is_complete", False):
-                            # Only load incomplete sessions back into active sessions
-                            # Complete sessions will be loaded on-demand
+                        # Load with silent errors to avoid spam on startup
+                        session_data = self._load_session_from_storage(session_id, silent_errors=True)
+                        if session_data is None:
+                            # File is corrupted or unreadable
+                            corrupted_files += 1
+                        elif not session_data.get("is_complete", False):
+                            # Track incomplete sessions (for logging/debugging)
+                            incomplete_sessions += 1
+                            # Note: We don't restore these anymore - they're loaded on-demand from cloud
                             pass
                     except Exception as e:
-                        print(f"Error loading session {session_id} on startup: {e}")
+                        # Unexpected error beyond JSON parsing
+                        corrupted_files += 1
+
+            # Log summary instead of individual errors
+            if total_files > 0:
+                print(f"Session storage check: {total_files} files scanned, {corrupted_files} corrupted/skipped, {incomplete_sessions} incomplete")
+                if corrupted_files > 0:
+                    print(f"Note: {corrupted_files} corrupted session files were skipped. Sessions are now managed via cloud storage.")
         except Exception as e:
-            print(f"Error loading sessions from storage: {e}")
+            print(f"Error scanning session storage: {e}")
 
     # REMOVED: No longer loading multi-turn sessions from local JSON files
     # Multi-turn sessions are now stored in MongoDB only and loaded on-demand
@@ -2608,8 +2650,14 @@ async def get_progress(session_id: str, user_id: str):
     return await get_status(session_id, user_id)
 
 @app.get("/status/{session_id}")
-async def get_status(session_id: str, user_id: str):
-    """Get current status and progress for a session from local or cloud storage"""
+async def get_status(session_id: str, user_id: str, turn_number: Optional[int] = None):
+    """Get current status and progress for a session from local or cloud storage
+
+    Args:
+        session_id: The session ID
+        user_id: The user ID
+        turn_number: Optional turn number to retrieve. If not provided, returns current/latest turn.
+    """
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
@@ -2628,6 +2676,20 @@ async def get_status(session_id: str, user_id: str):
         if session_user_id and session_user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
+        # Get multi-turn session info to determine turn number
+        multiturn_session = queue_manager.multiturn_sessions.get(session_id)
+        current_turn = None
+        total_turns = None
+        if multiturn_session:
+            current_turn = multiturn_session.current_turn
+            total_turns = multiturn_session.total_turns
+            # If turn_number not specified, use current turn
+            if turn_number is None:
+                turn_number = current_turn
+            # Validate turn_number is within range
+            elif turn_number < 1 or turn_number > total_turns:
+                raise HTTPException(status_code=400, detail=f"Invalid turn_number. Must be between 1 and {total_turns}")
+
         # For active sessions, get queue status
         queue_status = None
         if status_data.get("storage_location") == "active":
@@ -2640,6 +2702,12 @@ async def get_status(session_id: str, user_id: str):
             "is_cancelled": status_data.get("is_cancelled", False),
             "created_at": status_data.get("created_at", datetime.now().isoformat())
         }
+
+        # Add turn information if this is a multi-turn session
+        if multiturn_session:
+            response["current_turn"] = current_turn
+            response["total_turns"] = total_turns
+            response["turn_number"] = turn_number  # The turn number for this status response
 
         # Add queue information for active sessions
         if queue_status:
@@ -2786,28 +2854,173 @@ async def download_session_zip(session_id: str, user_id: str):
 # Use session-specific download endpoints with user_id validation instead
 
 
+@app.get("/download-file/{session_id}/{filename:path}")
+async def download_individual_file(session_id: str, filename: str, user_id: str):
+    """Download individual file from a session
+
+    Args:
+        session_id: The session ID
+        filename: The filename to download (can include subdirectories)
+        user_id: User identifier for access control
+    """
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    try:
+        # Get unified session manager
+        unified_manager = get_unified_session_manager(queue_manager)
+
+        # Get session data to verify ownership and find files
+        session_data = await unified_manager.get_session_by_id(session_id)
+        if not session_data:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # Verify user owns this session
+        session_user_id = session_data.get("user_id")
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+        storage_location = session_data.get("_storage_location", "unknown")
+
+        # For cloud sessions, try to get file from S3
+        if storage_location == "cloud":
+            cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+            if cloud_session:
+                s3_files = cloud_session.get("s3_files", {})
+
+                # Search for the file in s3_files
+                file_s3_key = None
+
+                # Check images
+                if "images" in s3_files:
+                    for img in s3_files["images"]:
+                        if isinstance(img, dict) and img.get("filename") == filename:
+                            file_s3_key = img.get("s3_key")
+                            break
+
+                # Check other file types if not found in images
+                if not file_s3_key:
+                    for file_type, file_data in s3_files.items():
+                        if isinstance(file_data, dict) and file_data.get("filename") == filename:
+                            file_s3_key = file_data.get("s3_key")
+                            break
+                        elif isinstance(file_data, list):
+                            for item in file_data:
+                                if isinstance(item, dict) and item.get("filename") == filename:
+                                    file_s3_key = item.get("s3_key")
+                                    break
+                            if file_s3_key:
+                                break
+
+                if file_s3_key:
+                    # Generate presigned URL and redirect
+                    fresh_url = cloud_storage_manager.generate_presigned_url(file_s3_key, expiry_seconds=7200)
+                    return RedirectResponse(url=fresh_url)
+                else:
+                    raise HTTPException(status_code=404, detail=f"File '{filename}' not found in cloud storage")
+
+        # For local sessions, serve from local filesystem
+        session_path = session_data.get("session_path")
+        if not session_path:
+            # Try to find session folder
+            import glob
+            patterns = [
+                f"chat_sessions/*{session_id[:8]}*",
+                f"chat_sessions/multiturn_*{session_id[:8]}*"
+            ]
+            for pattern in patterns:
+                matches = glob.glob(pattern)
+                if matches:
+                    session_path = matches[0]
+                    break
+
+        if session_path and os.path.exists(session_path):
+            # Construct file path (handle both direct filename and subdirectory/filename)
+            file_path = os.path.join(session_path, filename)
+
+            # Security check: ensure file is within session directory
+            file_path = os.path.abspath(file_path)
+            session_path = os.path.abspath(session_path)
+            if not file_path.startswith(session_path):
+                raise HTTPException(status_code=403, detail="Access denied: Invalid file path")
+
+            if os.path.exists(file_path) and os.path.isfile(file_path):
+                # Determine media type based on extension
+                import mimetypes
+                media_type, _ = mimetypes.guess_type(file_path)
+                if not media_type:
+                    media_type = "application/octet-stream"
+
+                return FileResponse(
+                    file_path,
+                    media_type=media_type,
+                    filename=os.path.basename(file_path)
+                )
+            else:
+                raise HTTPException(status_code=404, detail=f"File '{filename}' not found in local storage")
+
+        raise HTTPException(status_code=404, detail="Session files not available")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error downloading file {filename} from session {session_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+
+
 def generate_file_urls(files_data, session_id: str = None):
     """
     Helper function to convert file paths/S3 keys to accessible URLs
+
+    IMPORTANT: Always returns S3 presigned URLs. If file is only available locally,
+    it will be uploaded to S3 first before generating the URL.
 
     Args:
         files_data: Dictionary or list of file information (can be paths, dicts, or mixed)
         session_id: Optional session ID for generating download URLs
 
     Returns:
-        Enhanced files_data with 'url' fields added
+        Enhanced files_data with 'url' fields added (always S3 URLs)
     """
     from datetime import datetime, timedelta
+    import os
 
     def process_file_item(file_item):
-        """Process a single file item to add URL"""
+        """Process a single file item to add S3 URL"""
         # Handle string paths (convert to dict with URL)
         if isinstance(file_item, str):
             filename = file_item.split("/")[-1]
+            file_path = file_item
+
+            # Upload to S3 if file exists locally
+            if os.path.exists(file_path) and session_id:
+                try:
+                    s3_key = f"sessions/{session_id}/files/{filename}"
+                    # Upload to S3 using boto3 client
+                    cloud_storage_manager.s3_client.upload_file(
+                        file_path,
+                        cloud_storage_manager.bucket_name,
+                        s3_key
+                    )
+                    url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
+                    print(f"✓ Uploaded {filename} to S3 and generated presigned URL")
+                    return {
+                        "path": file_path,
+                        "filename": filename,
+                        "s3_key": s3_key,
+                        "url": url,
+                        "expires_at": (datetime.now() + timedelta(hours=2)).isoformat()
+                    }
+                except Exception as e:
+                    print(f"Warning: Failed to upload {filename} to S3: {e}")
+
             return {
-                "path": file_item,
+                "path": file_path,
                 "filename": filename,
-                "download_url": f"/download/{session_id}" if session_id else None
+                "download_url": f"/download-file/{session_id}/{filename}" if session_id else None
             }
 
         if not isinstance(file_item, dict):
@@ -2827,11 +3040,46 @@ def generate_file_urls(files_data, session_id: str = None):
             except Exception as e:
                 print(f"Warning: Failed to generate presigned URL for {file_item.get('filename', 'unknown')}: {e}")
 
-        # If it's a local file path, provide download endpoint URL
+        # If it only has a local path, upload to S3 and get URL
         elif "path" in file_item and session_id:
             filename = file_item.get("filename") or file_item["path"].split("/")[-1]
-            result["download_url"] = f"/download/{session_id}"
-            result["filename"] = filename
+            file_path = file_item["path"]
+
+            # Check if file exists locally
+            if os.path.exists(file_path):
+                try:
+                    # Determine S3 key based on file type
+                    file_ext = filename.split('.')[-1].lower()
+                    if file_ext in ['png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf']:
+                        s3_key = f"sessions/{session_id}/images/{filename}"
+                    else:
+                        s3_key = f"sessions/{session_id}/files/{filename}"
+
+                    # Upload to S3 using boto3 client
+                    try:
+                        cloud_storage_manager.s3_client.upload_file(
+                            file_path,
+                            cloud_storage_manager.bucket_name,
+                            s3_key
+                        )
+                        # Generate presigned URL
+                        url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
+                        result["s3_key"] = s3_key
+                        result["url"] = url
+                        result["expires_at"] = (datetime.now() + timedelta(hours=2)).isoformat()
+                        print(f"✓ Uploaded {filename} to S3 and generated presigned URL")
+                    except Exception as upload_error:
+                        # Upload failed, fall back to local download
+                        result["download_url"] = f"/download-file/{session_id}/{filename}"
+                        print(f"Warning: Failed to upload {filename} to S3: {upload_error}")
+                except Exception as e:
+                    print(f"Warning: Error uploading {filename} to S3: {e}")
+                    # Fall back to local download URL
+                    result["download_url"] = f"/download-file/{session_id}/{filename}"
+            else:
+                # File doesn't exist locally, provide download URL as fallback
+                result["download_url"] = f"/download-file/{session_id}/{filename}"
+                result["filename"] = filename
 
         return result
 
@@ -2856,11 +3104,46 @@ def generate_file_urls(files_data, session_id: str = None):
 
 
 @app.get("/results/{session_id}")
-async def get_session_results(session_id: str, user_id: str):
-    """Get structured JSON results for a completed session"""
+async def get_session_results(session_id: str, user_id: str, turn_number: Optional[int] = None):
+    """Get structured JSON results for a completed session
+
+    Args:
+        session_id: The session ID
+        user_id: The user ID
+        turn_number: Optional turn number to retrieve. If not provided, returns current/latest turn results.
+    """
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    # Get multi-turn session info to determine turn number
+    # First check in-memory sessions
+    multiturn_session = queue_manager.multiturn_sessions.get(session_id)
+    current_turn = None
+    total_turns = None
+
+    # If not in memory, try to get from MongoDB/cloud
+    if not multiturn_session:
+        try:
+            unified_manager = get_unified_session_manager(queue_manager)
+            cloud_multiturn_session = await unified_manager.get_multiturn_session_by_id(session_id)
+            if cloud_multiturn_session:
+                current_turn = cloud_multiturn_session.get("current_turn")
+                total_turns = cloud_multiturn_session.get("total_turns")
+        except Exception as e:
+            print(f"Could not load multiturn session info from cloud: {e}")
+    else:
+        current_turn = multiturn_session.current_turn
+        total_turns = multiturn_session.total_turns
+
+    # Process turn_number if we have turn information
+    if current_turn is not None and total_turns is not None:
+        # If turn_number not specified, use current turn
+        if turn_number is None:
+            turn_number = current_turn
+        # Validate turn_number is within range
+        elif turn_number < 1 or turn_number > total_turns:
+            raise HTTPException(status_code=400, detail=f"Invalid turn_number. Must be between 1 and {total_turns}")
 
     # Use unified session manager to check both local and cloud storage
     unified_manager = get_unified_session_manager(queue_manager)
@@ -2888,7 +3171,7 @@ async def get_session_results(session_id: str, user_id: str):
             s3_files_with_urls = generate_file_urls(s3_files, session_id)
 
             # Return structured result with thinking_process and final_report
-            return {
+            result = {
                 "session_id": session_id,
                 "status": cloud_session.get("status", "completed"),
                 "content": {
@@ -2898,12 +3181,18 @@ async def get_session_results(session_id: str, user_id: str):
                 "s3_files": s3_files_with_urls,
                 "result_summary": cloud_session.get("result_summary", {})
             }
+            # Add turn information if available
+            if current_turn is not None and total_turns is not None:
+                result["turn_number"] = turn_number
+                result["current_turn"] = current_turn
+                result["total_turns"] = total_turns
+            return result
 
     # For local/active sessions, use existing json_result
     json_result = session_data.get("json_result")
     if not json_result:
         # Session completed but no JSON result (possibly old session or error)
-        return {
+        result = {
             "session_id": session_id,
             "status": session_data.get("status", "unknown"),
             "error": "No structured results available for this session",
@@ -2913,12 +3202,24 @@ async def get_session_results(session_id: str, user_id: str):
                 "created_at": session_data.get("created_at")
             }
         }
+        # Add turn information if available
+        if current_turn is not None and total_turns is not None:
+            result["turn_number"] = turn_number
+            result["current_turn"] = current_turn
+            result["total_turns"] = total_turns
+        return result
 
     # Generate URLs for any files in the result
     if "files" in json_result:
         json_result["files"] = generate_file_urls(json_result["files"], session_id)
     if "s3_files" in json_result:
         json_result["s3_files"] = generate_file_urls(json_result["s3_files"], session_id)
+
+    # Add turn information if available
+    if current_turn is not None and total_turns is not None:
+        json_result["turn_number"] = turn_number
+        json_result["current_turn"] = current_turn
+        json_result["total_turns"] = total_turns
 
     return json_result
 
@@ -2954,11 +3255,31 @@ async def stop_task(session_id: str, user_id: str):
 
 
 @app.get("/snapshots/{session_id}")
-async def get_session_snapshots(session_id: str, user_id: str):
-    """Get all periodic snapshots for a session"""
+async def get_session_snapshots(session_id: str, user_id: str, turn_number: Optional[int] = None):
+    """Get all periodic snapshots for a session
+
+    Args:
+        session_id: The session ID
+        user_id: The user ID
+        turn_number: Optional turn number to retrieve snapshots for. If not provided, returns current/latest turn snapshots.
+    """
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    # Get multi-turn session info to determine turn number
+    multiturn_session = queue_manager.multiturn_sessions.get(session_id)
+    current_turn = None
+    total_turns = None
+    if multiturn_session:
+        current_turn = multiturn_session.current_turn
+        total_turns = multiturn_session.total_turns
+        # If turn_number not specified, use current turn
+        if turn_number is None:
+            turn_number = current_turn
+        # Validate turn_number is within range
+        elif turn_number < 1 or turn_number > total_turns:
+            raise HTTPException(status_code=400, detail=f"Invalid turn_number. Must be between 1 and {total_turns}")
 
     # Use unified session manager to check both local and cloud storage
     unified_manager = get_unified_session_manager(queue_manager)
@@ -2992,20 +3313,32 @@ async def get_session_snapshots(session_id: str, user_id: str):
                         "uploaded_at": snapshot.get("uploaded_at")
                     })
 
-            return {
+            result = {
                 "session_id": session_id,
                 "snapshot_count": len(snapshots_with_urls),
                 "snapshots": snapshots_with_urls,
                 "storage_location": "cloud"
             }
+            # Add turn information
+            if multiturn_session:
+                result["turn_number"] = turn_number
+                result["current_turn"] = current_turn
+                result["total_turns"] = total_turns
+            return result
 
     # For local/active sessions, use existing snapshots
-    return {
+    result = {
         "session_id": session_id,
         "snapshot_count": len(session_data.get("periodic_snapshots", [])),
         "snapshots": session_data.get("periodic_snapshots", []),
         "storage_location": storage_location
     }
+    # Add turn information
+    if multiturn_session:
+        result["turn_number"] = turn_number
+        result["current_turn"] = current_turn
+        result["total_turns"] = total_turns
+    return result
 
 
 @app.get("/all-sessions")
@@ -3221,8 +3554,15 @@ async def continue_session(
     return response
 
 @app.get("/multiturn-session/{session_id}")
-async def get_multiturn_session(session_id: str, user_id: str):
-    """Get complete multi-turn session history using Unified Session Manager"""
+async def get_multiturn_session(session_id: str, user_id: str, include_thinking: bool = False):
+    """Get complete multi-turn session history using Unified Session Manager
+
+    Args:
+        session_id: The session ID
+        user_id: The user ID
+        include_thinking: If True, includes thinking process (response_content) in each turn.
+                         Default is False to reduce response size for sessions with many turns.
+    """
     try:
         # Use Unified Session Manager to get session from any storage location
         unified_manager = get_unified_session_manager(queue_manager)
@@ -3236,11 +3576,18 @@ async def get_multiturn_session(session_id: str, user_id: str):
         if session_user_id and session_user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-        # Generate URLs for files in each turn
+        # Process turns: generate URLs and optionally exclude thinking process
         if "turns" in session and isinstance(session["turns"], list):
             for turn in session["turns"]:
+                # Generate URLs for files in each turn
                 if "files" in turn:
                     turn["files"] = generate_file_urls(turn["files"], session_id)
+
+                # Remove thinking process unless explicitly requested
+                if not include_thinking:
+                    # Remove response_content (thinking process) to reduce payload size
+                    turn.pop("response_content", None)
+                    # Keep final_report as it's the main output
 
         return session
 
@@ -3767,8 +4114,14 @@ async def hard_delete_session(session_id: str, user_id: str, confirm: bool = Fal
 
 
 @app.get("/download-urls/{session_id}")
-async def get_session_download_urls(session_id: str, user_id: str):
-    """Get download URLs for session files (always prefer S3/cloud)"""
+async def get_session_download_urls(session_id: str, user_id: str, turn_number: Optional[int] = None):
+    """Get download URLs for session files (always prefer S3/cloud)
+
+    Args:
+        session_id: The session ID
+        user_id: The user ID
+        turn_number: Optional turn number to retrieve files for. If not provided, returns current/latest turn files.
+    """
     try:
         # Wait briefly to ensure S3 upload completed
         await asyncio.sleep(1)
@@ -3778,6 +4131,20 @@ async def get_session_download_urls(session_id: str, user_id: str):
         if "_turn_" in session_id:
             base_session_id = session_id.split("_turn_")[0]
             print(f"Multi-turn session detected: {session_id} -> base: {base_session_id}")
+
+        # Get multi-turn session info to determine turn number
+        multiturn_session = queue_manager.multiturn_sessions.get(base_session_id)
+        current_turn = None
+        total_turns = None
+        if multiturn_session:
+            current_turn = multiturn_session.current_turn
+            total_turns = multiturn_session.total_turns
+            # If turn_number not specified, use current turn
+            if turn_number is None:
+                turn_number = current_turn
+            # Validate turn_number is within range
+            elif turn_number < 1 or turn_number > total_turns:
+                raise HTTPException(status_code=400, detail=f"Invalid turn_number. Must be between 1 and {total_turns}")
 
         # Use unified session manager to check both local and cloud storage
         unified_manager = get_unified_session_manager(queue_manager)
@@ -3801,6 +4168,11 @@ async def get_session_download_urls(session_id: str, user_id: str):
         if storage_location == "cloud":
             download_data = await cloud_storage_manager.get_session_download_urls(base_session_id)
             if download_data:
+                # Add turn information
+                if multiturn_session:
+                    download_data["turn_number"] = turn_number
+                    download_data["current_turn"] = current_turn
+                    download_data["total_turns"] = total_turns
                 return download_data
             else:
                 raise HTTPException(status_code=500, detail="Failed to generate download URLs from cloud storage")
@@ -3829,12 +4201,18 @@ async def get_session_download_urls(session_id: str, user_id: str):
                 zip_path = create_session_zip(session_path, save_to_chat_zips=True)
 
             # Return local download URL
-            return {
+            result = {
                 "session_id": session_id,
                 "download_url": f"/download/{session_id}?user_id={user_id}",
                 "zip_available": True,
                 "storage_type": storage_location
             }
+            # Add turn information
+            if multiturn_session:
+                result["turn_number"] = turn_number
+                result["current_turn"] = current_turn
+                result["total_turns"] = total_turns
+            return result
 
         # No files found
         raise HTTPException(status_code=404, detail="No downloadable files found for session")
