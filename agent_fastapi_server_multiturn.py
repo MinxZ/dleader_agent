@@ -3197,7 +3197,7 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                 if turn_files:
                     turn_files = generate_file_urls(turn_files, session_id)
 
-                # Return turn-specific results
+                # Return turn-specific results (NO thinking_content, NO snapshots)
                 result = {
                     "session_id": session_id,
                     "turn_number": turn_number,
@@ -3209,7 +3209,6 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                     "query": target_turn.get("query"),
                     "files": turn_files,
                     "content": {
-                        "thinking_content": target_turn.get("response_content", ""),
                         "final_report": target_turn.get("final_report", "")
                     }
                 }
@@ -3225,15 +3224,14 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
             s3_files = cloud_session.get("s3_files", {})
             s3_files_with_urls = generate_file_urls(s3_files, session_id)
 
-            # Return structured result with thinking_process and final_report
+            # Return structured result (NO thinking_content, NO snapshots)
             result = {
                 "session_id": session_id,
                 "status": cloud_session.get("status", "completed"),
                 "content": {
-                    "thinking_content": cloud_session.get("thinking_process", ""),
                     "final_report": cloud_session.get("final_report", "")
                 },
-                "s3_files": s3_files_with_urls,
+                "files": s3_files_with_urls,  # Changed from s3_files to files for consistency
                 "result_summary": cloud_session.get("result_summary", {})
             }
             # Add turn information if available
@@ -3318,6 +3316,17 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
         json_result["turn_number"] = turn_number
         json_result["current_turn"] = current_turn
         json_result["total_turns"] = total_turns
+
+    # Remove thinking_content and snapshots from response (not needed in /results)
+    if "content" in json_result and isinstance(json_result["content"], dict):
+        if "thinking_content" in json_result["content"]:
+            del json_result["content"]["thinking_content"]
+            print(f"Removed thinking_content from /results response for session {session_id}")
+
+    # Remove snapshots from top level if present
+    if "snapshots" in json_result:
+        del json_result["snapshots"]
+        print(f"Removed snapshots from /results response for session {session_id}")
 
     return json_result
 
@@ -3868,23 +3877,60 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
         raise HTTPException(status_code=500, detail=f"Error retrieving session: {str(e)}")
 
 @app.get("/multiturn-sessions")
-async def get_all_multiturn_sessions(user_id: Optional[str] = None):
-    """Get all multi-turn sessions from both local and cloud storage"""
+async def get_all_multiturn_sessions(
+    user_id: Optional[str] = None,
+    limit: int = 10,
+    offset: int = 0
+):
+    """Get multi-turn sessions with pagination
+
+    Args:
+        user_id: User ID to filter sessions (required)
+        limit: Number of sessions to return (default: 10)
+        offset: Number of sessions to skip (default: 0)
+
+    Returns:
+        {
+            "sessions": [...],
+            "total": total_count,
+            "limit": limit,
+            "offset": offset
+        }
+
+    Examples:
+        - Get first 10 sessions: ?user_id=xxx&limit=10&offset=0
+        - Get sessions 10-20: ?user_id=xxx&limit=10&offset=10
+        - Get sessions 20-30: ?user_id=xxx&limit=10&offset=20
+    """
     try:
         # Require user_id for security - prevent unauthorized access to all sessions
         if not user_id or user_id.strip() == "":
-            return {"sessions": [], "error": "user_id is required", "message": "Please provide a valid user_id"}
+            return {
+                "sessions": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "error": "user_id is required",
+                "message": "Please provide a valid user_id"
+            }
 
         # Get unified session manager
         unified_manager = get_unified_session_manager(queue_manager)
 
-        # Get all multi-turn sessions (local + cloud) filtered by user_id
-        all_sessions = await unified_manager.get_multiturn_sessions(include_cloud=True, user_id=user_id)
+        # Get multi-turn sessions with pagination
+        result = await unified_manager.get_multiturn_sessions(
+            include_cloud=True,
+            user_id=user_id,
+            limit=limit,
+            offset=offset
+        )
 
-        return {"sessions": all_sessions}
+        return result
     except Exception as e:
         print(f"Error getting multi-turn sessions: {e}")
-        # Fallback to local-only sessions
+        import traceback
+        traceback.print_exc()
+        # Fallback to local-only sessions with pagination
         sessions = []
         for session_id, session in queue_manager.multiturn_sessions.items():
             session_summary = {
@@ -3899,7 +3945,18 @@ async def get_all_multiturn_sessions(user_id: Optional[str] = None):
                 "_storage_location": "local"
             }
             sessions.append(session_summary)
-        return {"sessions": sessions}
+
+        # Sort and paginate fallback sessions
+        sessions.sort(key=lambda x: x.get('last_updated', x.get('created_at', '')), reverse=True)
+        total = len(sessions)
+        paginated = sessions[offset:offset + limit]
+
+        return {
+            "sessions": paginated,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }
 
 @app.get("/turn-report/{session_id}/{turn_number}")
 async def get_turn_report(session_id: str, turn_number: int, user_id: str):
@@ -4252,6 +4309,131 @@ async def health_check():
         "current_session": queue_manager.current_processing_session,
         "multiturn_sessions": len(queue_manager.multiturn_sessions)
     }
+
+# ============= USER MANAGEMENT ENDPOINTS =============
+
+@app.get("/user/{user_id}/name")
+async def get_user_name(user_id: str):
+    """
+    Get username for a given user_id.
+    Returns the user_id as the default name if no custom name is set.
+
+    Args:
+        user_id: The user identifier
+
+    Returns:
+        JSON with username (defaults to user_id if not set)
+    """
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    try:
+        # Import MongoDB functions
+        from s3_mongodb.func_mongodb import get_mongodb_collection
+
+        # Get users collection
+        users_collection = get_mongodb_collection(
+            os.getenv("SESSION_DB_NAME", "dleader_agent"),
+            "users"
+        )
+
+        if users_collection is None:
+            # If MongoDB is not available, return user_id as default
+            return {
+                "user_id": user_id,
+                "username": user_id,
+                "source": "default"
+            }
+
+        # Find user in MongoDB
+        user_doc = users_collection.find_one({"_id": user_id})
+
+        if user_doc and "username" in user_doc:
+            return {
+                "user_id": user_id,
+                "username": user_doc["username"],
+                "source": "mongodb"
+            }
+        else:
+            # No custom name set, return user_id as default
+            return {
+                "user_id": user_id,
+                "username": user_id,
+                "source": "default"
+            }
+
+    except Exception as e:
+        logger.error(f"Error retrieving username for {user_id}: {e}")
+        # On error, return user_id as fallback
+        return {
+            "user_id": user_id,
+            "username": user_id,
+            "source": "error_fallback"
+        }
+
+@app.put("/user/{user_id}/name")
+async def update_user_name(user_id: str, request: Request):
+    """
+    Update username for a given user_id.
+
+    Args:
+        user_id: The user identifier
+        request: Request body containing {"username": "new_name"}
+
+    Returns:
+        JSON with updated username
+    """
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    try:
+        # Parse request body
+        body = await request.json()
+        new_username = body.get("username", "").strip()
+
+        if not new_username:
+            raise HTTPException(status_code=400, detail="username is required and cannot be empty")
+
+        # Import MongoDB functions
+        from s3_mongodb.func_mongodb import get_mongodb_collection
+
+        # Get users collection
+        users_collection = get_mongodb_collection(
+            os.getenv("SESSION_DB_NAME", "dleader_agent"),
+            "users"
+        )
+
+        if users_collection is None:
+            raise HTTPException(status_code=503, detail="Database unavailable")
+
+        # Upsert user document with new username
+        result = users_collection.update_one(
+            {"_id": user_id},
+            {
+                "$set": {
+                    "username": new_username,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                },
+                "$setOnInsert": {
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }
+            },
+            upsert=True
+        )
+
+        return {
+            "user_id": user_id,
+            "username": new_username,
+            "updated": result.modified_count > 0,
+            "created": result.upserted_id is not None,
+            "message": "Username updated successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating username for {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error updating username: {str(e)}")
 
 # ============= TRASH SYSTEM ENDPOINTS =============
 # Most trash management endpoints have been moved to trash_api.py

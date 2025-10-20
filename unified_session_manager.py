@@ -384,8 +384,24 @@ class UnifiedSessionManager:
             "uploaded_to_cloud_at": cloud_session.get("uploaded_to_cloud_at")
         }
 
-    async def get_multiturn_sessions(self, include_cloud: bool = True, user_id: str = None) -> List[Dict[str, Any]]:
-        """Get all multi-turn sessions from MongoDB only"""
+    async def get_multiturn_sessions(
+        self,
+        include_cloud: bool = True,
+        user_id: str = None,
+        limit: int = 10,
+        offset: int = 0
+    ) -> Dict[str, Any]:
+        """Get multi-turn sessions from MongoDB with pagination
+
+        Args:
+            include_cloud: Whether to include cloud storage sessions
+            user_id: Filter by user ID
+            limit: Number of sessions to return (default: 10)
+            offset: Number of sessions to skip (default: 0)
+
+        Returns:
+            Dict containing sessions list and total count
+        """
         all_sessions = []
         session_ids_seen = set()
 
@@ -425,7 +441,8 @@ class UnifiedSessionManager:
                     query = {}
                     if user_id:
                         query["user_id"] = user_id
-                    mongodb_sessions = list(collection.find(query).sort("created_at", -1).limit(1000))
+                    # Get all sessions without limit first (we'll paginate after sorting)
+                    mongodb_sessions = list(collection.find(query).sort("created_at", -1))
                     for session in mongodb_sessions:
                         session_id = session.get("session_id")
                         if session_id and session_id not in session_ids_seen:
@@ -450,7 +467,7 @@ class UnifiedSessionManager:
             except Exception as e:
                 print(f"Warning: Could not fetch MongoDB multi-turn sessions: {e}")
 
-        # Filter by user_id if provided
+        # Filter by user_id if provided (for in-memory sessions that might not have been filtered)
         if user_id:
             filtered_sessions = []
             for session in all_sessions:
@@ -462,7 +479,18 @@ class UnifiedSessionManager:
         # Sort by last_updated (newest first)
         all_sessions.sort(key=lambda x: x.get('last_updated', x.get('created_at', '')), reverse=True)
 
-        return all_sessions
+        # Get total count before pagination
+        total_count = len(all_sessions)
+
+        # Apply pagination
+        paginated_sessions = all_sessions[offset:offset + limit]
+
+        return {
+            "sessions": paginated_sessions,
+            "total": total_count,
+            "limit": limit,
+            "offset": offset
+        }
 
     async def get_multiturn_session_by_id(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get a specific multi-turn session by ID from any storage location"""

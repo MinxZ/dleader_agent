@@ -17,6 +17,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import List, Optional
+from io import BytesIO
 
 import gradio as gr
 import requests
@@ -105,11 +106,14 @@ class FastAPIClient:
             print(f"Error stopping task: {e}")
             return False
 
-    def get_json_results(self, session_id: str, user_id: str) -> Optional[dict]:
-        """Get structured JSON results for a completed session"""
+    def get_json_results(self, session_id: str, user_id: str, turn_number: Optional[int] = None) -> Optional[dict]:
+        """Get structured JSON results for a completed session, optionally for a specific turn"""
         try:
+            params = {"user_id": user_id}
+            if turn_number is not None:
+                params["turn_number"] = turn_number
             response = requests.get(f"{self.base_url}/results/{session_id}",
-                                  params={"user_id": user_id}, timeout=10)
+                                  params=params, timeout=10)
             if response.status_code == 200:
                 return response.json()
             return None
@@ -117,11 +121,14 @@ class FastAPIClient:
             print(f"Error getting JSON results: {e}")
             return None
 
-    def get_snapshots(self, session_id: str, user_id: str) -> Optional[dict]:
-        """Get all periodic snapshots for a session"""
+    def get_snapshots(self, session_id: str, user_id: str, turn_number: Optional[int] = None) -> Optional[dict]:
+        """Get all periodic snapshots for a session, optionally for a specific turn"""
         try:
+            params = {"user_id": user_id}
+            if turn_number is not None:
+                params["turn_number"] = turn_number
             response = requests.get(f"{self.base_url}/snapshots/{session_id}",
-                                  params={"user_id": user_id}, timeout=10)
+                                  params=params, timeout=10)
             if response.status_code == 200:
                 return response.json()
             return None
@@ -251,21 +258,28 @@ class FastAPIClient:
             print(f"Error getting multi-turn session: {e}")
             return None
 
-    def get_all_multiturn_sessions(self, user_id: str = None) -> List[dict]:
-        """Get all multi-turn sessions"""
+    def get_all_multiturn_sessions(self, user_id: str = None, limit: int = 10, offset: int = 0) -> dict:
+        """Get multi-turn sessions with pagination"""
         try:
             url = f"{self.base_url}/multiturn-sessions"
             params = {}
             if user_id:
                 params["user_id"] = user_id
+            params["limit"] = limit
+            params["offset"] = offset
             response = requests.get(url, params=params, timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                return data.get("sessions", [])
-            return []
+                return {
+                    "sessions": data.get("sessions", []),
+                    "total": data.get("total", 0),
+                    "limit": data.get("limit", limit),
+                    "offset": data.get("offset", offset)
+                }
+            return {"sessions": [], "total": 0, "limit": limit, "offset": offset}
         except Exception as e:
             print(f"Error getting multi-turn sessions: {e}")
-            return []
+            return {"sessions": [], "total": 0, "limit": limit, "offset": offset}
 
     def get_turn_report(self, session_id: str, turn_number: int, user_id: str) -> Optional[dict]:
         """Get specific turn report from multi-turn session"""
@@ -301,29 +315,303 @@ def load_logo():
         return None
 
 
+def download_images_from_urls(image_list: list) -> List[Image.Image]:
+    """Download images from S3 URLs and return as PIL Images for Gradio display"""
+    images = []
+    if not image_list:
+        return images
+
+    for item in image_list:
+        try:
+            # Extract URL from the image item
+            url = None
+            if isinstance(item, dict):
+                url = item.get('url') or item.get('presigned_url')
+            elif isinstance(item, str) and item.startswith('http'):
+                url = item
+
+            if url:
+                # Download image from URL
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    img = Image.open(BytesIO(response.content))
+                    images.append(img)
+                    print(f"✓ Downloaded image from URL: {url[:50]}...")
+        except Exception as e:
+            print(f"Warning: Could not download image: {e}")
+            continue
+
+    return images
 
 
+async def view_multiturn_session(session_selection: str, server_url: str, user_id: str):
+    """View complete multi-turn session history, defaulting to show the last turn"""
+    if not session_selection or not session_selection.strip():
+        return (
+            gr.update(value="## ❌ Error\n\nNo session selected. Please select a session first.", visible=True),
+            gr.update(visible=False),
+            gr.update(choices=[], value=None),
+            gr.update(value=[], visible=False),
+            ""
+        )
 
-async def check_status_with_history(session_id: str, server_url: str, user_id: str):
-    """Check status of a session with integrated history and snapshots"""
-    if not session_id.strip():
-        return "## ❌ Error\n\nPlease enter a Session ID to check status.", gr.update(visible=False)
+    # Extract session ID from selection (format: "SESSION_ID... | status | turns | query...")
+    # Or it might just be a plain session ID
+    session_id = session_selection.split(' ')[0] if ' ' in session_selection else session_selection
 
     # Initialize client
     client = FastAPIClient(server_url)
 
     # Check server health
     if not client.health_check():
-        return "## ❌ Server Error\n\nCannot connect to FastAPI server. Please ensure the server is running.", gr.update(visible=False)
+        return (
+            gr.update(value="## ❌ Server Error\n\nCannot connect to FastAPI server.", visible=True),
+            gr.update(visible=False),
+            gr.update(choices=[], value=None),
+            gr.update(value=[], visible=False),
+            ""
+        )
+
+    try:
+        # Extract total_turns from the selection label (from /multiturn-sessions list)
+        # Format: "emoji time | X turns | query"
+        total_turns = 1  # Default
+        if '|' in session_selection and 'turns' in session_selection:
+            parts = session_selection.split('|')
+            if len(parts) >= 2:
+                turns_part = parts[1].strip()  # "X turns"
+                try:
+                    total_turns = int(turns_part.split()[0])
+                except:
+                    total_turns = 1
+
+        # Get the last turn data using /results (without turn_number to get latest)
+        last_turn_data = client.get_json_results(session_id, user_id)
+
+        if not last_turn_data:
+            return (
+                gr.update(value=f"## ❌ Session Not Found\n\nSession ID '{session_id}' not found.", visible=True),
+                gr.update(visible=False),
+                gr.update(choices=[], value=None),
+                gr.update(value=[], visible=False),
+                ""
+            )
+
+        # Extract info from last turn
+        current_turn = last_turn_data.get('current_turn', total_turns)
+        status = last_turn_data.get('status', 'unknown')
+        timestamp = last_turn_data.get('timestamp', 'N/A')
+        query = last_turn_data.get('query', 'No query')
+
+        # Build turn selector choices based on total_turns from the list
+        turn_choices = []
+        if total_turns > 0:
+            for i in range(1, total_turns + 1):
+                turn_choices.append((f"Turn {i}", i))
+
+        # Display session overview showing only the last turn
+        result_display = f"""## 💬 Multi-Turn Session View
+
+**Session ID:** `{session_id}`
+**Total Turns:** {total_turns}
+**Showing:** Turn {current_turn} (Latest)
+**Status:** {status.title()}
+**Timestamp:** {timestamp}
+
+---
+
+## 🔍 Turn {current_turn} (Latest)
+
+**Query:** {query}
+
+"""
+
+        # Get content from last turn
+        content = last_turn_data.get('content', {})
+        final_report = content.get('final_report', '')
+
+        if final_report:
+            result_display += f"""**Final Report:**
+
+{final_report}
+
+---
+
+"""
+
+        # Get images from the last turn
+        last_turn_images = []
+        files = last_turn_data.get('files', {})
+        if 'images' in files and files['images']:
+            print(f"Found {len(files['images'])} images in last turn")
+            last_turn_images = download_images_from_urls(files['images'])
+            result_display += f"\n**📸 {len(last_turn_images)} images from this turn**\n"
+
+        result_display += f"\n\n💡 *Use the turn selector above to view other turns (1-{total_turns})*\n"
+
+        # Return with images from last turn
+        print(f"Returning {len(last_turn_images)} images for display")
+        return (
+            gr.update(value=result_display, visible=True),  # Make conversation_display visible
+            gr.update(visible=True),  # Show turn_navigation_group
+            gr.update(choices=turn_choices, value=current_turn if current_turn > 0 else None),
+            gr.update(value=last_turn_images, visible=True if last_turn_images else False),
+            session_id  # Store session_id in state
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return (
+            gr.update(value=f"## ❌ Error\n\n{str(e)}", visible=True),
+            gr.update(visible=False),
+            gr.update(choices=[], value=None),
+            gr.update(value=[], visible=False),
+            ""
+        )
+
+
+async def view_specific_turn(session_id: str, turn_number: int, server_url: str, user_id: str):
+    """View specific turn details using /results endpoint with turn_number"""
+    if not session_id or not session_id.strip():
+        return gr.update(value="## ❌ Error\n\nNo session selected.", visible=True), gr.update(value=[], visible=False)
+
+    if not turn_number:
+        return gr.update(value="## ❌ Error\n\nPlease select a turn number.", visible=True), gr.update(value=[], visible=False)
+
+    # Initialize client
+    client = FastAPIClient(server_url)
+
+    # Check server health
+    if not client.health_check():
+        return gr.update(value="## ❌ Server Error\n\nCannot connect to FastAPI server.", visible=True), gr.update(value=[], visible=False)
+
+    try:
+        # Step 1: Get turn-specific results from /results endpoint
+        results_data = client.get_json_results(session_id, user_id, turn_number=turn_number)
+        if not results_data:
+            return gr.update(value=f"## ❌ Turn Not Found\n\nTurn {turn_number} not found for session {session_id}.", visible=True), gr.update(value=[], visible=False)
+
+        # Extract turn info
+        turn_num = results_data.get('turn_number', turn_number)
+        current_turn = results_data.get('current_turn', 0)
+        total_turns = results_data.get('total_turns', 0)
+        status = results_data.get('status', 'unknown')
+        timestamp = results_data.get('timestamp', 'N/A')
+        query = results_data.get('query', 'No query')
+
+        # Display turn details
+        result_display = f"""## 🔍 Turn {turn_num} Details
+
+**Session ID:** `{session_id}`
+**Turn:** {turn_num}/{total_turns}
+**Status:** {status.title()}
+**Timestamp:** {timestamp}
+**Query:** {query}
+
+---
+
+"""
+
+        # Get content from /results
+        content = results_data.get('content', {})
+        final_report = content.get('final_report', '')
+
+        # Show final report FIRST (if available and turn is completed)
+        if final_report and status == 'completed':
+            result_display += f"""## 📋 Final Report
+
+{final_report}
+
+---
+
+"""
+
+        # Extract images from files (from /results)
+        turn_images = []
+        files = results_data.get('files', {})
+        if files:
+            result_display += "## 📁 Generated Files\n\n"
+            for file_type, file_list in files.items():
+                if isinstance(file_list, list) and file_list:
+                    result_display += f"**{file_type.replace('_', ' ').title()}:**\n"
+                    for file_item in file_list:
+                        if isinstance(file_item, dict):
+                            filename = file_item.get('filename', 'Unknown')
+                            url = file_item.get('url', '')
+                            if url:
+                                result_display += f"- [{filename}]({url})\n"
+                            else:
+                                result_display += f"- {filename}\n"
+                    result_display += "\n"
+
+                    # Download images for gallery
+                    if file_type == 'images':
+                        print(f"Downloading {len(file_list)} images for turn {turn_num}...")
+                        turn_images = download_images_from_urls(file_list)
+
+        # Step 2: For completed turns, get thinking process from /snapshots separately
+        if status == 'completed':
+            snapshots_data = client.get_snapshots(session_id, user_id, turn_number=turn_number)
+            if snapshots_data and 'snapshots' in snapshots_data:
+                snapshots = snapshots_data['snapshots']
+                if snapshots:
+                    snapshot_count = len(snapshots)
+                    result_display += f"""
+
+## 🧠 Thinking Process ({snapshot_count} steps)
+
+"""
+                    for idx, snapshot in enumerate(snapshots, 1):
+                        snapshot_text = snapshot.get('content', snapshot.get('text', ''))
+                        if snapshot_text:
+                            # Truncate very long snapshots
+                            if len(snapshot_text) > 500:
+                                snapshot_text = snapshot_text[:500] + "... (truncated)"
+                            result_display += f"""**Step {idx}:**
+```
+{snapshot_text}
+```
+
+"""
+                    result_display += "---\n\n"
+
+        # Return display and images
+        print(f"Returning {len(turn_images)} images for turn {turn_number}")
+        if turn_images:
+            return gr.update(value=result_display, visible=True), gr.update(value=turn_images, visible=True)
+        else:
+            return gr.update(value=result_display, visible=True), gr.update(value=[], visible=False)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return gr.update(value=f"## ❌ Error\n\n{str(e)}", visible=True), gr.update(value=[], visible=False)
+
+
+
+
+
+async def check_status_with_history(session_id: str, server_url: str, user_id: str):
+    """Check status of a session with integrated history and latest turn thinking"""
+    if not session_id.strip():
+        return "## ❌ Error\n\nPlease enter a Session ID to check status.", gr.update(visible=False), gr.update(visible=False)
+
+    # Initialize client
+    client = FastAPIClient(server_url)
+
+    # Check server health
+    if not client.health_check():
+        return "## ❌ Server Error\n\nCannot connect to FastAPI server. Please ensure the server is running.", gr.update(visible=False), gr.update(visible=False)
 
     try:
         # Get status data
         status_data = client.get_status(session_id, user_id)
         if not status_data:
-            return f"## ❌ Session Not Found\n\nSession ID '{session_id}' not found on server.", gr.update(visible=False)
+            return f"## ❌ Session Not Found\n\nSession ID '{session_id}' not found on server.", gr.update(visible=False), gr.update(visible=False)
 
-        # Get snapshots data
-        snapshots_data = client.get_snapshots(session_id, user_id)
+        # Get latest turn results (thinking process and images)
+        results_data = client.get_json_results(session_id, user_id)
 
         # Format simplified status display
         current_status = status_data.get("status", "unknown")
@@ -339,65 +627,33 @@ async def check_status_with_history(session_id: str, server_url: str, user_id: s
             'cancelled': '🛑'
         }.get(current_status, '❓')
 
+        # Extract turn information if available
+        current_turn = results_data.get('current_turn') if results_data else None
+        total_turns = results_data.get('total_turns') if results_data else None
+        turn_info = f"\n**Turn:** {current_turn}/{total_turns}" if current_turn and total_turns else ""
+
         result_display = f"""## {status_emoji} Session: {session_id[:8]}...
 
 **Status:** {current_status.title()}
 **Complete:** {'Yes' if is_complete else 'No'}
-**Created:** {status_data.get('created_at', 'N/A')}"""
+**Created:** {status_data.get('created_at', 'N/A')}{turn_info}"""
 
         # Add error information if available
         if status_data.get("error"):
             result_display += f"""
 **Error:** {status_data['error']}"""
 
-        # Add simplified snapshots with full text
-        if snapshots_data:
-            snapshots = snapshots_data.get("snapshots", [])
-            if snapshots:
-                result_display += f"""
-
-## 📸 All Snapshots ({len(snapshots)} total) - Scroll Down for Full Content
-
-*All snapshots are displayed below in chronological order. Scroll down to view complete content.*
-
-"""
-                for i, snapshot in enumerate(snapshots, 1):
-                    snap_time = snapshot.get("timestamp", "N/A")
-                    try:
-                        dt = datetime.fromisoformat(snap_time.replace('Z', '+00:00'))
-                        formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S')
-                    except:
-                        formatted_time = snap_time
-
-                    # Get thinking content
-                    content = snapshot.get("content", {})
-                    thinking_content = content.get("thinking_content", "")
-
-                    # Add character count for transparency
-                    char_count = len(thinking_content) if thinking_content else 0
-
-                    result_display += f"""
----
-
-### 📸 Snapshot #{i} - {formatted_time}
-**Content Size:** {char_count:,} characters
-
-```
-{thinking_content if thinking_content else 'No thinking content available'}
-```
-
-"""
-            else:
-                result_display += """
-
-## 📸 Snapshots
-
-No snapshots available yet."""
+        # Collect images from latest turn (but don't show thinking process here)
+        status_images = []
+        if results_data and 'files' in results_data:
+            files = results_data['files']
+            if 'images' in files and files['images']:
+                print(f"Found {len(files['images'])} images in latest turn for status check")
+                status_images = download_images_from_urls(files['images'])
 
         # Add completion download if completed
         if is_complete and current_status == "completed":
-            # Get the final report for completed sessions
-            results_data = client.get_json_results(session_id, user_id)
+            # Step 1: Get the final report and images from /results
             if results_data and 'content' in results_data and 'final_report' in results_data['content']:
                 final_report = results_data['content']['final_report']
                 if final_report:
@@ -408,6 +664,35 @@ No snapshots available yet."""
 {final_report}
 
 """
+
+            # Add image count info
+            if status_images:
+                result_display += f"\n\n**📸 {len(status_images)} images from latest turn shown below**\n\n"
+
+            # Step 2: For completed sessions, get thinking process from /snapshots separately
+            snapshots_data = client.get_snapshots(session_id, user_id)
+            if snapshots_data and 'snapshots' in snapshots_data:
+                snapshots = snapshots_data['snapshots']
+                if snapshots:
+                    snapshot_count = len(snapshots)
+                    result_display += f"""
+
+## 🧠 Thinking Process ({snapshot_count} steps)
+
+"""
+                    for idx, snapshot in enumerate(snapshots, 1):
+                        snapshot_text = snapshot.get('content', snapshot.get('text', ''))
+                        if snapshot_text:
+                            # Truncate very long snapshots for better readability
+                            if len(snapshot_text) > 500:
+                                snapshot_text = snapshot_text[:500] + "... (truncated)"
+                            result_display += f"""**Step {idx}:**
+```
+{snapshot_text}
+```
+
+"""
+                    result_display += "---\n\n"
 
             # For completed sessions, show S3 download links
             download_urls = client.get_download_urls(session_id, user_id)
@@ -452,43 +737,84 @@ No snapshots available yet."""
 *Copy the URL above and paste in another windows to download*
 """
 
-            return result_display, gr.update(visible=False)
+            # Return with images if available
+            if status_images:
+                return result_display, gr.update(visible=False), gr.update(value=status_images, visible=True)
+            else:
+                return result_display, gr.update(visible=False), gr.update(value=[], visible=False)
 
-        # For non-completed sessions, hide download component
-        return result_display, gr.update(visible=False)
+        # For non-completed sessions (in progress), show thinking process from /snapshots
+        else:
+            # Get current thinking process from /snapshots for in-progress sessions
+            snapshots_data = client.get_snapshots(session_id, user_id)
+            if snapshots_data and 'snapshots' in snapshots_data:
+                snapshots = snapshots_data['snapshots']
+                if snapshots:
+                    snapshot_count = len(snapshots)
+                    result_display += f"""
+
+## 🧠 Thinking Process ({snapshot_count} steps so far)
+
+"""
+                    for idx, snapshot in enumerate(snapshots, 1):
+                        snapshot_text = snapshot.get('content', snapshot.get('text', ''))
+                        if snapshot_text:
+                            # Truncate very long snapshots for better readability
+                            if len(snapshot_text) > 500:
+                                snapshot_text = snapshot_text[:500] + "... (truncated)"
+                            result_display += f"""**Step {idx}:**
+```
+{snapshot_text}
+```
+
+"""
+                    result_display += "---\n\n"
+
+        # For non-completed sessions, hide download component and images
+        if status_images:
+            result_display += f"\n\n**📸 {len(status_images)} images from current turn shown below**\n\n"
+            return result_display, gr.update(visible=False), gr.update(value=status_images, visible=True)
+        else:
+            return result_display, gr.update(visible=False), gr.update(value=[], visible=False)
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         error_msg = f"""## ❌ Status Check Error
 
 **Error:** {str(e)}
 **Session ID:** {session_id}
 **Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-        return error_msg, gr.update(visible=False)
+        return error_msg, gr.update(visible=False), gr.update(visible=False)
 
 
 def get_session_history(server_url: str, user_id: str = None) -> List[tuple]:
-    """Get session history for dropdown selection"""
+    """Get multi-turn session history for dropdown selection"""
     try:
         client = FastAPIClient(server_url)
         if not client.health_check():
             return [("Server not available", "")]
 
-        sessions = client.get_all_sessions(user_id=user_id)
+        # Use multiturn sessions instead of all sessions (default: latest 10)
+        result = client.get_all_multiturn_sessions(user_id=user_id, limit=10, offset=0)
+        sessions = result.get('sessions', [])
+
         if not sessions:
             return [("No sessions available", "")]
 
         items = []
         for session in sessions:
+            # Status emoji based on session_status (not individual turn status)
             status_emoji = {
-                'queued': '📋',
-                'processing': '🔄',
+                'active': '🔄',
                 'completed': '✅',
                 'failed': '❌',
                 'error': '❌',
                 'cancelled': '🛑'
-            }.get(session.get('status', 'unknown'), '❓')
+            }.get(session.get('session_status', 'unknown'), '❓')
 
-            timestamp = session.get('timestamp', '')
+            # Use last_updated or created_at timestamp
+            timestamp = session.get('last_updated') or session.get('created_at', '')
             if timestamp:
                 try:
                     dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
@@ -498,13 +824,22 @@ def get_session_history(server_url: str, user_id: str = None) -> List[tuple]:
             else:
                 time_str = 'Unknown'
 
-            # Create display label
-            label = f"{status_emoji} {time_str} - {session.get('query', 'No query')[:50]}..."
-            items.append((label, session['session_id']))
+            # Get session info
+            session_id = session.get('session_id', '')
+            session_name = session.get('session_name', '')
+            total_turns = session.get('total_turns', 0)
+            first_query = session.get('first_query', 'No query')
+
+            # Create display label with session name or first query
+            display_text = session_name if session_name else first_query[:40]
+            label = f"{status_emoji} {time_str} | {total_turns} turns | {display_text}..."
+            items.append((label, session_id))
 
         return items
     except Exception as e:
         print(f"Error getting session history: {e}")
+        import traceback
+        traceback.print_exc()
         return [("Error loading history", "")]
 
 
@@ -589,6 +924,7 @@ def create_interface(default_fastapi_url: str = "http://localhost:8001"):
             with gr.Column():
                 gr.Markdown("### ⚙️ User Configuration")
                 server_url = gr.State(value=default_fastapi_url)  # Hidden state variable
+                current_session_id_state = gr.State(value="")  # Store current session ID for turn navigation
                 user_id_input = gr.Dropdown(
                     label="User ID",
                     choices=["Test user", "Chen", "Yuan", "Zhang", "Tom"],
@@ -617,11 +953,17 @@ def create_interface(default_fastapi_url: str = "http://localhost:8001"):
                             )
 
                             # Existing session selector (initially hidden)
-                            refresh_multiturn_sessions_btn = gr.Button(
-                                "🔄 Refresh Sessions",
-                                variant="secondary",
-                                visible=False
-                            )
+                            with gr.Row(visible=False) as session_controls_row:
+                                refresh_multiturn_sessions_btn = gr.Button(
+                                    "🔄 Refresh Sessions",
+                                    variant="secondary",
+                                    scale=2
+                                )
+                                load_more_sessions_btn = gr.Button(
+                                    "⬇️ Load More",
+                                    variant="secondary",
+                                    scale=1
+                                )
 
                             existing_session_selector = gr.Dropdown(
                                 label="Select existing session to continue",
@@ -631,6 +973,16 @@ def create_interface(default_fastapi_url: str = "http://localhost:8001"):
                                 visible=False,
                                 allow_custom_value=True
                             )
+
+                            # Session pagination info (hidden)
+                            sessions_pagination_info = gr.Markdown(
+                                "",
+                                visible=False
+                            )
+
+                            # Hidden state for pagination
+                            sessions_offset_state = gr.State(value=0)
+                            sessions_total_state = gr.State(value=0)
 
                             # New conversation inputs
                             new_conversation_group = gr.Group(visible=True)
@@ -719,11 +1071,37 @@ Choose to start a new conversation or continue an existing one from the left pan
                             visible=True
                         )
 
+                        # View Session History button (always visible)
+                        with gr.Row():
+                            view_session_btn = gr.Button("📖 View Session History", variant="secondary", size="lg")
+
+                        # Turn navigation controls (hidden until session is loaded)
+                        with gr.Group(visible=False) as turn_navigation_group:
+                            gr.Markdown("### 🔄 Navigate Between Turns")
+                            with gr.Row():
+                                turn_selector = gr.Dropdown(
+                                    label="Select Turn",
+                                    choices=[],
+                                    value=None,
+                                    interactive=True,
+                                    scale=2
+                                )
+                                refresh_turn_btn = gr.Button("🔄 Refresh", variant="secondary", scale=1)
+
                         # Conversation display
                         conversation_display = gr.Markdown(
                             "",
                             visible=False,
                             height=500
+                        )
+
+                        # Image gallery for displaying images from turns
+                        turn_images_gallery = gr.Gallery(
+                            label="Turn Images",
+                            visible=False,
+                            columns=3,
+                            height=400,
+                            object_fit="contain"
                         )
 
                         # Session info
@@ -741,8 +1119,10 @@ Choose to start a new conversation or continue an existing one from the left pan
                         with gr.Group():
                             gr.Markdown("### 📋 Session Selection")
 
-                            # Refresh session list button
-                            refresh_status_history_btn = gr.Button("🔄 Refresh Session List", variant="secondary")
+                            # Session controls
+                            with gr.Row():
+                                refresh_status_history_btn = gr.Button("🔄 Refresh", variant="secondary", scale=2)
+                                load_more_status_btn = gr.Button("⬇️ Load More", variant="secondary", scale=1)
 
                             # Session selector dropdown
                             status_session_selector = gr.Dropdown(
@@ -753,12 +1133,30 @@ Choose to start a new conversation or continue an existing one from the left pan
                                 allow_custom_value=True
                             )
 
+                            # Pagination info
+                            status_pagination_info = gr.Markdown("", visible=False)
+
+                            # Hidden states for pagination
+                            status_offset_state = gr.State(value=0)
+                            status_total_state = gr.State(value=0)
+                            current_status_session_id = gr.State(value="")  # Store selected session
+
                             with gr.Row():
                                 check_btn = gr.Button("🔍 Check Status", variant="primary", scale=2)
                                 clear_status_btn = gr.Button("🗑️ Clear", variant="secondary", scale=1)
 
                     with gr.Column(scale=1):
                         gr.Markdown("## 📋 Status Results")
+
+                        # Turn selector (hidden until session is selected)
+                        with gr.Group(visible=False) as status_turn_selector_group:
+                            gr.Markdown("### 🔄 Select Turn")
+                            status_turn_selector = gr.Dropdown(
+                                label="View specific turn",
+                                choices=[],
+                                value=None,
+                                interactive=True
+                            )
 
                         status_results = gr.Markdown(
                             """## 📋 Status Check
@@ -770,14 +1168,27 @@ Select a session from the dropdown to check status and view complete snapshots.
 - Complete snapshots view (no truncation)
 - Full session history with scrollable window
 - Direct download button when completed
+- Image gallery for completed sessions
+- Turn selector to view different turns
 
 **Instructions:**
-1. Click "🔄 Refresh Session List" to load all sessions
-2. Select a session from the dropdown (shows both active and completed sessions)
-3. Click "🔍 Check Status"
+1. Click "🔄 Refresh" to load latest 10 sessions
+2. Click "⬇️ Load More" to load next 10 sessions
+3. Select a session from the dropdown
+4. Click "🔍 Check Status"
+5. Use turn selector to view different turns
 
 For completed sessions, direct download URLs will appear.""",
                             max_height="600px"
+                        )
+
+                        # Image gallery for status check
+                        status_images_gallery = gr.Gallery(
+                            label="Session Images",
+                            visible=False,
+                            columns=3,
+                            height=400,
+                            object_fit="contain"
                         )
 
             # Stop Task Tab
@@ -789,8 +1200,10 @@ For completed sessions, direct download URLs will appear.""",
                         with gr.Group():
                             gr.Markdown("### 📋 Select Session")
 
-                            # Refresh history button
-                            refresh_stop_history_btn = gr.Button("🔄 Refresh Session List", variant="secondary")
+                            # Session controls
+                            with gr.Row():
+                                refresh_stop_history_btn = gr.Button("🔄 Refresh", variant="secondary", scale=2)
+                                load_more_stop_btn = gr.Button("⬇️ Load More", variant="secondary", scale=1)
 
                             # History selector dropdown
                             stop_session_selector = gr.Dropdown(
@@ -800,6 +1213,13 @@ For completed sessions, direct download URLs will appear.""",
                                 interactive=True,
                                 allow_custom_value=True
                             )
+
+                            # Pagination info
+                            stop_pagination_info = gr.Markdown("", visible=False)
+
+                            # Hidden states for pagination
+                            stop_offset_state = gr.State(value=0)
+                            stop_total_state = gr.State(value=0)
 
                             with gr.Row():
                                 stop_task_btn = gr.Button("🛑 Stop Selected Task", variant="primary", scale=2)
@@ -865,21 +1285,251 @@ Select a session from the dropdown above to stop a running or queued task.
 Completed tasks cannot be stopped."""  # Reset stop results
             )
 
-        def refresh_stop_history(user_id):
-            """Refresh the stop task session list"""
-            return gr.update(choices=get_session_history(server_url.value, user_id), value="")
+        def refresh_stop_history(user_id, offset=0):
+            """Refresh the stop task session list with pagination"""
+            client = FastAPIClient(server_url.value)
+            result = client.get_all_multiturn_sessions(user_id=user_id, limit=10, offset=offset)
+            sessions = result.get('sessions', [])
+            total = result.get('total', 0)
 
-        def refresh_status_history(user_id):
-            """Refresh the status check session list"""
-            return gr.update(choices=get_session_history(server_url.value, user_id), value="")
+            items = []
+            for session in sessions:
+                status_emoji = {
+                    'active': '🔄',
+                    'completed': '✅',
+                    'failed': '❌',
+                    'error': '❌',
+                    'cancelled': '🛑'
+                }.get(session.get('session_status', 'unknown'), '❓')
+
+                timestamp = session.get('last_updated') or session.get('created_at', '')
+                if timestamp:
+                    try:
+                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                        time_str = dt.strftime('%m/%d %H:%M')
+                    except:
+                        time_str = timestamp[:16]
+                else:
+                    time_str = 'Unknown'
+
+                session_id = session.get('session_id', '')
+                session_name = session.get('session_name', '')
+                total_turns = session.get('total_turns', 0)
+                first_query = session.get('first_query', 'No query')
+
+                display_text = session_name if session_name else first_query[:40]
+                label = f"{status_emoji} {time_str} | {total_turns} turns | {display_text}..."
+                items.append((label, session_id))
+
+            showing_start = offset + 1 if total > 0 else 0
+            showing_end = min(offset + 10, total)
+            pagination_text = f"**Showing {showing_start}-{showing_end} of {total} sessions**"
+
+            return (
+                gr.update(choices=items, value=""),
+                total,
+                offset,
+                gr.update(value=pagination_text, visible=True)
+            )
+
+        def refresh_status_history(user_id, offset=0):
+            """Refresh the status check session list with pagination"""
+            client = FastAPIClient(server_url.value)
+            result = client.get_all_multiturn_sessions(user_id=user_id, limit=10, offset=offset)
+            sessions = result.get('sessions', [])
+            total = result.get('total', 0)
+
+            items = []
+            for session in sessions:
+                status_emoji = {
+                    'active': '🔄',
+                    'completed': '✅',
+                    'failed': '❌',
+                    'error': '❌',
+                    'cancelled': '🛑'
+                }.get(session.get('session_status', 'unknown'), '❓')
+
+                timestamp = session.get('last_updated') or session.get('created_at', '')
+                if timestamp:
+                    try:
+                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                        time_str = dt.strftime('%m/%d %H:%M')
+                    except:
+                        time_str = timestamp[:16]
+                else:
+                    time_str = 'Unknown'
+
+                session_id = session.get('session_id', '')
+                session_name = session.get('session_name', '')
+                total_turns = session.get('total_turns', 0)
+                first_query = session.get('first_query', 'No query')
+
+                display_text = session_name if session_name else first_query[:40]
+                label = f"{status_emoji} {time_str} | {total_turns} turns | {display_text}..."
+                items.append((label, session_id))
+
+            showing_start = offset + 1 if total > 0 else 0
+            showing_end = min(offset + 10, total)
+            pagination_text = f"**Showing {showing_start}-{showing_end} of {total} sessions**"
+
+            return (
+                gr.update(choices=items, value=""),
+                total,
+                offset,
+                gr.update(value=pagination_text, visible=True)
+            )
+
+        def load_more_status_sessions(user_id, current_offset, total):
+            """Load next batch of sessions for status check"""
+            new_offset = current_offset + 10
+            if new_offset >= total:
+                return (
+                    gr.update(),
+                    current_offset,
+                    gr.update(value=f"**Showing all {total} sessions (end of list)**", visible=True)
+                )
+            return refresh_status_history(user_id, new_offset)
+
+        def load_more_stop_sessions(user_id, current_offset, total):
+            """Load next batch of sessions for stop task"""
+            new_offset = current_offset + 10
+            if new_offset >= total:
+                return (
+                    gr.update(),
+                    current_offset,
+                    current_offset,
+                    gr.update(value=f"**Showing all {total} sessions (end of list)**", visible=True)
+                )
+            return refresh_stop_history(user_id, new_offset)
 
         async def check_status_from_dropdown(selected_session_id, server_url_value, user_id):
             """Check status using dropdown selection"""
             if not selected_session_id:
-                status_text, _ = await check_status_with_history("", server_url_value, user_id)
-                return status_text
-            status_text, _ = await check_status_with_history(selected_session_id, server_url_value, user_id)
-            return status_text
+                status_text, _, images = await check_status_with_history("", server_url_value, user_id)
+                return (
+                    status_text,
+                    images,
+                    gr.update(visible=False),
+                    gr.update(choices=[], value=None),
+                    selected_session_id
+                )
+
+            # Get status and results
+            client = FastAPIClient(server_url_value)
+            status_text, _, images = await check_status_with_history(selected_session_id, server_url_value, user_id)
+
+            # Get turn info from /results to build turn selector
+            results_data = client.get_json_results(selected_session_id, user_id)
+
+            # Build turn choices based on current_turn and total_turns from results
+            turn_choices = []
+            if results_data:
+                total_turns = results_data.get('total_turns', 0)
+                current_turn = results_data.get('current_turn', 0)
+
+                if total_turns > 0:
+                    turn_choices = [(f"Turn {i}", i) for i in range(1, total_turns + 1)]
+
+            if turn_choices:
+                return (
+                    status_text,
+                    images,
+                    gr.update(visible=True),
+                    gr.update(choices=turn_choices, value=current_turn if current_turn > 0 else None),
+                    selected_session_id
+                )
+            else:
+                return (
+                    status_text,
+                    images,
+                    gr.update(visible=False),
+                    gr.update(choices=[], value=None),
+                    selected_session_id
+                )
+
+        async def view_status_turn(session_id, turn_number, server_url_value, user_id):
+            """View specific turn for status check - uses /results then /snapshots separately"""
+            if not session_id or not turn_number:
+                return gr.update(), gr.update()
+
+            # Initialize client
+            client = FastAPIClient(server_url_value)
+
+            # Step 1: Get turn-specific results first (/results endpoint)
+            results_data = client.get_json_results(session_id, user_id, turn_number=turn_number)
+
+            if not results_data:
+                return gr.update(value=f"## ❌ Turn Not Found\n\nTurn {turn_number} not found.", visible=True), gr.update(visible=False)
+
+            # Build display
+            turn_num = results_data.get('turn_number', turn_number)
+            total_turns = results_data.get('total_turns', 0)
+            status = results_data.get('status', 'unknown')
+            timestamp = results_data.get('timestamp', 'N/A')
+            query = results_data.get('query', 'No query')
+
+            result_display = f"""## 🔍 Turn {turn_num} Details
+
+**Session ID:** `{session_id}`
+**Turn:** {turn_num}/{total_turns}
+**Status:** {status.title()}
+**Timestamp:** {timestamp}
+**Query:** {query}
+
+---
+
+"""
+
+            # Get content from /results
+            content = results_data.get('content', {})
+            final_report = content.get('final_report', '')
+
+            # Show final report FIRST (if available and turn is completed)
+            if final_report and status == 'completed':
+                result_display += f"""## 📋 Final Report
+
+{final_report}
+
+---
+
+"""
+
+            # Get images from /results
+            turn_images = []
+            files = results_data.get('files', {})
+            if 'images' in files and files['images']:
+                print(f"Found {len(files['images'])} images for turn {turn_num}")
+                turn_images = download_images_from_urls(files['images'])
+                result_display += f"\n\n**📸 {len(turn_images)} images from this turn**\n\n"
+
+            # Step 2: For completed sessions, get thinking process from /snapshots separately
+            if status == 'completed':
+                snapshots_data = client.get_snapshots(session_id, user_id, turn_number=turn_number)
+                if snapshots_data and 'snapshots' in snapshots_data:
+                    snapshots = snapshots_data['snapshots']
+                    if snapshots:
+                        snapshot_count = len(snapshots)
+                        result_display += f"""## 🧠 Thinking Process ({snapshot_count} steps)
+
+"""
+                        for idx, snapshot in enumerate(snapshots, 1):
+                            snapshot_text = snapshot.get('content', snapshot.get('text', ''))
+                            if snapshot_text:
+                                # Truncate very long snapshots
+                                if len(snapshot_text) > 500:
+                                    snapshot_text = snapshot_text[:500] + "... (truncated)"
+                                result_display += f"""**Step {idx}:**
+```
+{snapshot_text}
+```
+
+"""
+                        result_display += "---\n\n"
+
+            if turn_images:
+                return gr.update(value=result_display, visible=True), gr.update(value=turn_images, visible=True)
+            else:
+                return gr.update(value=result_display, visible=True), gr.update(value=[], visible=False)
 
         # Wire up events
 
@@ -887,15 +1537,29 @@ Completed tasks cannot be stopped."""  # Reset stop results
         # Refresh status session list
         refresh_status_history_btn.click(
             fn=refresh_status_history,
-            inputs=[user_id_input],
-            outputs=[status_session_selector]
+            inputs=[user_id_input, status_offset_state],
+            outputs=[status_session_selector, status_total_state, status_offset_state, status_pagination_info]
+        )
+
+        # Load more sessions for status
+        load_more_status_btn.click(
+            fn=load_more_status_sessions,
+            inputs=[user_id_input, status_offset_state, status_total_state],
+            outputs=[status_session_selector, status_offset_state, status_pagination_info]
         )
 
         # Check status using dropdown selection
         check_btn.click(
             fn=check_status_from_dropdown,
             inputs=[status_session_selector, server_url, user_id_input],
-            outputs=[status_results]
+            outputs=[status_results, status_images_gallery, status_turn_selector_group, status_turn_selector, current_status_session_id]
+        )
+
+        # Turn selector for status check
+        status_turn_selector.change(
+            fn=view_status_turn,
+            inputs=[current_status_session_id, status_turn_selector, server_url, user_id_input],
+            outputs=[status_results, status_images_gallery]
         )
 
         clear_status_btn.click(
@@ -906,8 +1570,15 @@ Completed tasks cannot be stopped."""  # Reset stop results
         # Stop task events
         refresh_stop_history_btn.click(
             fn=refresh_stop_history,
-            inputs=[user_id_input],
-            outputs=[stop_session_selector]
+            inputs=[user_id_input, stop_offset_state],
+            outputs=[stop_session_selector, stop_total_state, stop_offset_state, stop_pagination_info]
+        )
+
+        # Load more sessions for stop
+        load_more_stop_btn.click(
+            fn=load_more_stop_sessions,
+            inputs=[user_id_input, stop_offset_state, stop_total_state],
+            outputs=[stop_session_selector, stop_offset_state, stop_total_state, stop_pagination_info]
         )
 
         stop_task_btn.click(
@@ -928,22 +1599,27 @@ Completed tasks cannot be stopped."""  # Reset stop results
                 return (
                     gr.update(visible=True),   # new_conversation_group
                     gr.update(visible=False),  # continue_conversation_group
-                    gr.update(visible=False),  # refresh_multiturn_sessions_btn
-                    gr.update(visible=False)   # existing_session_selector
+                    gr.update(visible=False),  # session_controls_row
+                    gr.update(visible=False),  # existing_session_selector
+                    gr.update(visible=False)   # sessions_pagination_info
                 )
             else:  # Continue Existing Session
                 return (
                     gr.update(visible=False),  # new_conversation_group
                     gr.update(visible=True),   # continue_conversation_group
-                    gr.update(visible=True),   # refresh_multiturn_sessions_btn
-                    gr.update(visible=True)    # existing_session_selector
+                    gr.update(visible=True),   # session_controls_row
+                    gr.update(visible=True),   # existing_session_selector
+                    gr.update(visible=True)    # sessions_pagination_info
                 )
 
-        def get_multiturn_sessions(url, user_id=None):
-            """Get list of multi-turn sessions"""
+        def get_multiturn_sessions(url, user_id=None, limit=10, offset=0):
+            """Get list of multi-turn sessions with pagination"""
             try:
                 client = FastAPIClient(url)
-                sessions_data = client.get_all_multiturn_sessions(user_id)
+                result = client.get_all_multiturn_sessions(user_id, limit=limit, offset=offset)
+                sessions_data = result.get("sessions", [])
+                total = result.get("total", 0)
+
                 if sessions_data:
                     choices = []
                     for session in sessions_data:
@@ -954,21 +1630,56 @@ Completed tasks cannot be stopped."""  # Reset stop results
                         # Create a readable display name
                         display_name = f"{session_id[:8]}... | {status} | {turns} turns | {first_query[:30]}..."
                         choices.append((display_name, session_id))
-                    return choices
-                return []
+                    return choices, total
+                return [], 0
             except Exception as e:
                 print(f"Error getting multiturn sessions: {e}")
-                return []
+                return [], 0
 
         def get_all_multiturn_sessions(url, user_id=None):
             """Get all multi-turn sessions as dropdown choices for sharing"""
-            choices = get_multiturn_sessions(url, user_id)
-            return gr.update(choices=choices, value="")
+            choices, total = get_multiturn_sessions(url, user_id, limit=10, offset=0)
+            return gr.update(choices=choices, value=""), total
 
-        def refresh_multiturn_sessions(url, user_id):
-            """Refresh the multi-turn sessions dropdown"""
-            choices = get_multiturn_sessions(url, user_id)
-            return gr.update(choices=choices, value="")
+        def refresh_multiturn_sessions(url, user_id, offset=0):
+            """Refresh the multi-turn sessions dropdown with pagination"""
+            choices, total = get_multiturn_sessions(url, user_id, limit=10, offset=offset)
+
+            # Create pagination info text
+            showing_start = offset + 1 if total > 0 else 0
+            showing_end = min(offset + 10, total)
+            pagination_text = f"**Showing {showing_start}-{showing_end} of {total} sessions**"
+
+            return (
+                gr.update(choices=choices, value=""),  # existing_session_selector
+                total,  # sessions_total_state
+                offset,  # sessions_offset_state
+                gr.update(value=pagination_text, visible=True)  # sessions_pagination_info
+            )
+
+        def load_more_sessions(url, user_id, current_offset, total):
+            """Load next batch of sessions"""
+            new_offset = current_offset + 10
+            if new_offset >= total:
+                # Already at the end
+                return (
+                    gr.update(),  # existing_session_selector (no change)
+                    current_offset,  # sessions_offset_state (no change)
+                    gr.update(value=f"**Showing all {total} sessions (end of list)**", visible=True)
+                )
+
+            choices, total = get_multiturn_sessions(url, user_id, limit=10, offset=new_offset)
+
+            # Create pagination info text
+            showing_start = new_offset + 1
+            showing_end = min(new_offset + 10, total)
+            pagination_text = f"**Showing {showing_start}-{showing_end} of {total} sessions**"
+
+            return (
+                gr.update(choices=choices, value=""),  # existing_session_selector
+                new_offset,  # sessions_offset_state
+                gr.update(value=pagination_text, visible=True)  # sessions_pagination_info
+            )
 
         def start_new_conversation(query, language, files, url, user_id):
             """Start a new multi-turn conversation"""
@@ -1086,13 +1797,19 @@ Please wait while I process your follow-up request..."""
         session_mode.change(
             fn=toggle_session_mode,
             inputs=[session_mode],
-            outputs=[new_conversation_group, continue_conversation_group, refresh_multiturn_sessions_btn, existing_session_selector]
+            outputs=[new_conversation_group, continue_conversation_group, session_controls_row, existing_session_selector, sessions_pagination_info]
         )
 
         refresh_multiturn_sessions_btn.click(
             fn=refresh_multiturn_sessions,
-            inputs=[server_url, user_id_input],
-            outputs=[existing_session_selector]
+            inputs=[server_url, user_id_input, sessions_offset_state],
+            outputs=[existing_session_selector, sessions_total_state, sessions_offset_state, sessions_pagination_info]
+        )
+
+        load_more_sessions_btn.click(
+            fn=load_more_sessions,
+            inputs=[server_url, user_id_input, sessions_offset_state, sessions_total_state],
+            outputs=[existing_session_selector, sessions_offset_state, sessions_pagination_info]
         )
 
         start_conversation_btn.click(
@@ -1117,9 +1834,35 @@ Please wait while I process your follow-up request..."""
             outputs=[continue_query, continue_files]
         )
 
+        # Turn navigation event handlers
+        view_session_btn.click(
+            fn=view_multiturn_session,
+            inputs=[existing_session_selector, server_url, user_id_input],
+            outputs=[conversation_display, turn_navigation_group, turn_selector, turn_images_gallery, current_session_id_state]
+        )
+
+        turn_selector.change(
+            fn=view_specific_turn,
+            inputs=[current_session_id_state, turn_selector, server_url, user_id_input],
+            outputs=[conversation_display, turn_images_gallery]
+        )
+
+        refresh_turn_btn.click(
+            fn=view_multiturn_session,
+            inputs=[current_session_id_state, server_url, user_id_input],
+            outputs=[conversation_display, turn_navigation_group, turn_selector, turn_images_gallery, current_session_id_state]
+        )
+
+        # ========================================================================
+        # MetaAgent Tab - HIDDEN (Still in Development)
+        # ========================================================================
+        # NOTE: MetaAgent functionality is commented out but preserved for future use
+        # To re-enable, uncomment the code block below
+        # ========================================================================
+        """
         # MetaAgent Tab - Complex Multi-Step Tasks
         with gr.Tab("🧬 MetaAgent (Complex Tasks)"):
-            gr.Markdown("""
+            gr.Markdown('''
             # 🧬 MetaAgent: Process Multiple Items in Parallel or Sequential Mode
 
             Perfect for tasks like:
@@ -1130,17 +1873,17 @@ Please wait while I process your follow-up request..."""
             **Two Modes:**
             - **Parallel**: Fast, multiple workers simultaneously
             - **Sequential**: One batch at a time, full control, rate limiting support
-            """)
+            ''')
 
             with gr.Row():
                 with gr.Column():
                     meta_query = gr.Textbox(
                         label="Complex Query with File List",
-                        placeholder="""Example:
+                        placeholder='''Example:
 Analyze these papers:
 [paper1.pdf, paper2.pdf, paper3.pdf, ..., paper100.pdf]
 
-For each paper extract: title, authors, key findings""",
+For each paper extract: title, authors, key findings''',
                         lines=8
                     )
 
@@ -1169,7 +1912,7 @@ For each paper extract: title, authors, key findings""",
                     meta_session_output = gr.Textbox(label="Meta-Session ID", interactive=False)
                     meta_status_output = gr.Markdown("Ready to submit meta-task")
 
-            gr.Markdown("""
+            gr.Markdown('''
             ### 📋 Supported File Formats:
             - List: `[file1.pdf, file2.pdf, ...]`
             - Keyword: `Files: paper1.pdf, paper2.pdf, ...`
@@ -1177,7 +1920,7 @@ For each paper extract: title, authors, key findings""",
             - URLs: `https://example.com/paper.pdf`
 
             The MetaAgent will automatically detect files and assign them to workers!
-            """)
+            ''')
 
             # Helper functions for MetaAgent
             def toggle_meta_mode(mode):
@@ -1187,7 +1930,7 @@ For each paper extract: title, authors, key findings""",
                     return gr.update(visible=False), gr.update(visible=True)
 
             def submit_meta_task(query, mode, workers, batch_size, items_per_batch, pause, url, user_id):
-                """Submit a meta-task"""
+                '''Submit a meta-task'''
                 if not query.strip():
                     return "", "❌ Please enter a query"
 
@@ -1216,7 +1959,7 @@ For each paper extract: title, authors, key findings""",
                         session_id = data["meta_session_id"]
                         message = data.get("message", "Submitted")
 
-                        status_md = f"""## ✅ Meta-Task Submitted!
+                        status_md = f'''## ✅ Meta-Task Submitted!
 
 **Session ID:** `{session_id}`
 **Mode:** {mode.upper()}
@@ -1231,7 +1974,7 @@ For each paper extract: title, authors, key findings""",
 ```bash
 curl {url}/meta-task/{session_id}/status
 ```
-"""
+'''
                         return session_id, status_md
                     else:
                         return "", f"❌ Error: {response.text}"
@@ -1252,6 +1995,10 @@ curl {url}/meta-task/{session_id}/status
                        meta_items_per_batch, meta_pause, server_url, user_id_input],
                 outputs=[meta_session_output, meta_status_output]
             )
+        """
+        # ========================================================================
+        # End of MetaAgent Tab (Hidden)
+        # ========================================================================
 
         # Delete Management Tab (Simplified - Hard Delete Only)
         with gr.Tab("🗑️ Delete Sessions"):
