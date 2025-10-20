@@ -40,20 +40,21 @@ description = [
             }
         ],
     },
-    {
-        "description": "Query Google Scholar for papers based on the provided search "
-        "query and return the first search result.",
-        "name": "query_scholar",
-        "optional_parameters": [],
-        "required_parameters": [
-            {
-                "default": None,
-                "description": "The search query string.",
-                "name": "query",
-                "type": "str",
-            }
-        ],
-    },
+    # DISABLED: Google Scholar tool is not being used
+    # {
+    #     "description": "Query Google Scholar for papers based on the provided search "
+    #     "query and return the first search result.",
+    #     "name": "query_scholar",
+    #     "optional_parameters": [],
+    #     "required_parameters": [
+    #         {
+    #             "default": None,
+    #             "description": "The search query string.",
+    #             "name": "query",
+    #             "type": "str",
+    #         }
+    #     ],
+    # },
     {
         "description": "Query PubMed for papers based on the provided search query.",
         "name": "query_pubmed",

@@ -118,29 +118,30 @@ def query_arxiv(query: str, max_papers: int = 10) -> str:
         return f"Error querying arXiv: {e}"
 
 
-def query_scholar(query: str) -> str:
-    """Query Google Scholar for papers based on the provided search query.
-
-    Parameters
-    ----------
-    - query (str): The search query string.
-
-    Returns
-    -------
-    - str: The first search result formatted or an error message.
-
-    """
-    from scholarly import scholarly
-
-    try:
-        search_query = scholarly.search_pubs(query)
-        result = next(search_query, None)
-        if result:
-            return f"Title: {result['bib']['title']}\nYear: {result['bib']['pub_year']}\nVenue: {result['bib']['venue']}\nAbstract: {result['bib']['abstract']}"
-        else:
-            return "No results found on Google Scholar."
-    except Exception as e:
-        return f"Error querying Google Scholar: {e}"
+# DISABLED: Google Scholar tool is not being used
+# def query_scholar(query: str) -> str:
+#     """Query Google Scholar for papers based on the provided search query.
+#
+#     Parameters
+#     ----------
+#     - query (str): The search query string.
+#
+#     Returns
+#     -------
+#     - str: The first search result formatted or an error message.
+#
+#     """
+#     from scholarly import scholarly
+#
+#     try:
+#         search_query = scholarly.search_pubs(query)
+#         result = next(search_query, None)
+#         if result:
+#             return f"Title: {result['bib']['title']}\nYear: {result['bib']['pub_year']}\nVenue: {result['bib']['venue']}\nAbstract: {result['bib']['abstract']}"
+#         else:
+#             return "No results found on Google Scholar."
+#     except Exception as e:
+#         return f"Error querying Google Scholar: {e}"
 
 
 def query_pubmed(query: str, max_papers: int = 10, max_retries: int = 3) -> str:

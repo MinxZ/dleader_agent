@@ -140,7 +140,8 @@ library_content_dict = {
     "scikit-image": "[Python Package] A collection of algorithms for image processing in Python.",
     "pymed": "[Python Package] A Python library for accessing PubMed articles.",
     "arxiv": "[Python Package] A Python wrapper for the arXiv API, allowing access to scientific papers.",
-    "scholarly": "[Python Package] A module to retrieve author and publication information from Google Scholar.",
+    # DISABLED: Google Scholar is not being used
+    # "scholarly": "[Python Package] A module to retrieve author and publication information from Google Scholar.",
     "cryosparc-tools": "[Python Package] Tools for working with cryoSPARC, a platform for cryo-EM data processing.",
     "mageck": "[Python Package] Analysis of CRISPR screen data.",
     "igraph": "[Python Package] Network analysis and visualization.",

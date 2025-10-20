@@ -3160,6 +3160,61 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
     if not session_data.get("is_complete", False):
         raise HTTPException(status_code=400, detail="Session is not yet complete")
 
+    # For multi-turn sessions with specific turn_number, return turn-specific results
+    if turn_number is not None and (current_turn is not None or total_turns is not None):
+        # Load full multiturn session to get turn data
+        unified_manager_mt = get_unified_session_manager(queue_manager)
+        cloud_multiturn_session = await unified_manager_mt.get_multiturn_session_by_id(session_id)
+
+        if cloud_multiturn_session and "turns" in cloud_multiturn_session:
+            turns = cloud_multiturn_session["turns"]
+            # Find the specified turn
+            target_turn = None
+            if isinstance(turns, list):
+                for turn in turns:
+                    if turn.get("turn_number") == turn_number:
+                        target_turn = turn
+                        break
+
+            if target_turn:
+                # Get turn-specific results
+                turn_files = target_turn.get("files", {})
+
+                # Try to include S3 files (like images) from cloud storage
+                try:
+                    cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+                    if cloud_session and "s3_files" in cloud_session:
+                        s3_files = cloud_session["s3_files"]
+                        # Merge S3 files (especially images) into turn files
+                        if isinstance(turn_files, dict):
+                            # Add images from S3 if not already in turn_files
+                            if "images" in s3_files and "images" not in turn_files:
+                                turn_files["images"] = s3_files["images"]
+                except Exception as e:
+                    print(f"Warning: Could not retrieve S3 files for turn results: {e}")
+
+                # Generate URLs for turn files
+                if turn_files:
+                    turn_files = generate_file_urls(turn_files, session_id)
+
+                # Return turn-specific results
+                result = {
+                    "session_id": session_id,
+                    "turn_number": turn_number,
+                    "current_turn": current_turn,
+                    "total_turns": total_turns,
+                    "status": target_turn.get("status", "completed"),
+                    "timestamp": target_turn.get("timestamp"),
+                    "language": cloud_multiturn_session.get("language", "en"),
+                    "query": target_turn.get("query"),
+                    "files": turn_files,
+                    "content": {
+                        "thinking_content": target_turn.get("response_content", ""),
+                        "final_report": target_turn.get("final_report", "")
+                    }
+                }
+                return result
+
     # For cloud sessions, retrieve from MongoDB
     storage_location = session_data.get("_storage_location", "unknown")
     if storage_location == "cloud":
@@ -3208,6 +3263,49 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
             result["current_turn"] = current_turn
             result["total_turns"] = total_turns
         return result
+
+    # Check if local files exist, if not try to get S3 files from cloud storage
+    if "files" in json_result:
+        # Check if any local files are missing
+        files = json_result["files"]
+        has_missing_files = False
+        import os
+
+        if isinstance(files, dict):
+            for key, value in files.items():
+                if isinstance(value, list):
+                    for item in value:
+                        # Handle both string paths and dict objects
+                        if isinstance(item, str):
+                            if not os.path.exists(item):
+                                has_missing_files = True
+                                break
+                        elif isinstance(item, dict) and "path" in item:
+                            if not os.path.exists(item["path"]):
+                                has_missing_files = True
+                                break
+                elif isinstance(value, dict) and "path" in value:
+                    if not os.path.exists(value["path"]):
+                        has_missing_files = True
+                        break
+                elif isinstance(value, str):
+                    # Handle single string path
+                    if not os.path.exists(value):
+                        has_missing_files = True
+                        break
+                if has_missing_files:
+                    break
+
+        # If local files are missing, try to get S3 files from cloud
+        if has_missing_files:
+            try:
+                cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+                if cloud_session and "s3_files" in cloud_session:
+                    # Merge cloud S3 files into json_result
+                    print(f"Local files missing for session {session_id}, using S3 files from cloud storage")
+                    json_result["files"] = cloud_session["s3_files"]
+            except Exception as e:
+                print(f"Warning: Could not retrieve S3 files from cloud for session {session_id}: {e}")
 
     # Generate URLs for any files in the result
     if "files" in json_result:
@@ -3271,10 +3369,24 @@ async def get_session_snapshots(session_id: str, user_id: str, turn_number: Opti
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     current_turn = None
     total_turns = None
-    if multiturn_session:
+
+    # If not in memory, try to load from cloud
+    if not multiturn_session:
+        try:
+            unified_manager = get_unified_session_manager(queue_manager)
+            cloud_multiturn_session = await unified_manager.get_multiturn_session_by_id(session_id)
+            if cloud_multiturn_session:
+                current_turn = cloud_multiturn_session.get("current_turn")
+                total_turns = cloud_multiturn_session.get("total_turns")
+        except Exception as e:
+            print(f"Could not load multiturn session info from cloud: {e}")
+    else:
         current_turn = multiturn_session.current_turn
         total_turns = multiturn_session.total_turns
-        # If turn_number not specified, use current turn
+
+    # Process turn_number if we have turn information
+    if current_turn is not None and total_turns is not None:
+        # If turn_number not specified, use current turn (latest)
         if turn_number is None:
             turn_number = current_turn
         # Validate turn_number is within range
@@ -3293,7 +3405,65 @@ async def get_session_snapshots(session_id: str, user_id: str, turn_number: Opti
     if session_user_id and session_user_id != user_id:
         raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-    # For cloud sessions, get snapshots from S3
+    # For multi-turn sessions with specific turn_number, return turn-specific snapshot
+    if turn_number is not None and (current_turn is not None or total_turns is not None):
+        # Load full multiturn session to get turn data
+        unified_manager_mt = get_unified_session_manager(queue_manager)
+        cloud_multiturn_session = await unified_manager_mt.get_multiturn_session_by_id(session_id)
+
+        if cloud_multiturn_session and "turns" in cloud_multiturn_session:
+            turns = cloud_multiturn_session["turns"]
+            # Find the specified turn
+            target_turn = None
+            if isinstance(turns, list):
+                for turn in turns:
+                    if turn.get("turn_number") == turn_number:
+                        target_turn = turn
+                        break
+
+            if target_turn:
+                # Return turn-specific snapshot (files and state for this turn)
+                turn_files = target_turn.get("files", {})
+
+                # Try to include S3 files (like images) from cloud storage
+                # This applies to both cloud and local sessions that have been uploaded to S3
+                try:
+                    cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+                    if cloud_session and "s3_files" in cloud_session:
+                        s3_files = cloud_session["s3_files"]
+                        # Merge S3 files (especially images) into turn files
+                        if isinstance(turn_files, dict):
+                            # Add images from S3 if not already in turn_files
+                            if "images" in s3_files and "images" not in turn_files:
+                                turn_files["images"] = s3_files["images"]
+                            # Add other S3 file categories if needed
+                            for key in ["snapshots"]:
+                                if key in s3_files and key not in turn_files:
+                                    turn_files[key] = s3_files[key]
+                except Exception as e:
+                    print(f"Warning: Could not retrieve S3 files for turn snapshot: {e}")
+
+                # Generate URLs for turn files
+                if turn_files:
+                    turn_files = generate_file_urls(turn_files, session_id)
+
+                result = {
+                    "session_id": session_id,
+                    "turn_number": turn_number,
+                    "current_turn": current_turn,
+                    "total_turns": total_turns,
+                    "turn_snapshot": {
+                        "query": target_turn.get("query"),
+                        "final_report": target_turn.get("final_report"),
+                        "status": target_turn.get("status"),
+                        "timestamp": target_turn.get("timestamp"),
+                        "files": turn_files
+                    },
+                    "storage_location": "turn_specific"
+                }
+                return result
+
+    # For cloud sessions, get session-level snapshots from S3
     storage_location = session_data.get("_storage_location", "unknown")
     if storage_location == "cloud":
         cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
@@ -3320,7 +3490,7 @@ async def get_session_snapshots(session_id: str, user_id: str, turn_number: Opti
                 "storage_location": "cloud"
             }
             # Add turn information
-            if multiturn_session:
+            if current_turn is not None:
                 result["turn_number"] = turn_number
                 result["current_turn"] = current_turn
                 result["total_turns"] = total_turns
@@ -3397,10 +3567,61 @@ async def continue_session(
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
 
-    # Check if multi-turn session exists
+    # Check if multi-turn session exists in memory
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
+
+    # If not in memory, try to load from cloud storage
     if not multiturn_session:
-        raise HTTPException(status_code=404, detail="Multi-turn session not found")
+        try:
+            unified_manager = get_unified_session_manager(queue_manager)
+            cloud_session_data = await unified_manager.get_multiturn_session_by_id(session_id)
+
+            if cloud_session_data:
+                # Verify user owns this session before restoring
+                session_user_id = cloud_session_data.get("user_id")
+                if session_user_id and session_user_id != user_id:
+                    raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
+                # Restore session to memory from cloud data
+                multiturn_session = MultiTurnSession(
+                    session_id=cloud_session_data.get("session_id"),
+                    user_id=cloud_session_data.get("user_id"),
+                    language=cloud_session_data.get("language", "en"),
+                    created_at=cloud_session_data.get("created_at", datetime.now().isoformat()),
+                    last_updated=cloud_session_data.get("last_updated", datetime.now().isoformat()),
+                    total_turns=cloud_session_data.get("total_turns", 0),
+                    current_turn=cloud_session_data.get("current_turn", 0),
+                    accumulated_context=cloud_session_data.get("accumulated_context", ""),
+                    session_status=cloud_session_data.get("session_status", "active"),
+                    session_name=cloud_session_data.get("session_name", "")
+                )
+
+                # Restore turns
+                if "turns" in cloud_session_data and isinstance(cloud_session_data["turns"], list):
+                    for turn_data in cloud_session_data["turns"]:
+                        turn = ConversationTurn(
+                            turn_number=turn_data.get("turn_number"),
+                            query=turn_data.get("query", ""),
+                            final_report=turn_data.get("final_report"),
+                            response_content=turn_data.get("response_content"),
+                            files=turn_data.get("files"),
+                            timestamp=turn_data.get("timestamp", datetime.now().isoformat()),
+                            status=turn_data.get("status", "completed")
+                        )
+                        multiturn_session.turns.append(turn)
+
+                # Add back to in-memory sessions
+                queue_manager.multiturn_sessions[session_id] = multiturn_session
+                print(f"Restored session {session_id} from cloud storage to continue conversation")
+            else:
+                raise HTTPException(status_code=404, detail="Multi-turn session not found")
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"Error loading session from cloud: {e}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=404, detail="Multi-turn session not found")
 
     # Verify user owns this session
     if multiturn_session.user_id and multiturn_session.user_id != user_id:
@@ -3576,11 +3797,58 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
         if session_user_id and session_user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
+        # Get cloud session data in case we need S3 files
+        cloud_session = None
+
         # Process turns: generate URLs and optionally exclude thinking process
         if "turns" in session and isinstance(session["turns"], list):
             for turn in session["turns"]:
                 # Generate URLs for files in each turn
                 if "files" in turn:
+                    # Check if local files are missing
+                    files = turn["files"]
+                    has_missing_files = False
+                    import os
+
+                    if isinstance(files, dict):
+                        for key, value in files.items():
+                            if isinstance(value, list):
+                                for item in value:
+                                    # Handle both string paths and dict objects
+                                    if isinstance(item, str):
+                                        if not os.path.exists(item):
+                                            has_missing_files = True
+                                            break
+                                    elif isinstance(item, dict) and "path" in item:
+                                        if not os.path.exists(item["path"]):
+                                            has_missing_files = True
+                                            break
+                            elif isinstance(value, dict) and "path" in value:
+                                if not os.path.exists(value["path"]):
+                                    has_missing_files = True
+                                    break
+                            elif isinstance(value, str):
+                                # Handle single string path
+                                if not os.path.exists(value):
+                                    has_missing_files = True
+                                    break
+                            if has_missing_files:
+                                break
+
+                    # If local files are missing, try to get S3 files from cloud (once)
+                    if has_missing_files and cloud_session is None:
+                        try:
+                            cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+                            if cloud_session:
+                                print(f"Local files missing for session {session_id}, fetched S3 files from cloud storage")
+                        except Exception as e:
+                            print(f"Warning: Could not retrieve S3 files from cloud for session {session_id}: {e}")
+                            cloud_session = {}  # Set to empty dict to avoid retrying
+
+                    # If we have cloud S3 files, merge them for this turn
+                    if has_missing_files and cloud_session and "s3_files" in cloud_session:
+                        turn["files"] = cloud_session["s3_files"]
+
                     turn["files"] = generate_file_urls(turn["files"], session_id)
 
                 # Remove thinking process unless explicitly requested
