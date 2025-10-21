@@ -281,6 +281,10 @@ class QueueManager:
         # Start the queue processor
         self.processor_thread = threading.Thread(target=self._process_queue, daemon=True)
         self.processor_thread.start()
+
+        # Start periodic cleanup thread for old cached sessions
+        self.cleanup_thread = threading.Thread(target=self._periodic_cache_cleanup, daemon=True)
+        self.cleanup_thread.start()
     
     def add_request(self, user_request: UserRequest) -> int:
         """Add request to queue and return position"""
@@ -1142,7 +1146,7 @@ Reasoning: {user_request.template_reasoning}
                     } for turn in session.turns
                 ]
             }
-            # Upload to cloud asynchronously
+            # Upload to cloud asynchronously and cleanup memory after successful upload
             def upload_multiturn_in_thread():
                 import asyncio
                 try:
@@ -1150,6 +1154,30 @@ Reasoning: {user_request.template_reasoning}
                     asyncio.set_event_loop(loop)
                     loop.run_until_complete(cloud_storage_manager.upload_multiturn_session(multiturn_session_data))
                     loop.close()
+                    print(f"Successfully uploaded multi-turn session {session_id} to cloud")
+
+                    # If all turns are completed, clean up memory after delay (allow time for final queries)
+                    if session and session.total_turns == turn_number:
+                        print(f"All turns completed for session {session_id}, scheduling memory cleanup")
+                        time.sleep(10)  # Wait 10 seconds to ensure upload is fully complete
+                        if session_id in self.multiturn_sessions:
+                            # Check session age - only remove if older than 1 hour or explicitly completed
+                            session_obj = self.multiturn_sessions[session_id]
+                            last_updated_str = session_obj.last_updated
+                            try:
+                                from datetime import datetime
+                                last_updated = datetime.fromisoformat(last_updated_str)
+                                age_hours = (datetime.now() - last_updated).total_seconds() / 3600
+                                # Remove if older than 1 hour OR if session is marked completed
+                                if age_hours > 1.0 or session_obj.session_status == "completed":
+                                    del self.multiturn_sessions[session_id]
+                                    print(f"Removed completed session {session_id} from memory (age: {age_hours:.2f}h)")
+                                else:
+                                    print(f"Keeping recent session {session_id} in cache (age: {age_hours:.2f}h)")
+                            except Exception as e:
+                                # If date parsing fails, just remove it
+                                del self.multiturn_sessions[session_id]
+                                print(f"Removed session {session_id} from memory: {e}")
                 except Exception as e:
                     print(f"Background multiturn cloud upload failed for session {session_id}: {e}")
 
@@ -1184,7 +1212,51 @@ Reasoning: {user_request.template_reasoning}
                 with self.processing_lock:
                     self.is_processing = False
                     self.current_processing_session = None
-    
+
+    def _periodic_cache_cleanup(self):
+        """Periodically clean up old cached sessions from memory (keep cache fresh)"""
+        while True:
+            try:
+                # Run cleanup every 30 minutes
+                time.sleep(1800)
+
+                sessions_to_remove = []
+                current_time = datetime.now()
+
+                # Check all multiturn sessions in memory
+                for session_id, session in self.multiturn_sessions.items():
+                    try:
+                        # Parse last_updated timestamp
+                        last_updated_str = session.last_updated
+                        last_updated = datetime.fromisoformat(last_updated_str)
+                        age_hours = (current_time - last_updated).total_seconds() / 3600
+
+                        # Remove sessions older than 1 hour that are completed
+                        if age_hours > 1.0 and session.session_status == "completed":
+                            sessions_to_remove.append(session_id)
+                    except Exception as e:
+                        # If we can't parse the date, skip this session
+                        print(f"Warning: Could not check age for session {session_id}: {e}")
+                        continue
+
+                # Remove identified sessions
+                for session_id in sessions_to_remove:
+                    try:
+                        del self.multiturn_sessions[session_id]
+                        print(f"[Cache Cleanup] Removed old completed session {session_id} from memory")
+                    except Exception as e:
+                        print(f"Warning: Could not remove session {session_id}: {e}")
+
+                if sessions_to_remove:
+                    print(f"[Cache Cleanup] Removed {len(sessions_to_remove)} old sessions from cache")
+                else:
+                    print(f"[Cache Cleanup] No old sessions to remove (current cache size: {len(self.multiturn_sessions)})")
+
+            except Exception as e:
+                print(f"Error in periodic cache cleanup: {e}")
+                # Continue running even if there's an error
+                continue
+
     def _process_user_request(self, user_request: UserRequest):
         """Process a single user request"""
         try:
@@ -1630,12 +1702,19 @@ Reasoning: {user_request.template_reasoning}
                     final_report_content = f"## ❌ Error Report\n\n```\n{user_request.error}\n```"
                 else:
                     raw_result = user_request.result or 'Processing completed successfully.'
+
+                    # Extract content from <solution> tags if present
                     if '<solution>' in raw_result and '</solution>' in raw_result:
                         start_idx = raw_result.find('<solution>') + len('<solution>')
                         end_idx = raw_result.find('</solution>')
                         solution_content = raw_result[start_idx:end_idx].strip()
                     else:
                         solution_content = raw_result
+
+                    # Remove any remaining XML-like tags that might interfere with HTML/Markdown rendering
+                    import re
+                    # Remove all XML-like tags (e.g., <tag>, </tag>, <tag attr="value">)
+                    solution_content = re.sub(r'</?[a-zA-Z_][a-zA-Z0-9_]*(?:\s+[^>]*)?>', '', solution_content)
 
                     final_report_content = f"## ✅ Final Report\n\n{solution_content}"
 
@@ -2971,6 +3050,58 @@ async def download_individual_file(session_id: str, filename: str, user_id: str)
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
 
+def append_images_to_report(final_report: str, files_data: dict) -> str:
+    """
+    Append images to the final report in Markdown format
+
+    Args:
+        final_report: The original final report content
+        files_data: Dictionary containing file information with URLs
+
+    Returns:
+        Enhanced final report with images appended
+    """
+    if not files_data or not isinstance(files_data, dict):
+        return final_report
+
+    # Extract images from files_data
+    images = files_data.get("images", [])
+    if not images:
+        return final_report
+
+    # Start building the images section
+    images_section = "\n\n---\n\n## 📊 Generated Images\n\n"
+
+    # Process each image
+    image_count = 0
+    for image_item in images:
+        # Handle both dict and string formats
+        if isinstance(image_item, dict):
+            filename = image_item.get("filename", "image")
+            url = image_item.get("url")
+            s3_key = image_item.get("s3_key")
+
+            if url:
+                # Use the presigned URL (works with S3 URLs even without .png/.jpg extension)
+                image_count += 1
+                # Extract a cleaner name from filename or s3_key
+                display_name = filename.replace("_", " ").replace("-", " ").title()
+                images_section += f"### {display_name}\n\n"
+                images_section += f"![{display_name}]({url})\n\n"
+        elif isinstance(image_item, str):
+            # Handle string URL directly
+            image_count += 1
+            display_name = f"Image {image_count}"
+            images_section += f"### {display_name}\n\n"
+            images_section += f"![{display_name}]({image_item})\n\n"
+
+    # Only append the section if we found images
+    if image_count > 0:
+        return final_report + images_section
+
+    return final_report
+
+
 def generate_file_urls(files_data, session_id: str = None):
     """
     Helper function to convert file paths/S3 keys to accessible URLs
@@ -2999,21 +3130,39 @@ def generate_file_urls(files_data, session_id: str = None):
             if os.path.exists(file_path) and session_id:
                 try:
                     s3_key = f"sessions/{session_id}/files/{filename}"
-                    # Upload to S3 using boto3 client
-                    cloud_storage_manager.s3_client.upload_file(
-                        file_path,
-                        cloud_storage_manager.bucket_name,
-                        s3_key
-                    )
-                    url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
-                    print(f"✓ Uploaded {filename} to S3 and generated presigned URL")
-                    return {
-                        "path": file_path,
-                        "filename": filename,
-                        "s3_key": s3_key,
-                        "url": url,
-                        "expires_at": (datetime.now() + timedelta(hours=2)).isoformat()
-                    }
+
+                    # Check if file already exists in S3 first
+                    try:
+                        cloud_storage_manager.s3_client.head_object(
+                            Bucket=cloud_storage_manager.bucket_name,
+                            Key=s3_key
+                        )
+                        # File exists in S3, just generate presigned URL without uploading
+                        url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
+                        print(f"✓ File {filename} already exists in S3, generated presigned URL")
+                        return {
+                            "path": file_path,
+                            "filename": filename,
+                            "s3_key": s3_key,
+                            "url": url,
+                            "expires_at": (datetime.now() + timedelta(hours=2)).isoformat()
+                        }
+                    except cloud_storage_manager.s3_client.exceptions.ClientError:
+                        # File doesn't exist in S3, upload it
+                        cloud_storage_manager.s3_client.upload_file(
+                            file_path,
+                            cloud_storage_manager.bucket_name,
+                            s3_key
+                        )
+                        url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
+                        print(f"✓ Uploaded {filename} to S3 and generated presigned URL")
+                        return {
+                            "path": file_path,
+                            "filename": filename,
+                            "s3_key": s3_key,
+                            "url": url,
+                            "expires_at": (datetime.now() + timedelta(hours=2)).isoformat()
+                        }
                 except Exception as e:
                     print(f"Warning: Failed to upload {filename} to S3: {e}")
 
@@ -3055,8 +3204,20 @@ def generate_file_urls(files_data, session_id: str = None):
                     else:
                         s3_key = f"sessions/{session_id}/files/{filename}"
 
-                    # Upload to S3 using boto3 client
+                    # Check if file already exists in S3 first
                     try:
+                        cloud_storage_manager.s3_client.head_object(
+                            Bucket=cloud_storage_manager.bucket_name,
+                            Key=s3_key
+                        )
+                        # File exists in S3, just generate presigned URL without uploading
+                        url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
+                        result["s3_key"] = s3_key
+                        result["url"] = url
+                        result["expires_at"] = (datetime.now() + timedelta(hours=2)).isoformat()
+                        print(f"✓ File {filename} already exists in S3, generated presigned URL")
+                    except cloud_storage_manager.s3_client.exceptions.ClientError:
+                        # File doesn't exist in S3, upload it
                         cloud_storage_manager.s3_client.upload_file(
                             file_path,
                             cloud_storage_manager.bucket_name,
@@ -3197,6 +3358,10 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                 if turn_files:
                     turn_files = generate_file_urls(turn_files, session_id)
 
+                # Append images to final report
+                final_report = target_turn.get("final_report", "")
+                final_report_with_images = append_images_to_report(final_report, turn_files)
+
                 # Return turn-specific results (NO thinking_content, NO snapshots)
                 result = {
                     "session_id": session_id,
@@ -3209,7 +3374,7 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                     "query": target_turn.get("query"),
                     "files": turn_files,
                     "content": {
-                        "final_report": target_turn.get("final_report", "")
+                        "final_report": final_report_with_images
                     }
                 }
                 return result
@@ -3224,12 +3389,16 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
             s3_files = cloud_session.get("s3_files", {})
             s3_files_with_urls = generate_file_urls(s3_files, session_id)
 
+            # Append images to final report
+            final_report = cloud_session.get("final_report", "")
+            final_report_with_images = append_images_to_report(final_report, s3_files_with_urls)
+
             # Return structured result (NO thinking_content, NO snapshots)
             result = {
                 "session_id": session_id,
                 "status": cloud_session.get("status", "completed"),
                 "content": {
-                    "final_report": cloud_session.get("final_report", "")
+                    "final_report": final_report_with_images
                 },
                 "files": s3_files_with_urls,  # Changed from s3_files to files for consistency
                 "result_summary": cloud_session.get("result_summary", {})
@@ -3310,6 +3479,15 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
         json_result["files"] = generate_file_urls(json_result["files"], session_id)
     if "s3_files" in json_result:
         json_result["s3_files"] = generate_file_urls(json_result["s3_files"], session_id)
+
+    # Append images to final report
+    if "content" in json_result and isinstance(json_result["content"], dict):
+        if "final_report" in json_result["content"]:
+            files_for_images = json_result.get("files") or json_result.get("s3_files", {})
+            json_result["content"]["final_report"] = append_images_to_report(
+                json_result["content"]["final_report"],
+                files_for_images
+            )
 
     # Add turn information if available
     if current_turn is not None and total_turns is not None:
@@ -3431,43 +3609,107 @@ async def get_session_snapshots(session_id: str, user_id: str, turn_number: Opti
                         break
 
             if target_turn:
-                # Return turn-specific snapshot (files and state for this turn)
+                # Return ONLY the thinking process TEXT for this turn
                 turn_files = target_turn.get("files", {})
+                thinking_process_file = turn_files.get("thinking_process") if turn_files else None
 
-                # Try to include S3 files (like images) from cloud storage
-                # This applies to both cloud and local sessions that have been uploaded to S3
-                try:
-                    cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
-                    if cloud_session and "s3_files" in cloud_session:
-                        s3_files = cloud_session["s3_files"]
-                        # Merge S3 files (especially images) into turn files
-                        if isinstance(turn_files, dict):
-                            # Add images from S3 if not already in turn_files
-                            if "images" in s3_files and "images" not in turn_files:
-                                turn_files["images"] = s3_files["images"]
-                            # Add other S3 file categories if needed
-                            for key in ["snapshots"]:
-                                if key in s3_files and key not in turn_files:
-                                    turn_files[key] = s3_files[key]
-                except Exception as e:
-                    print(f"Warning: Could not retrieve S3 files for turn snapshot: {e}")
+                print(f"[SNAPSHOTS DEBUG] Turn {turn_number} found")
+                print(f"[SNAPSHOTS DEBUG] turn_files keys: {list(turn_files.keys()) if turn_files else 'None'}")
+                print(f"[SNAPSHOTS DEBUG] thinking_process_file: {thinking_process_file}")
 
-                # Generate URLs for turn files
-                if turn_files:
-                    turn_files = generate_file_urls(turn_files, session_id)
+                # Read the thinking process text content
+                thinking_process_text = None
+                if thinking_process_file:
+                    try:
+                        # Handle both string paths (local) and dict (cloud metadata or enhanced metadata)
+                        if isinstance(thinking_process_file, str):
+                            # Local file path - check if exists and read
+                            print(f"[SNAPSHOTS DEBUG] Thinking process file is a string path: {thinking_process_file}")
+                            print(f"[SNAPSHOTS DEBUG] File exists: {os.path.exists(thinking_process_file)}")
+                            if os.path.exists(thinking_process_file):
+                                with open(thinking_process_file, 'r', encoding='utf-8') as f:
+                                    thinking_process_text = f.read()
+                                print(f"[SNAPSHOTS DEBUG] Read {len(thinking_process_text)} characters from file")
+                            else:
+                                print(f"[SNAPSHOTS DEBUG] File does not exist at path: {thinking_process_file}")
+                        elif isinstance(thinking_process_file, dict):
+                            # Dict can be either: 1) enhanced metadata with 'path', or 2) cloud S3 metadata with 's3_key'
+
+                            # First try 'path' key (enhanced local metadata)
+                            file_path = thinking_process_file.get("path")
+                            if file_path:
+                                print(f"[SNAPSHOTS DEBUG] Thinking process file is a dict with path: {file_path}")
+                                print(f"[SNAPSHOTS DEBUG] File exists: {os.path.exists(file_path)}")
+                                if os.path.exists(file_path):
+                                    with open(file_path, 'r', encoding='utf-8') as f:
+                                        thinking_process_text = f.read()
+                                    print(f"[SNAPSHOTS DEBUG] Read {len(thinking_process_text)} characters from file")
+                                else:
+                                    print(f"[SNAPSHOTS DEBUG] File does not exist locally at path: {file_path}")
+                                    print(f"[SNAPSHOTS DEBUG] Will try to retrieve from cloud storage...")
+
+                            # If no 'path', try 's3_key' (cloud metadata)
+                            elif thinking_process_file.get("s3_key"):
+                                s3_key = thinking_process_file.get("s3_key")
+                                print(f"[SNAPSHOTS DEBUG] Thinking process file is a dict with s3_key: {s3_key}")
+                                try:
+                                    # Download content from S3 (synchronous method)
+                                    content = cloud_storage_manager.download_file_content(s3_key)
+                                    if content:
+                                        thinking_process_text = content.decode('utf-8')
+                                        print(f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3")
+                                except Exception as e:
+                                    print(f"Warning: Could not download thinking process from S3: {e}")
+
+                        # If still not found, try to retrieve from cloud storage
+                        if not thinking_process_text:
+                            print(f"[SNAPSHOTS DEBUG] Attempting to retrieve from cloud storage...")
+                            try:
+                                cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+                                print(f"[SNAPSHOTS DEBUG] Cloud session found: {cloud_session is not None}")
+                                if cloud_session and "s3_files" in cloud_session:
+                                    s3_files = cloud_session["s3_files"]
+                                    print(f"[SNAPSHOTS DEBUG] s3_files keys: {list(s3_files.keys())}")
+
+                                    # Look for thinking process in S3 files
+                                    thinking_process_files = s3_files.get("thinking_process")
+                                    print(f"[SNAPSHOTS DEBUG] thinking_process files in S3: {thinking_process_files}")
+
+                                    if thinking_process_files:
+                                        # Handle both dict (single file) and list (multiple files)
+                                        files_to_check = []
+                                        if isinstance(thinking_process_files, dict):
+                                            files_to_check = [thinking_process_files]
+                                        elif isinstance(thinking_process_files, list):
+                                            files_to_check = thinking_process_files
+
+                                        for file_info in files_to_check:
+                                            if isinstance(file_info, dict) and "s3_key" in file_info:
+                                                print(f"[SNAPSHOTS DEBUG] Downloading from S3 key: {file_info['s3_key']}")
+                                                # Download content from S3 (synchronous method)
+                                                content = cloud_storage_manager.download_file_content(file_info["s3_key"])
+                                                if content:
+                                                    thinking_process_text = content.decode('utf-8')
+                                                    print(f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3")
+                                                    break
+                                else:
+                                    print(f"[SNAPSHOTS DEBUG] No s3_files in cloud session")
+                            except Exception as e:
+                                print(f"[SNAPSHOTS DEBUG] Error retrieving from cloud: {e}")
+                                import traceback
+                                traceback.print_exc()
+                    except Exception as e:
+                        print(f"Error reading thinking process file: {e}")
+
+                print(f"[SNAPSHOTS DEBUG] Final thinking_process_text length: {len(thinking_process_text) if thinking_process_text else 0}")
+                print(f"[SNAPSHOTS DEBUG] thinking_process_text is None: {thinking_process_text is None}")
 
                 result = {
                     "session_id": session_id,
                     "turn_number": turn_number,
                     "current_turn": current_turn,
                     "total_turns": total_turns,
-                    "turn_snapshot": {
-                        "query": target_turn.get("query"),
-                        "final_report": target_turn.get("final_report"),
-                        "status": target_turn.get("status"),
-                        "timestamp": target_turn.get("timestamp"),
-                        "files": turn_files
-                    },
+                    "thinking_process": thinking_process_text,
                     "storage_location": "turn_specific"
                 }
                 return result
@@ -3505,18 +3747,35 @@ async def get_session_snapshots(session_id: str, user_id: str, turn_number: Opti
                 result["total_turns"] = total_turns
             return result
 
-    # For local/active sessions, use existing snapshots
+    # For local/active sessions (in-progress), extract thinking process from periodic snapshots
+    periodic_snapshots = session_data.get("periodic_snapshots", [])
+    thinking_process_text = None
+
+    # Extract thinking content from the latest periodic snapshot
+    if periodic_snapshots and len(periodic_snapshots) > 0:
+        latest_snapshot = periodic_snapshots[-1]  # Get the most recent snapshot
+        print(f"[SNAPSHOTS DEBUG] Latest snapshot keys: {list(latest_snapshot.keys()) if isinstance(latest_snapshot, dict) else 'not a dict'}")
+
+        if isinstance(latest_snapshot, dict):
+            # Try to get thinking_content from the nested content object
+            content = latest_snapshot.get("content")
+            if isinstance(content, dict):
+                thinking_process_text = content.get("thinking_content")
+            # Fallback: try direct access
+            if not thinking_process_text:
+                thinking_process_text = latest_snapshot.get("thinking_content")
+
+    print(f"[SNAPSHOTS DEBUG] Local/active session - periodic_snapshots count: {len(periodic_snapshots)}")
+    print(f"[SNAPSHOTS DEBUG] Extracted thinking_process length: {len(thinking_process_text) if thinking_process_text else 0}")
+
     result = {
         "session_id": session_id,
-        "snapshot_count": len(session_data.get("periodic_snapshots", [])),
-        "snapshots": session_data.get("periodic_snapshots", []),
+        "turn_number": turn_number,
+        "current_turn": current_turn,
+        "total_turns": total_turns,
+        "thinking_process": thinking_process_text,
         "storage_location": storage_location
     }
-    # Add turn information
-    if multiturn_session:
-        result["turn_number"] = turn_number
-        result["current_turn"] = current_turn
-        result["total_turns"] = total_turns
     return result
 
 
@@ -4145,43 +4404,62 @@ async def get_shared_sessions(limit: int = 50, offset: int = 0):
 @app.post("/rename-multisession")
 async def rename_multisession(request: RenameMultiSessionRequest):
     """Rename a multi-turn session using Unified Session Manager"""
+    import time
+    start_total = time.time()
+
     try:
         session_id = request.session_id
         new_name = request.new_name
         user_id = request.user_id
 
         # Use Unified Session Manager to get and update the session
+        start_init = time.time()
         unified_manager = get_unified_session_manager(queue_manager)
+        print(f"⏱️  [RENAME] Init manager: {(time.time() - start_init) * 1000:.2f} ms")
 
         # Get the session from any storage location (memory, local, or MongoDB)
+        start_get = time.time()
         session = await unified_manager.get_multiturn_session_by_id(session_id)
+        print(f"⏱️  [RENAME] Get session: {(time.time() - start_get) * 1000:.2f} ms")
 
         if not session:
             raise HTTPException(status_code=404, detail="Multi-turn session not found")
 
         # Verify user owns this session
+        start_verify = time.time()
         session_user_id = session.get("user_id")
         if session_user_id and session_user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+        print(f"⏱️  [RENAME] Verify user: {(time.time() - start_verify) * 1000:.2f} ms")
 
         # Update the session using Unified Session Manager
         # This will update memory, local storage, and MongoDB automatically
         try:
             updates = {"session_name": new_name}
+            start_update = time.time()
             success = await unified_manager.update_multiturn_session(
                 session_id=session_id,
                 updates=updates,
                 user_id=user_id
             )
+            update_time = (time.time() - start_update) * 1000
+            print(f"⏱️  [RENAME] Update session: {update_time:.2f} ms")
 
             if not success:
                 raise HTTPException(status_code=500, detail="Failed to update session")
+
+            total_time = (time.time() - start_total) * 1000
+            print(f"⏱️  [RENAME] TOTAL TIME: {total_time:.2f} ms")
 
             return {
                 "success": True,
                 "session_id": session_id,
                 "new_name": new_name,
-                "message": "Session renamed successfully"
+                "message": "Session renamed successfully",
+                "timing": {
+                    "total_ms": round(total_time, 2),
+                    "update_ms": round(update_time, 2)
+                }
             }
 
         except PermissionError as e:
@@ -4526,26 +4804,51 @@ async def hard_delete_session(session_id: str, user_id: str, confirm: bool = Fal
                 shutil.rmtree(folder)
                 deleted_items["local_files"].append(folder)
 
-        # 2. Delete from S3 (if exists)
-        try:
-            s3_deleted = await cloud_storage_manager.delete_session_from_s3(session_id)
-            deleted_items["s3_files"] = s3_deleted
-        except Exception as e:
-            print(f"S3 deletion error (continuing): {e}")
+        # 2-4. Delete from S3, MongoDB, and community_sessions in parallel
+        async def delete_from_s3():
+            try:
+                s3_deleted = await cloud_storage_manager.delete_session_from_s3(session_id)
+                return ("s3", s3_deleted, None)
+            except Exception as e:
+                print(f"S3 deletion error (continuing): {e}")
+                return ("s3", [], str(e))
 
-        # 3. Delete from MongoDB (if exists)
-        try:
-            mongo_deleted = await cloud_storage_manager.delete_session_from_mongodb(session_id)
-            deleted_items["mongodb_docs"] = mongo_deleted
-        except Exception as e:
-            print(f"MongoDB deletion error (continuing): {e}")
+        async def delete_from_mongodb():
+            try:
+                mongo_deleted = await cloud_storage_manager.delete_session_from_mongodb(session_id)
+                return ("mongodb", mongo_deleted, None)
+            except Exception as e:
+                print(f"MongoDB deletion error (continuing): {e}")
+                return ("mongodb", [], str(e))
 
-        # 4. Delete from community_sessions if shared
-        try:
-            await cloud_storage_manager.remove_shared_session(session_id)
-            deleted_items["mongodb_docs"].append("community_sessions")
-        except Exception as e:
-            print(f"Community session deletion error (continuing): {e}")
+        async def delete_from_community():
+            try:
+                await cloud_storage_manager.remove_shared_session(session_id)
+                return ("community", ["community_sessions"], None)
+            except Exception as e:
+                print(f"Community session deletion error (continuing): {e}")
+                return ("community", [], str(e))
+
+        # Run all cloud deletions in parallel
+        import asyncio
+        results = await asyncio.gather(
+            delete_from_s3(),
+            delete_from_mongodb(),
+            delete_from_community(),
+            return_exceptions=True
+        )
+
+        # Process results
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"Deletion error: {result}")
+                continue
+
+            deletion_type, deleted_list, error = result
+            if deletion_type == "s3":
+                deleted_items["s3_files"] = deleted_list
+            elif deletion_type in ("mongodb", "community"):
+                deleted_items["mongodb_docs"].extend(deleted_list)
 
         return {
             "status": "success",
@@ -4573,9 +4876,6 @@ async def get_session_download_urls(session_id: str, user_id: str, turn_number: 
         turn_number: Optional turn number to retrieve files for. If not provided, returns current/latest turn files.
     """
     try:
-        # Wait briefly to ensure S3 upload completed
-        await asyncio.sleep(1)
-
         # For multi-turn sessions, extract base session ID
         base_session_id = session_id
         if "_turn_" in session_id:

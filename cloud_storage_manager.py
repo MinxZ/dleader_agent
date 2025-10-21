@@ -598,6 +598,17 @@ class CloudStorageManager:
             logger.error(f"Failed to generate presigned URL for {s3_key}: {e}")
             raise
 
+    def download_file_content(self, s3_key: str) -> Optional[bytes]:
+        """Download file content from S3 as bytes"""
+        try:
+            response = self.s3_client.get_object(Bucket=self.bucket_name, Key=s3_key)
+            content = response['Body'].read()
+            logger.info(f"Downloaded {len(content)} bytes from S3 key: {s3_key}")
+            return content
+        except Exception as e:
+            logger.error(f"Failed to download content from S3 key {s3_key}: {e}")
+            return None
+
     async def get_session_download_urls(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get fresh download URLs for all session's S3 files including images"""
         try:

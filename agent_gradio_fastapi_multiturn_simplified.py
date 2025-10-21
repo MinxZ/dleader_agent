@@ -439,9 +439,22 @@ async def view_multiturn_session(session_selection: str, server_url: str, user_i
 
 """
 
+        # Get files from the last turn
+        files = last_turn_data.get('files', {})
+
+        # Show zip download URL after final report, before images
+        session_zip_url = files.get('session_zip')
+        if session_zip_url:
+            result_display += f"""**📦 Download:**
+
+[Download Complete Session (ZIP)]({session_zip_url})
+
+---
+
+"""
+
         # Get images from the last turn
         last_turn_images = []
-        files = last_turn_data.get('files', {})
         if 'images' in files and files['images']:
             print(f"Found {len(files['images'])} images in last turn")
             last_turn_images = download_images_from_urls(files['images'])
@@ -527,9 +540,22 @@ async def view_specific_turn(session_id: str, turn_number: int, server_url: str,
 
 """
 
+        # Get files from /results
+        files = results_data.get('files', {})
+
+        # Show zip download URL after final report, before images
+        session_zip_url = files.get('session_zip')
+        if session_zip_url and status == 'completed':
+            result_display += f"""## 📦 Download Session
+
+[**Download Complete Session (ZIP)**]({session_zip_url})
+
+---
+
+"""
+
         # Extract images from files (from /results)
         turn_images = []
-        files = results_data.get('files', {})
         if files:
             result_display += "## 📁 Generated Files\n\n"
             for file_type, file_list in files.items():
@@ -558,28 +584,19 @@ async def view_specific_turn(session_id: str, turn_number: int, server_url: str,
         if status == 'completed':
             snapshots_data = client.get_snapshots(session_id, user_id, turn_number=turn_number)
             if snapshots_data:
-                # The API returns 'turn_snapshot' not 'snapshots'
-                snapshots = snapshots_data.get('turn_snapshot', [])
-                if snapshots:
-                    snapshot_count = len(snapshots)
+                # The API now returns 'thinking_process' as text directly
+                thinking_process_text = snapshots_data.get('thinking_process')
+                if thinking_process_text:
+                    # Show FULL thinking process (NO TRUNCATION, PLAIN TEXT)
                     result_display += f"""
 
-## 🧠 Thinking Process ({snapshot_count} steps)
+## 🧠 Thinking Process
+
+{thinking_process_text}
+
+---
 
 """
-                    for idx, snapshot in enumerate(snapshots, 1):
-                        snapshot_text = snapshot.get('content', snapshot.get('text', ''))
-                        if snapshot_text:
-                            # Truncate very long snapshots
-                            if len(snapshot_text) > 500:
-                                snapshot_text = snapshot_text[:500] + "... (truncated)"
-                            result_display += f"""**Step {idx}:**
-```
-{snapshot_text}
-```
-
-"""
-                    result_display += "---\n\n"
 
         # Return display and images
         print(f"Returning {len(turn_images)} images for turn {turn_number}")
@@ -598,29 +615,54 @@ async def view_specific_turn(session_id: str, turn_number: int, server_url: str,
 
 
 async def check_status_with_history(session_id: str, server_url: str, user_id: str):
-    """Check status of a session with integrated history and latest turn thinking"""
+    """Check status of a session and show report/images immediately
+
+    Optimized flow for completed sessions:
+    1. Call /results ONLY to get status, report, and images
+    2. Show report and images immediately
+    3. Thinking process loaded separately when user clicks that tab
+
+    For in-progress sessions:
+    - Shows status and current thinking process together
+    """
+    import time
+    start_total = time.time()
+
     if not session_id.strip():
-        return "## ❌ Error\n\nPlease enter a Session ID to check status.", gr.update(visible=False), gr.update(visible=False)
+        return "## ❌ Error\n\nPlease enter a Session ID to check status.", gr.update(visible=False), gr.update(visible=False), None
 
     # Initialize client
     client = FastAPIClient(server_url)
 
     # Check server health
     if not client.health_check():
-        return "## ❌ Server Error\n\nCannot connect to FastAPI server. Please ensure the server is running.", gr.update(visible=False), gr.update(visible=False)
+        return "## ❌ Server Error\n\nCannot connect to FastAPI server. Please ensure the server is running.", gr.update(visible=False), gr.update(visible=False), None
 
     try:
-        # Get status data
-        status_data = client.get_status(session_id, user_id)
-        if not status_data:
-            return f"## ❌ Session Not Found\n\nSession ID '{session_id}' not found on server.", gr.update(visible=False), gr.update(visible=False)
-
-        # Get latest turn results (thinking process and images)
+        # STEP 1: Get results data (contains everything: status, report, images)
+        start_api = time.time()
         results_data = client.get_json_results(session_id, user_id)
+        print(f"⏱️  [STATUS] get_json_results: {(time.time() - start_api) * 1000:.2f} ms")
 
-        # Format simplified status display
-        current_status = status_data.get("status", "unknown")
-        is_complete = status_data.get("is_complete", False)
+        if not results_data:
+            # Fallback to /status if /results fails (for in-progress sessions)
+            start_api = time.time()
+            status_data = client.get_status(session_id, user_id)
+            print(f"⏱️  [STATUS] get_status (fallback): {(time.time() - start_api) * 1000:.2f} ms")
+            if not status_data:
+                return f"## ❌ Session Not Found\n\nSession ID '{session_id}' not found on server.", gr.update(visible=False), gr.update(visible=False), None
+
+            # Use status data for in-progress sessions
+            current_status = status_data.get("status", "unknown")
+            is_complete = status_data.get("is_complete", False)
+            current_turn = None
+            total_turns = None
+        else:
+            # Extract status from results_data
+            current_status = results_data.get("status", "completed")
+            is_complete = True  # /results only works for completed sessions
+            current_turn = results_data.get('current_turn')
+            total_turns = results_data.get('total_turns')
 
         # Main status section
         status_emoji = {
@@ -632,159 +674,138 @@ async def check_status_with_history(session_id: str, server_url: str, user_id: s
             'cancelled': '🛑'
         }.get(current_status, '❓')
 
-        # Extract turn information if available
-        current_turn = results_data.get('current_turn') if results_data else None
-        total_turns = results_data.get('total_turns') if results_data else None
         turn_info = f"\n**Turn:** {current_turn}/{total_turns}" if current_turn and total_turns else ""
 
         result_display = f"""## {status_emoji} Session: {session_id[:8]}...
 
 **Status:** {current_status.title()}
-**Complete:** {'Yes' if is_complete else 'No'}
-**Created:** {status_data.get('created_at', 'N/A')}{turn_info}"""
+**Complete:** {'Yes' if is_complete else 'No'}{turn_info}"""
 
         # Add error information if available
-        if status_data.get("error"):
+        if results_data and results_data.get("error"):
             result_display += f"""
-**Error:** {status_data['error']}"""
+**Error:** {results_data['error']}"""
 
-        # Collect images from latest turn (but don't show thinking process here)
+        # STEP 2: Show final report and images immediately (from /results data)
         status_images = []
-        if results_data and 'files' in results_data:
-            files = results_data['files']
-            if 'images' in files and files['images']:
-                print(f"Found {len(files['images'])} images in latest turn for status check")
-                status_images = download_images_from_urls(files['images'])
 
-        # Add completion download if completed
-        if is_complete and current_status == "completed":
-            # Step 1: Get the final report and images from /results
-            if results_data and 'content' in results_data and 'final_report' in results_data['content']:
+        if is_complete and results_data:
+            # Extract final report
+            if 'content' in results_data and 'final_report' in results_data['content']:
                 final_report = results_data['content']['final_report']
                 if final_report:
-                    result_display += f"""
+                    # For old sessions stored in cloud, remove XML tags here as a fallback
+                    import re
+                    # Extract content from <solution> tags if present
+                    if '<solution>' in final_report and '</solution>' in final_report:
+                        start_idx = final_report.find('<solution>') + len('<solution>')
+                        end_idx = final_report.find('</solution>')
+                        final_report = final_report[:final_report.find('<solution>')] + final_report[start_idx:end_idx].strip() + final_report[end_idx + len('</solution>'):]
 
-## 📋 Final Report
+                    # Remove any remaining XML-like tags
+                    final_report = re.sub(r'</?[a-zA-Z_][a-zA-Z0-9_]*(?:\s+[^>]*)?>', '', final_report)
+
+                    # The API already includes "## ✅ Final Report" heading
+                    result_display += f"""
 
 {final_report}
 
 """
 
+            # Show zip download URL after final report, before images
+            if 'files' in results_data:
+                files = results_data['files']
+                session_zip_url = files.get('session_zip')
+                if session_zip_url:
+                    result_display += f"""## 📦 Download Session
+
+[**Download Complete Session (ZIP)**]({session_zip_url})
+
+---
+
+"""
+
+            # Extract and download images from /results (optimized)
+            if 'files' in results_data:
+                files = results_data['files']
+                if 'images' in files and files['images']:
+                    print(f"Found {len(files['images'])} images in /results")
+                    start_images = time.time()
+                    # Limit to first 10 images for faster rendering
+                    image_urls = files['images'][:10] if len(files['images']) > 10 else files['images']
+                    status_images = download_images_from_urls(image_urls)
+                    print(f"⏱️  [STATUS] download_images: {(time.time() - start_images) * 1000:.2f} ms")
+                    if len(files['images']) > 10:
+                        print(f"⚠️  Showing first 10 of {len(files['images'])} images for performance")
+
             # Add image count info
             if status_images:
                 result_display += f"\n\n**📸 {len(status_images)} images from latest turn shown below**\n\n"
 
-            # Step 2: For completed sessions, get thinking process from /snapshots separately
-            snapshots_data = client.get_snapshots(session_id, user_id)
+            # Add note about thinking process in separate tab
+            result_display += f"""
 
-            if snapshots_data:
-                # The API returns 'turn_snapshot' not 'snapshots'
-                snapshots = snapshots_data.get('turn_snapshot', [])
+---
 
-                if snapshots:
-                    snapshot_count = len(snapshots)
-                    result_display += f"""
-
-## 🧠 Thinking Process ({snapshot_count} steps)
-
-"""
-                    for idx, snapshot in enumerate(snapshots, 1):
-                        snapshot_text = snapshot.get('content', snapshot.get('text', ''))
-                        if snapshot_text:
-                            # Truncate very long snapshots for better readability
-                            if len(snapshot_text) > 500:
-                                snapshot_text = snapshot_text[:500] + "... (truncated)"
-                            result_display += f"""**Step {idx}:**
-```
-{snapshot_text}
-```
-
-"""
-                    result_display += "---\n\n"
-
-            # For completed sessions, show S3 download links
-            download_urls = client.get_download_urls(session_id, user_id)
-            download_url = client.get_download_url(session_id, user_id)
-
-            # Show S3 direct download links if available
-            if download_urls and 'files' in download_urls:
-                result_display += """
-
-## 📥 Direct S3 Download Links
-
-**Session Files - Click links to download directly from cloud storage:**
-
-"""
-                files = download_urls['files']
-                for file_type, url_info in files.items():
-                    if isinstance(url_info, dict) and 'presigned_url' in url_info:
-                        url = url_info['presigned_url']
-                        size = url_info.get('size', 'Unknown size')
-                        result_display += f"""- **{file_type.replace('_', ' ').title()}**:
-  - S3 URL: `{url}`
-  - Size: {size}
-  - [Direct Download Link]({url})
+💡 **Tip:** Click the "🧠 Thinking Process" tab to view detailed agent reasoning steps.
 
 """
 
-                result_display += f"""*⏰ Links expire in {download_urls.get('expires_in', 'Unknown')} minutes*
+            # Return with images if available (NO snapshots call for completed sessions)
+            backend_time = (time.time() - start_total) * 1000
+            print(f"⏱️  [BACKEND] Total processing time: {backend_time:.2f} ms")
+            print(f"⏱️  [GRADIO] About to return to Gradio (render time will be added by Gradio)")
 
-"""
-
-            # Show main session download S3 link
-            if download_url:
-                result_display += f"""
-
-## 📦 Main Session Package
-
-**Primary Download URL:**
-```
-{download_url}
-```
-
-*Copy the URL above and paste in another windows to download*
-"""
-
-            # Return with images if available
+            start_return = time.time()
             if status_images:
-                return result_display, gr.update(visible=False), gr.update(value=status_images, visible=True)
+                result = (result_display, gr.update(visible=False), gr.update(value=status_images, visible=True), results_data)
             else:
-                return result_display, gr.update(visible=False), gr.update(value=[], visible=False)
+                result = (result_display, gr.update(visible=False), gr.update(value=[], visible=False), results_data)
+
+            print(f"⏱️  [RETURN] Preparing return objects: {(time.time() - start_return) * 1000:.2f} ms")
+            return result
 
         # For non-completed sessions (in progress), show thinking process from /snapshots
         else:
+            # For in-progress sessions, try to get images from /status if available
+            if not results_data and 'progress_updates' in status_data:
+                # Check if there are images in progress updates
+                for update in status_data.get('progress_updates', []):
+                    if update.get('type') == 'completion' and 'files' in update:
+                        files = update['files']
+                        if 'images' in files and files['images']:
+                            print(f"Found {len(files['images'])} images in progress updates")
+                            start_images = time.time()
+                            status_images = download_images_from_urls(files['images'])
+                            print(f"⏱️  [STATUS] download_images: {(time.time() - start_images) * 1000:.2f} ms")
+                            break
+
             # Get current thinking process from /snapshots for in-progress sessions
+            start_api = time.time()
             snapshots_data = client.get_snapshots(session_id, user_id)
+            print(f"⏱️  [STATUS] get_snapshots (in-progress): {(time.time() - start_api) * 1000:.2f} ms")
             if snapshots_data:
-                # The API returns 'turn_snapshot' not 'snapshots'
-                snapshots = snapshots_data.get('turn_snapshot', [])
-                if snapshots:
-                    snapshot_count = len(snapshots)
+                # The API now returns 'thinking_process' as text directly
+                thinking_process_text = snapshots_data.get('thinking_process')
+                if thinking_process_text:
+                    # Show FULL thinking process (NO TRUNCATION, PLAIN TEXT)
                     result_display += f"""
 
-## 🧠 Thinking Process ({snapshot_count} steps so far)
+## 🧠 Thinking Process (In Progress)
+
+{thinking_process_text}
+
+---
 
 """
-                    for idx, snapshot in enumerate(snapshots, 1):
-                        snapshot_text = snapshot.get('content', snapshot.get('text', ''))
-                        if snapshot_text:
-                            # Truncate very long snapshots for better readability
-                            if len(snapshot_text) > 500:
-                                snapshot_text = snapshot_text[:500] + "... (truncated)"
-                            result_display += f"""**Step {idx}:**
-```
-{snapshot_text}
-```
-
-"""
-                    result_display += "---\n\n"
 
         # For non-completed sessions, hide download component and images
+        print(f"⏱️  [STATUS] TOTAL TIME: {(time.time() - start_total) * 1000:.2f} ms")
         if status_images:
             result_display += f"\n\n**📸 {len(status_images)} images from current turn shown below**\n\n"
-            return result_display, gr.update(visible=False), gr.update(value=status_images, visible=True)
+            return result_display, gr.update(visible=False), gr.update(value=status_images, visible=True), results_data
         else:
-            return result_display, gr.update(visible=False), gr.update(value=[], visible=False)
+            return result_display, gr.update(visible=False), gr.update(value=[], visible=False), results_data
 
     except Exception as e:
         import traceback
@@ -794,7 +815,75 @@ async def check_status_with_history(session_id: str, server_url: str, user_id: s
 **Error:** {str(e)}
 **Session ID:** {session_id}
 **Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-        return error_msg, gr.update(visible=False), gr.update(visible=False)
+        return error_msg, gr.update(visible=False), gr.update(visible=False), None
+
+
+async def load_thinking_process(session_id: str, server_url: str, user_id: str):
+    """Load thinking process/snapshots for a completed session - ONLY called when user clicks the tab
+
+    This function is called separately when user clicks the "Thinking Process" tab
+    to avoid slowing down the initial status check.
+    """
+    import time
+    start_time = time.time()
+
+    if not session_id or not session_id.strip():
+        return "ℹ️ No Session Selected\n\nPlease check a session status first, then click this tab to view thinking process."
+
+    # Initialize client
+    client = FastAPIClient(server_url)
+
+    # Check server health
+    if not client.health_check():
+        return "❌ Server Error\n\nCannot connect to FastAPI server. Please ensure the server is running."
+
+    try:
+        # Get snapshots for the session
+        print(f"Loading thinking process for session: {session_id}")
+        start_api = time.time()
+        snapshots_data = client.get_snapshots(session_id, user_id)
+        print(f"⏱️  [THINKING] get_snapshots: {(time.time() - start_api) * 1000:.2f} ms")
+
+        if not snapshots_data:
+            return f"❌ No Thinking Process Found\n\nNo thinking process data available for session {session_id[:8]}..."
+
+        # Extract thinking_process text directly from the new API format
+        thinking_process_text = snapshots_data.get('thinking_process')
+        current_turn = snapshots_data.get('current_turn', 1)
+        total_turns = snapshots_data.get('total_turns', 1)
+
+        if not thinking_process_text:
+            return f"ℹ️ No Thinking Process\n\nNo thinking process recorded for session {session_id[:8]}...\n\nTurn: {current_turn}/{total_turns}"
+
+        # Build display with FULL thinking process text (NO TRUNCATION, PLAIN TEXT)
+        result_display = f"""🧠 Thinking Process
+
+Session: {session_id[:8]}...
+Turn: {current_turn}/{total_turns}
+
+{'='*80}
+
+{thinking_process_text}
+
+{'='*80}
+
+"""
+
+        total_time = (time.time() - start_time) * 1000
+        print(f"⏱️  [THINKING] TOTAL TIME: {total_time:.2f} ms")
+        print(f"⏱️  [THINKING] Thinking process length: {len(thinking_process_text)} characters")
+        result_display += f"\n\nLoaded thinking process ({len(thinking_process_text):,} characters) in {total_time:.0f}ms"
+
+        return result_display
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"""❌ Error Loading Thinking Process
+
+Error: {str(e)}
+Session ID: {session_id}
+Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
 
 
 def get_session_history(server_url: str, user_id: str = None) -> List[tuple]:
@@ -1167,18 +1256,20 @@ Choose to start a new conversation or continue an existing one from the left pan
                                 interactive=True
                             )
 
-                        status_results = gr.Markdown(
-                            """## 📋 Status Check
+                        # Tabs for status results and thinking process
+                        with gr.Tabs() as status_tabs:
+                            with gr.Tab("📋 Status & Report", id="status_report_tab"):
+                                status_results = gr.Markdown(
+                                    """## 📋 Status Check
 
-Select a session from the dropdown to check status and view complete snapshots.
+Select a session from the dropdown to check status and view report.
 
 **Features:**
 - Real-time status updates
-- Complete snapshots view (no truncation)
-- Full session history with scrollable window
-- Direct download button when completed
+- Final report display
 - Image gallery for completed sessions
 - Turn selector to view different turns
+- Separate thinking process tab (loads on demand)
 
 **Instructions:**
 1. Click "🔄 Refresh" to load latest 10 sessions
@@ -1186,19 +1277,40 @@ Select a session from the dropdown to check status and view complete snapshots.
 3. Select a session from the dropdown
 4. Click "🔍 Check Status"
 5. Use turn selector to view different turns
+6. Click "🧠 Thinking Process" tab to view agent reasoning
 
-For completed sessions, direct download URLs will appear.""",
-                            max_height="600px"
-                        )
+For completed sessions, the final report and images will appear here.""",
+                                    max_height="600px"
+                                )
 
-                        # Image gallery for status check
-                        status_images_gallery = gr.Gallery(
-                            label="Session Images",
-                            visible=False,
-                            columns=3,
-                            height=400,
-                            object_fit="contain"
-                        )
+                                # Image gallery for status check
+                                status_images_gallery = gr.Gallery(
+                                    label="Session Images",
+                                    visible=False,
+                                    columns=3,
+                                    height=400,
+                                    object_fit="contain"
+                                )
+
+                            with gr.Tab("🧠 Thinking Process", id="thinking_tab"):
+                                gr.Markdown("""### Agent Reasoning Steps
+
+This tab shows the detailed thinking process and reasoning steps from the agent.
+
+**Note:** This loads ONLY when you click this tab (to improve initial load speed).
+
+Click "🔄 Load Thinking" after checking a session status to view the reasoning steps.""")
+
+                                load_thinking_btn = gr.Button("🔄 Load Thinking Process", variant="primary")
+
+                                thinking_display = gr.Textbox(
+                                    value="No thinking process loaded yet.\n\nInstructions:\n1. First, check a session status in the '📋 Status & Report' tab\n2. Then click the '🔄 Load Thinking Process' button above\n\nThe thinking process will load on-demand to keep the interface fast.",
+                                    label="🧠 Thinking Process",
+                                    lines=20,
+                                    max_lines=None,
+                                    show_copy_button=True,
+                                    interactive=False
+                                )
 
             # Stop Task Tab
             with gr.Tab("🛑 Stop Task"):
@@ -1414,7 +1526,7 @@ Completed tasks cannot be stopped."""  # Reset stop results
         async def check_status_from_dropdown(selected_session_id, server_url_value, user_id):
             """Check status using dropdown selection"""
             if not selected_session_id:
-                status_text, _, images = await check_status_with_history("", server_url_value, user_id)
+                status_text, _, images, _ = await check_status_with_history("", server_url_value, user_id)
                 return (
                     status_text,
                     images,
@@ -1423,20 +1535,17 @@ Completed tasks cannot be stopped."""  # Reset stop results
                     selected_session_id
                 )
 
-            # Get status and results
-            client = FastAPIClient(server_url_value)
-            status_text, _, images = await check_status_with_history(selected_session_id, server_url_value, user_id)
+            # Get status and results (results_data is returned to avoid duplicate API call)
+            status_text, _, images, results_data = await check_status_with_history(selected_session_id, server_url_value, user_id)
 
-            # Get turn info from /results to build turn selector
-            results_data = client.get_json_results(selected_session_id, user_id)
-
-            # Build turn choices based on current_turn and total_turns from results
+            # Build turn choices based on current_turn and total_turns from results_data
+            # (No need for duplicate /results call - reuse data from check_status_with_history)
             turn_choices = []
-            if results_data:
+            if results_data and isinstance(results_data, dict):
                 total_turns = results_data.get('total_turns', 0)
                 current_turn = results_data.get('current_turn', 0)
 
-                if total_turns > 0:
+                if total_turns and total_turns > 0:
                     turn_choices = [(f"Turn {i}", i) for i in range(1, total_turns + 1)]
 
             if turn_choices:
@@ -1503,40 +1612,55 @@ Completed tasks cannot be stopped."""  # Reset stop results
 
 """
 
+            # Get files from /results
+            files = results_data.get('files', {})
+
+            # Show zip download URL after final report, before images
+            session_zip_url = files.get('session_zip')
+            if session_zip_url and status == 'completed':
+                result_display += f"""## 📦 Download Session
+
+[**Download Complete Session (ZIP)**]({session_zip_url})
+
+---
+
+"""
+
             # Get images from /results
             turn_images = []
-            files = results_data.get('files', {})
             if 'images' in files and files['images']:
                 print(f"Found {len(files['images'])} images for turn {turn_num}")
                 turn_images = download_images_from_urls(files['images'])
                 result_display += f"\n**📸 {len(turn_images)} images from this turn (shown below)**\n\n"
 
-            # Step 2: For completed sessions, get thinking process from /snapshots separately
+            # Add tip about thinking process tab
             if status == 'completed':
+                result_display += f"""
+
+---
+
+💡 **Tip:** Click the "🧠 Thinking Process" tab and load thinking to view agent reasoning for this turn.
+
+"""
+
+            # NO snapshots call for completed turns - use the thinking process tab instead
+            # Step 2: For IN-PROGRESS turns only, get thinking process from /snapshots
+            if status != 'completed':
                 snapshots_data = client.get_snapshots(session_id, user_id, turn_number=turn_number)
                 if snapshots_data:
-                    # The API returns 'turn_snapshot' not 'snapshots'
-                    snapshots = snapshots_data.get('turn_snapshot', [])
-                    if snapshots:
-                        snapshot_count = len(snapshots)
+                    # The API now returns 'thinking_process' as text directly
+                    thinking_process_text = snapshots_data.get('thinking_process')
+                    if thinking_process_text:
+                        # Show FULL thinking process (NO TRUNCATION, PLAIN TEXT)
                         result_display += f"""
 
-## 🧠 Thinking Process ({snapshot_count} steps)
+## 🧠 Thinking Process (In Progress)
+
+{thinking_process_text}
+
+---
 
 """
-                        for idx, snapshot in enumerate(snapshots, 1):
-                            snapshot_text = snapshot.get('content', snapshot.get('text', ''))
-                            if snapshot_text:
-                                # Truncate very long snapshots
-                                if len(snapshot_text) > 500:
-                                    snapshot_text = snapshot_text[:500] + "... (truncated)"
-                                result_display += f"""**Step {idx}:**
-```
-{snapshot_text}
-```
-
-"""
-                        result_display += "---\n\n"
 
             if turn_images:
                 return gr.update(value=result_display, visible=True), gr.update(value=turn_images, visible=True)
@@ -1577,6 +1701,13 @@ Completed tasks cannot be stopped."""  # Reset stop results
         clear_status_btn.click(
             fn=clear_status_interface,
             outputs=[status_session_selector, status_results]
+        )
+
+        # Load thinking process button
+        load_thinking_btn.click(
+            fn=load_thinking_process,
+            inputs=[current_status_session_id, server_url, user_id_input],
+            outputs=[thinking_display]
         )
 
         # Stop task events
@@ -2133,14 +2264,15 @@ All session data will be permanently removed.""",
 
 
         # Initialize session lists on load
-        demo.load(
-            fn=lambda url, user_id: (
-                refresh_status_history(user_id),
-                refresh_stop_history(user_id)
-            ),
-            inputs=[server_url, user_id_input],
-            outputs=[status_session_selector, stop_session_selector]
-        )
+        # Removed auto-refresh on page load - let user manually refresh
+        # demo.load(
+        #     fn=lambda url, user_id: (
+        #         refresh_status_history(user_id),
+        #         refresh_stop_history(user_id)
+        #     ),
+        #     inputs=[server_url, user_id_input],
+        #     outputs=[status_session_selector, stop_session_selector]
+        # )
 
     return demo
 

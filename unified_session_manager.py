@@ -406,7 +406,31 @@ class UnifiedSessionManager:
         session_ids_seen = set()
 
         # 1. Get in-memory active multi-turn sessions (currently being processed)
+        # Check if sessions are also in MongoDB to determine correct storage location
+        mongodb_session_ids = set()
+        if include_cloud:
+            try:
+                from s3_mongodb.func_mongodb import get_mongodb_collection
+                import os
+                collection = get_mongodb_collection(
+                    os.getenv("SESSION_DB_NAME", "dleader_agent"),
+                    "multiturn_sessions"
+                )
+                if collection is not None:
+                    # Get list of session IDs in MongoDB
+                    query = {}
+                    if user_id:
+                        query["user_id"] = user_id
+                    mongodb_session_ids = set([doc["session_id"] for doc in collection.find(query, {"session_id": 1})])
+            except Exception as e:
+                print(f"Warning: Could not fetch MongoDB session IDs: {e}")
+
         for session_id, session in self.queue_manager.multiturn_sessions.items():
+            # Determine storage location: if session is complete and in MongoDB, mark as mongodb
+            is_complete = session.session_status == "completed"
+            in_mongodb = session_id in mongodb_session_ids
+            storage_location = "mongodb" if (is_complete and in_mongodb) else "memory"
+
             session_data = {
                 "session_id": session_id,
                 "session_name": getattr(session, 'session_name', ""),
@@ -421,7 +445,7 @@ class UnifiedSessionManager:
                 # Sharing metadata
                 "is_shared": getattr(session, 'is_shared', False),
                 "shared_at": getattr(session, 'shared_at', None),
-                "_storage_location": "memory"
+                "_storage_location": storage_location
             }
             all_sessions.append(session_data)
             session_ids_seen.add(session_id)
@@ -544,7 +568,11 @@ class UnifiedSessionManager:
         return None
 
     async def update_multiturn_session(self, session_id: str, updates: Dict[str, Any], user_id: str = None) -> bool:
-        """Update a multi-turn session in all storage locations"""
+        """Update a multi-turn session in all storage locations (optimized with parallel updates)"""
+        import asyncio
+        import time
+
+        start = time.time()
 
         # Get the session first
         session = await self.get_multiturn_session_by_id(session_id)
@@ -560,45 +588,82 @@ class UnifiedSessionManager:
         # Update timestamp
         updates["last_updated"] = datetime.now().isoformat()
 
+        # Define update tasks for parallel execution
+        update_tasks = []
+
         # 1. Update in-memory if it exists there
-        if storage_location == "memory":
-            session_obj = session.get("_session_object")
-            if session_obj:
-                for key, value in updates.items():
-                    setattr(session_obj, key, value)
-                # Save to local storage
-                self.queue_manager._save_multiturn_session(session_obj)
+        async def update_memory():
+            start_mem = time.time()
+            if storage_location == "memory":
+                session_obj = session.get("_session_object")
+                if session_obj:
+                    for key, value in updates.items():
+                        setattr(session_obj, key, value)
+                    # Save to local storage (synchronous, but fast)
+                    await asyncio.to_thread(self.queue_manager._save_multiturn_session, session_obj)
+            print(f"  ⏱️  [UPDATE] Memory update: {(time.time() - start_mem) * 1000:.2f} ms")
 
         # 2. Update local file if it exists
-        multiturn_file = os.path.join(self.queue_manager.multiturn_storage_dir, f"{session_id}.json")
-        if os.path.exists(multiturn_file):
-            try:
-                with open(multiturn_file, 'r', encoding='utf-8') as f:
-                    session_data = json.load(f)
-                session_data.update(updates)
-                with open(multiturn_file, 'w', encoding='utf-8') as f:
-                    json.dump(session_data, f, indent=2, ensure_ascii=False)
-            except Exception as e:
-                print(f"Warning: Could not update local multiturn session file: {e}")
+        async def update_local_file():
+            start_file = time.time()
+            multiturn_file = os.path.join(self.queue_manager.multiturn_storage_dir, f"{session_id}.json")
+            if os.path.exists(multiturn_file):
+                try:
+                    # Use asyncio.to_thread to run blocking I/O in thread pool
+                    def _update_file():
+                        with open(multiturn_file, 'r', encoding='utf-8') as f:
+                            session_data = json.load(f)
+                        session_data.update(updates)
+                        with open(multiturn_file, 'w', encoding='utf-8') as f:
+                            json.dump(session_data, f, indent=2, ensure_ascii=False)
+
+                    await asyncio.to_thread(_update_file)
+                except Exception as e:
+                    print(f"Warning: Could not update local multiturn session file: {e}")
+            print(f"  ⏱️  [UPDATE] File update: {(time.time() - start_file) * 1000:.2f} ms")
 
         # 3. Always update MongoDB (primary storage)
-        try:
-            from s3_mongodb.func_mongodb import get_mongodb_collection
-            collection = get_mongodb_collection(
-                os.getenv("SESSION_DB_NAME", "dleader_agent"),
-                "multiturn_sessions"
-            )
-            if collection is not None:
-                result = collection.update_one(
-                    {"session_id": session_id},
-                    {"$set": updates}
-                )
-                return result.modified_count > 0 or result.matched_count > 0
-        except Exception as e:
-            print(f"Error updating multiturn session in MongoDB: {e}")
-            return False
+        async def update_mongodb():
+            start_mongo = time.time()
+            try:
+                from s3_mongodb.func_mongodb import get_mongodb_collection
 
-        return True
+                # Use asyncio.to_thread for MongoDB operation
+                def _update_mongo():
+                    collection = get_mongodb_collection(
+                        os.getenv("SESSION_DB_NAME", "dleader_agent"),
+                        "multiturn_sessions"
+                    )
+                    if collection is not None:
+                        result = collection.update_one(
+                            {"session_id": session_id},
+                            {"$set": updates}
+                        )
+                        return result.modified_count > 0 or result.matched_count > 0
+                    return False
+
+                result = await asyncio.to_thread(_update_mongo)
+                print(f"  ⏱️  [UPDATE] MongoDB update: {(time.time() - start_mongo) * 1000:.2f} ms")
+                return result
+            except Exception as e:
+                print(f"Error updating multiturn session in MongoDB: {e}")
+                return False
+
+        # Execute all updates in parallel
+        results = await asyncio.gather(
+            update_memory(),
+            update_local_file(),
+            update_mongodb(),
+            return_exceptions=True
+        )
+
+        # Check if MongoDB update succeeded (it's the last result)
+        mongodb_result = results[2] if len(results) > 2 and not isinstance(results[2], Exception) else False
+
+        total_time = (time.time() - start) * 1000
+        print(f"  ⏱️  [UPDATE] Total parallel update: {total_time:.2f} ms")
+
+        return mongodb_result if isinstance(mongodb_result, bool) else True
 
 
 # Global instance to be used by FastAPI endpoints
