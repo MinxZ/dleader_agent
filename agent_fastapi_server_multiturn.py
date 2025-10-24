@@ -3324,9 +3324,10 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
     if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Verify user owns this session
+    # Verify user owns this session OR session is shared (allow public access to shared sessions)
     session_user_id = session_data.get("user_id")
-    if session_user_id and session_user_id != user_id:
+    is_shared = session_data.get("is_shared", False)
+    if session_user_id and session_user_id != user_id and not is_shared:
         raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
     if not session_data.get("is_complete", False):
