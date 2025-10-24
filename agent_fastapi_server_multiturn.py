@@ -161,6 +161,9 @@ class Template(BaseModel):
     tools: int
     description: str
     prompt: Optional[str] = None
+    query: Optional[str] = None
+    change_suggestions: Optional[List[str]] = None
+    session_id: Optional[str] = None
 
 class TemplateListRequest(BaseModel):
     templates: List[Template]
