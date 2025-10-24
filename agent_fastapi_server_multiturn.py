@@ -601,6 +601,14 @@ Reasoning: {user_request.template_reasoning}
                 zip_path = create_session_zip(user_request.session_path, save_to_chat_zips=True)
                 print(f"Created zip for S3 upload: {zip_path}")
 
+                # Copy ZIP file to session folder so it gets uploaded to S3
+                if zip_path and os.path.exists(zip_path):
+                    import shutil
+                    zip_filename = os.path.basename(zip_path)
+                    session_zip_path = os.path.join(user_request.session_path, zip_filename)
+                    shutil.copy2(zip_path, session_zip_path)
+                    print(f"Copied ZIP to session folder: {session_zip_path}")
+
             # Prepare session data for cloud upload
             session_data = {
                 "session_id": user_request.session_id,
@@ -4930,7 +4938,7 @@ async def get_session_download_urls(session_id: str, user_id: str, turn_number: 
             else:
                 raise HTTPException(status_code=500, detail="Failed to generate download URLs from cloud storage")
 
-        # For local sessions, try to create/find local zip
+        # For local sessions, try to create/find local zip OR check cloud storage
         session_path = session_data.get("session_path")
         if not session_path and session_data.get("is_complete"):
             # Try to find session folder
@@ -4967,7 +4975,22 @@ async def get_session_download_urls(session_id: str, user_id: str, turn_number: 
                 result["total_turns"] = total_turns
             return result
 
-        # No files found
+        # Local folder not found - try cloud storage as fallback
+        # (files may have been uploaded to S3 even if storage_location is "local")
+        try:
+            download_data = await cloud_storage_manager.get_session_download_urls(base_session_id)
+            if download_data:
+                print(f"Local folder not found for session {session_id}, using cloud storage download URLs")
+                # Add turn information
+                if multiturn_session:
+                    download_data["turn_number"] = turn_number
+                    download_data["current_turn"] = current_turn
+                    download_data["total_turns"] = total_turns
+                return download_data
+        except Exception as e:
+            print(f"Warning: Could not retrieve download URLs from cloud: {e}")
+
+        # No files found anywhere
         raise HTTPException(status_code=404, detail="No downloadable files found for session")
 
     except HTTPException:

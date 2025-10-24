@@ -443,9 +443,12 @@ async def view_multiturn_session(session_selection: str, server_url: str, user_i
         files = last_turn_data.get('files', {})
 
         # Show zip download URL after final report, before images
-        session_zip_url = files.get('session_zip')
-        if session_zip_url:
-            result_display += f"""**📦 Download:**
+        session_zip = files.get('session_zip')
+        if session_zip:
+            # Extract URL from dict if needed
+            session_zip_url = session_zip.get('url') if isinstance(session_zip, dict) else session_zip
+            if session_zip_url:
+                result_display += f"""**📦 Download:**
 
 [Download Complete Session (ZIP)]({session_zip_url})
 
@@ -544,9 +547,12 @@ async def view_specific_turn(session_id: str, turn_number: int, server_url: str,
         files = results_data.get('files', {})
 
         # Show zip download URL after final report, before images
-        session_zip_url = files.get('session_zip')
-        if session_zip_url and status == 'completed':
-            result_display += f"""## 📦 Download Session
+        session_zip = files.get('session_zip')
+        if session_zip and status == 'completed':
+            # Extract URL from dict if needed
+            session_zip_url = session_zip.get('url') if isinstance(session_zip, dict) else session_zip
+            if session_zip_url:
+                result_display += f"""## 📦 Download Session
 
 [**Download Complete Session (ZIP)**]({session_zip_url})
 
@@ -715,9 +721,12 @@ async def check_status_with_history(session_id: str, server_url: str, user_id: s
             # Show zip download URL after final report, before images
             if 'files' in results_data:
                 files = results_data['files']
-                session_zip_url = files.get('session_zip')
-                if session_zip_url:
-                    result_display += f"""## 📦 Download Session
+                session_zip = files.get('session_zip')
+                if session_zip:
+                    # Extract URL from dict if needed
+                    session_zip_url = session_zip.get('url') if isinstance(session_zip, dict) else session_zip
+                    if session_zip_url:
+                        result_display += f"""## 📦 Download Session
 
 [**Download Complete Session (ZIP)**]({session_zip_url})
 
@@ -1616,9 +1625,12 @@ Completed tasks cannot be stopped."""  # Reset stop results
             files = results_data.get('files', {})
 
             # Show zip download URL after final report, before images
-            session_zip_url = files.get('session_zip')
-            if session_zip_url and status == 'completed':
-                result_display += f"""## 📦 Download Session
+            session_zip = files.get('session_zip')
+            if session_zip and status == 'completed':
+                # Extract URL from dict if needed
+                session_zip_url = session_zip.get('url') if isinstance(session_zip, dict) else session_zip
+                if session_zip_url:
+                    result_display += f"""## 📦 Download Session
 
 [**Download Complete Session (ZIP)**]({session_zip_url})
 

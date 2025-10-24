@@ -658,6 +658,23 @@ class CloudStorageManager:
                         "expires_at": (datetime.now() + timedelta(hours=2)).isoformat()
                     }
 
+            # Add session_zip with presigned_url for backward compatibility with Gradio
+            if "session_zip" in download_urls["files"]:
+                # session_zip already exists in S3, add presigned_url alias for Gradio compatibility
+                download_urls["files"]["session_zip"]["presigned_url"] = download_urls["files"]["session_zip"]["url"]
+            else:
+                # session_zip doesn't exist in S3 - provide /download endpoint as fallback
+                # Note: This will be a redirect URL, not a presigned S3 URL
+                download_urls["files"]["session_zip"] = {
+                    "filename": f"session_{session_id[:8]}.zip",
+                    "url": f"/download/{session_id}",  # Placeholder - will be replaced by caller with proper server URL
+                    "presigned_url": f"/download/{session_id}",  # For Gradio compatibility
+                    "s3_key": None,
+                    "file_size": 0,
+                    "expires_at": (datetime.now() + timedelta(hours=2)).isoformat(),
+                    "note": "ZIP will be generated on-demand from S3 files"
+                }
+
             return download_urls
 
         except Exception as e:
