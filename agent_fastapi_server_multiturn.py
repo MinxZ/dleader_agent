@@ -3288,11 +3288,13 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
 
-    # Get multi-turn session info to determine turn number
+    # Get multi-turn session info to determine turn number and sharing status
     # First check in-memory sessions
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     current_turn = None
     total_turns = None
+    is_shared = False
+    session_owner_id = None
 
     # If not in memory, try to get from MongoDB/cloud
     if not multiturn_session:
@@ -3302,11 +3304,15 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
             if cloud_multiturn_session:
                 current_turn = cloud_multiturn_session.get("current_turn")
                 total_turns = cloud_multiturn_session.get("total_turns")
+                is_shared = cloud_multiturn_session.get("is_shared", False)
+                session_owner_id = cloud_multiturn_session.get("user_id")
         except Exception as e:
             print(f"Could not load multiturn session info from cloud: {e}")
     else:
         current_turn = multiturn_session.current_turn
         total_turns = multiturn_session.total_turns
+        is_shared = multiturn_session.is_shared if hasattr(multiturn_session, 'is_shared') else False
+        session_owner_id = multiturn_session.user_id if hasattr(multiturn_session, 'user_id') else None
 
     # Process turn_number if we have turn information
     if current_turn is not None and total_turns is not None:
@@ -3317,6 +3323,12 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
         elif turn_number < 1 or turn_number > total_turns:
             raise HTTPException(status_code=400, detail=f"Invalid turn_number. Must be between 1 and {total_turns}")
 
+    # Check access: Allow if session is shared OR user owns the session
+    # This check happens early using multiturn metadata for efficiency
+    # If we have ownership info and it's not shared and user doesn't own it, deny access
+    if session_owner_id and session_owner_id != user_id and not is_shared:
+        raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+
     # Use unified session manager to check both local and cloud storage
     unified_manager = get_unified_session_manager(queue_manager)
     session_data = await unified_manager.get_session_by_id(session_id)
@@ -3324,11 +3336,13 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
     if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Verify user owns this session OR session is shared (allow public access to shared sessions)
-    session_user_id = session_data.get("user_id")
-    is_shared = session_data.get("is_shared", False)
-    if session_user_id and session_user_id != user_id and not is_shared:
-        raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
+    # Fallback check: if we didn't have multiturn metadata, check from session_data
+    # This handles cases where session exists but isn't in multiturn_sessions collection
+    if not session_owner_id:
+        session_user_id_fallback = session_data.get("user_id")
+        is_shared_fallback = session_data.get("is_shared", False)
+        if session_user_id_fallback and session_user_id_fallback != user_id and not is_shared_fallback:
+            raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
     if not session_data.get("is_complete", False):
         raise HTTPException(status_code=400, detail="Session is not yet complete")
