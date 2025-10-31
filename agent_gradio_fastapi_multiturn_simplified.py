@@ -44,7 +44,7 @@ class FastAPIClient:
             print(f"Health check failed: {e}")
             return False
 
-    def submit_request(self, message: str, language: str = "en", user_id: str = None, files: list = None) -> Optional[str]:
+    def submit_request(self, message: str, language: str = "en", user_id: str = None, files: list = None, use_template: bool = True) -> Optional[str]:
         """Submit a chat request with optional file uploads and return session ID"""
         try:
             if not user_id:
@@ -54,7 +54,8 @@ class FastAPIClient:
             data = {
                 "message": message,
                 "language": language,
-                "user_id": user_id
+                "user_id": user_id,
+                "use_template": str(use_template).lower()
             }
 
             # Prepare files for upload if provided
@@ -202,7 +203,7 @@ class FastAPIClient:
             return None
 
     # Multi-Turn Methods
-    def continue_session(self, session_id: str, message: str, language: str = "en", user_id: str = None, files: list = None) -> Optional[dict]:
+    def continue_session(self, session_id: str, message: str, language: str = "en", user_id: str = None, files: list = None, use_template: bool = True) -> Optional[dict]:
         """Continue an existing multi-turn session with a new message and optional file uploads"""
         try:
             if not user_id:
@@ -213,7 +214,8 @@ class FastAPIClient:
                 "session_id": session_id,
                 "message": message,
                 "language": language,
-                "user_id": user_id
+                "user_id": user_id,
+                "use_template": str(use_template).lower()
             }
 
             # Prepare files for upload if provided
@@ -1113,6 +1115,11 @@ def create_interface(default_fastapi_url: str = "http://localhost:8001"):
                                         value="en",
                                         label="Language"
                                     )
+                                    use_template_checkbox = gr.Checkbox(
+                                        label="Use Template Matching",
+                                        value=True,
+                                        info="Enable automatic workflow template matching to augment queries"
+                                    )
 
                                 with gr.Row():
                                     start_conversation_btn = gr.Button(
@@ -1140,6 +1147,12 @@ def create_interface(default_fastapi_url: str = "http://localhost:8001"):
                                     label="Upload Files (optional)",
                                     file_count="multiple",
                                     type="filepath"
+                                )
+
+                                use_template_checkbox_continue = gr.Checkbox(
+                                    label="Use Template Matching",
+                                    value=True,
+                                    info="Enable automatic workflow template matching to augment queries"
                                 )
 
                                 with gr.Row():
@@ -1836,7 +1849,7 @@ Completed tasks cannot be stopped."""  # Reset stop results
                 gr.update(value=pagination_text, visible=True)  # sessions_pagination_info
             )
 
-        def start_new_conversation(query, language, files, url, user_id):
+        def start_new_conversation(query, language, files, url, user_id, use_template):
             """Start a new multi-turn conversation"""
             if not query.strip():
                 return (
@@ -1849,7 +1862,7 @@ Completed tasks cannot be stopped."""  # Reset stop results
                 client = FastAPIClient(url)
                 # Convert files to list of paths if provided
                 file_paths = [f.name for f in files] if files else None
-                session_id = client.submit_request(query, language, user_id, files=file_paths)
+                session_id = client.submit_request(query, language, user_id, files=file_paths, use_template=use_template)
 
                 if session_id:
 
@@ -1882,7 +1895,7 @@ Please wait while I process your request..."""
                     gr.update(visible=False)
                 )
 
-        def continue_existing_conversation(session_selection, query, files, url, user_id):
+        def continue_existing_conversation(session_selection, query, files, url, user_id, use_template):
             """Continue an existing multi-turn conversation"""
             if not session_selection or not query.strip():
                 return (
@@ -1898,7 +1911,7 @@ Please wait while I process your request..."""
                 client = FastAPIClient(url)
                 # Convert files to list of paths if provided
                 file_paths = [f.name for f in files] if files else None
-                response = client.continue_session(session_id, query, language="en", user_id=user_id, files=file_paths)
+                response = client.continue_session(session_id, query, language="en", user_id=user_id, files=file_paths, use_template=use_template)
 
                 if response and 'session_id' in response:
                     # Show progress
@@ -1969,13 +1982,13 @@ Please wait while I process your follow-up request..."""
 
         start_conversation_btn.click(
             fn=start_new_conversation,
-            inputs=[multiturn_query, multiturn_language, multiturn_files, server_url, user_id_input],
+            inputs=[multiturn_query, multiturn_language, multiturn_files, server_url, user_id_input, use_template_checkbox],
             outputs=[multiturn_progress, conversation_display, multiturn_session_info]
         )
 
         continue_conversation_btn.click(
             fn=continue_existing_conversation,
-            inputs=[existing_session_selector, continue_query, continue_files, server_url, user_id_input],
+            inputs=[existing_session_selector, continue_query, continue_files, server_url, user_id_input, use_template_checkbox_continue],
             outputs=[multiturn_progress, conversation_display, multiturn_session_info]
         )
 

@@ -194,7 +194,8 @@ class SharedSessionInfo(BaseModel):
 # Queue Management System
 class UserRequest:
     def __init__(self, session_id: str, message: str, language: Language, uploaded_files: List[str] = None,
-                 is_continuation: bool = False, previous_context: str = "", turn_number: int = 1, user_id: str = None):
+                 is_continuation: bool = False, previous_context: str = "", turn_number: int = 1, user_id: str = None,
+                 use_template: bool = True):
         self.session_id = session_id
         self.message = message
         self.language = language
@@ -217,6 +218,7 @@ class UserRequest:
         self.user_id = user_id  # User ownership tracking
         self.task_start_time = None  # Track when task actually starts processing
         self.stop_requested = False  # Flag to signal stop request
+        self.use_template = use_template  # Template matching control flag
 
         # Multi-turn specific attributes
         self.is_continuation = is_continuation
@@ -1436,7 +1438,7 @@ Reasoning: {user_request.template_reasoning}
             # Create and start process
             agent_process = Process(
                 target=run_agent_in_process,
-                args=(message_queue, result_queue, user_request.enhanced_message, session_path)
+                args=(message_queue, result_queue, user_request.enhanced_message, session_path, user_request.use_template)
             )
             user_request.agent_process = agent_process
             agent_process.start()
@@ -2003,10 +2005,17 @@ Reasoning: {user_request.template_reasoning}
 queue_manager = QueueManager()
 
 # Process-based agent runner (defined at module level for pickling)
-def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced_message: str, session_path: str):
+def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced_message: str, session_path: str, use_template: bool = True):
     """
     Run agent in a separate process for true termination capability
     This function runs in a separate process and communicates via queues
+
+    Args:
+        message_queue: Queue for receiving messages
+        result_queue: Queue for sending results
+        enhanced_message: The message/query to process
+        session_path: Path to session directory
+        use_template: Whether to use template matching (default: True)
     """
     import atexit
     import glob
@@ -2113,7 +2122,7 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
             })
 
             # === TEMPLATE MATCHING & QUERY AUGMENTATION ===
-            # Try to match the query to a workflow template
+            # Try to match the query to a workflow template (if enabled)
             base_message = enhanced_message
             template_info = {
                 "matched": False,
@@ -2123,51 +2132,60 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                 "modification": None
             }
 
-            try:
+            # use_template parameter is passed to this function
+            # Check if template matching is enabled
+            if use_template:
+                try:
+                    result_queue.put({
+                        "type": "status",
+                        "content": "Checking for relevant workflow templates..."
+                    })
+
+                    from agent_fastapi_server_multiturn import get_template_retriever
+                    retriever = get_template_retriever()
+
+                    if retriever:
+                        # Match query to templates
+                        match_result = retriever.match_template(base_message)
+
+                        if match_result.get("matched"):
+                            template_title = match_result.get("template", {}).get("title", "Unknown")
+                            confidence = match_result.get("confidence", "unknown")
+
+                            # Store template info for later
+                            template_info["matched"] = True
+                            template_info["title"] = template_title
+                            template_info["confidence"] = confidence
+                            template_info["reasoning"] = match_result.get("reasoning", "")
+                            template_info["modification"] = match_result.get("modification")
+
+                            result_queue.put({
+                                "type": "template_matched",
+                                "content": f"Matched to template: {template_title} (confidence: {confidence})",
+                                "template_title": template_title,
+                                "confidence": confidence,
+                                "reasoning": match_result.get("reasoning", "")
+                            })
+
+                            # Augment the query with template prompt
+                            augmentation_result = retriever.augment_query_with_template(base_message, match_result)
+                            enhanced_message = augmentation_result["augmented_query"]
+
+                            print(f"✓ Template matched: {template_title} (confidence: {confidence})")
+                            if augmentation_result.get("modification_applied"):
+                                print(f"  Modification: {augmentation_result['modification_applied']}")
+                        else:
+                            print(f"✗ No template matched: {match_result.get('reasoning', 'Unknown reason')}")
+
+                except Exception as e:
+                    print(f"Warning: Template matching failed: {e}")
+                    # Continue without template matching
+            else:
+                print("Template matching disabled by user")
                 result_queue.put({
                     "type": "status",
-                    "content": "Checking for relevant workflow templates..."
+                    "content": "Template matching disabled, proceeding with direct query..."
                 })
-
-                from agent_fastapi_server_multiturn import get_template_retriever
-                retriever = get_template_retriever()
-
-                if retriever:
-                    # Match query to templates
-                    match_result = retriever.match_template(base_message)
-
-                    if match_result.get("matched"):
-                        template_title = match_result.get("template", {}).get("title", "Unknown")
-                        confidence = match_result.get("confidence", "unknown")
-
-                        # Store template info for later
-                        template_info["matched"] = True
-                        template_info["title"] = template_title
-                        template_info["confidence"] = confidence
-                        template_info["reasoning"] = match_result.get("reasoning", "")
-                        template_info["modification"] = match_result.get("modification")
-
-                        result_queue.put({
-                            "type": "template_matched",
-                            "content": f"Matched to template: {template_title} (confidence: {confidence})",
-                            "template_title": template_title,
-                            "confidence": confidence,
-                            "reasoning": match_result.get("reasoning", "")
-                        })
-
-                        # Augment the query with template prompt
-                        augmentation_result = retriever.augment_query_with_template(base_message, match_result)
-                        enhanced_message = augmentation_result["augmented_query"]
-
-                        print(f"✓ Template matched: {template_title} (confidence: {confidence})")
-                        if augmentation_result.get("modification_applied"):
-                            print(f"  Modification: {augmentation_result['modification_applied']}")
-                    else:
-                        print(f"✗ No template matched: {match_result.get('reasoning', 'Unknown reason')}")
-
-            except Exception as e:
-                print(f"Warning: Template matching failed: {e}")
-                # Continue without template matching
 
             # === END TEMPLATE MATCHING ===
 
@@ -2608,9 +2626,19 @@ async def start_chat_queue(
     language: Language = Form(Language.EN),
     user_id: str = Form(...),
     session_id: Optional[str] = Form(None),
+    use_template: bool = Form(True),
     files: List[UploadFile] = File(default=[])
 ):
-    """Add chat request to queue with S3 file uploads"""
+    """Add chat request to queue with S3 file uploads
+
+    Args:
+        message: User's message/query
+        language: Language for response (en/jp)
+        user_id: User identifier
+        session_id: Optional session ID (creates new if not provided)
+        use_template: Whether to use template matching (default: True)
+        files: Uploaded files
+    """
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
@@ -2705,7 +2733,8 @@ async def start_chat_queue(
         language=language,
         uploaded_files=uploaded_file_paths,
         turn_number=turn_number,
-        user_id=user_id
+        user_id=user_id,
+        use_template=use_template
     )
 
     # Store S3 metadata in user request for processing
@@ -3854,9 +3883,19 @@ async def continue_session(
     message: str = Form(...),
     language: Language = Form(Language.EN),
     user_id: str = Form(...),
+    use_template: bool = Form(True),
     files: List[UploadFile] = File(default=[])
 ):
-    """Continue an existing multi-turn session with S3 file handling"""
+    """Continue an existing multi-turn session with S3 file handling
+
+    Args:
+        session_id: The session ID to continue
+        message: User's message/query
+        language: Language for response (en/jp)
+        user_id: User identifier
+        use_template: Whether to use template matching (default: True)
+        files: Uploaded files
+    """
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
@@ -4037,7 +4076,8 @@ async def continue_session(
         is_continuation=True,
         previous_context=enhanced_context['enhanced_message'],
         turn_number=turn_number,
-        user_id=user_id
+        user_id=user_id,
+        use_template=use_template
     )
 
     # Store file metadata including S3 references
