@@ -47,6 +47,11 @@ class CloudStorageManager:
         self.sessions_collection = "sessions"
         self.multiturn_collection = "multiturn_sessions"
 
+        # MongoDB connection cache to avoid reconnecting on every request
+        self._mongodb_sessions_cache = None
+        self._mongodb_multiturn_cache = None
+        self._mongodb_connection_failed = False
+
         # Initialize clients
         self.s3_client = None
         self.init_clients()
@@ -69,6 +74,47 @@ class CloudStorageManager:
         except Exception as e:
             logger.error(f"Failed to initialize cloud storage clients: {e}")
             raise
+
+    def _get_cached_mongodb_collection(self, collection_name: str):
+        """Get cached MongoDB collection or create new connection if needed
+
+        Args:
+            collection_name: Name of collection ('sessions' or 'multiturn_sessions')
+
+        Returns:
+            MongoDB collection object or None if connection failed
+        """
+        if self._mongodb_connection_failed:
+            return None
+
+        # Check which cache to use
+        if collection_name == self.sessions_collection:
+            if self._mongodb_sessions_cache is not None:
+                return self._mongodb_sessions_cache
+        elif collection_name == self.multiturn_collection:
+            if self._mongodb_multiturn_cache is not None:
+                return self._mongodb_multiturn_cache
+
+        # Create new connection
+        try:
+            collection = get_mongodb_collection(self.database_name, collection_name)
+            if collection is None:
+                self._mongodb_connection_failed = True
+                return None
+
+            # Cache the collection
+            if collection_name == self.sessions_collection:
+                self._mongodb_sessions_cache = collection
+                logger.info(f"[MongoDB CloudStorage] Connection established and cached for {collection_name}")
+            elif collection_name == self.multiturn_collection:
+                self._mongodb_multiturn_cache = collection
+                logger.info(f"[MongoDB CloudStorage] Connection established and cached for {collection_name}")
+
+            return collection
+        except Exception as e:
+            logger.error(f"[MongoDB CloudStorage] Connection failed for {collection_name}: {e}")
+            self._mongodb_connection_failed = True
+            return None
 
     async def upload_session_to_cloud(self, session_id: str, session_data: Dict) -> Dict[str, Any]:
         """
@@ -356,23 +402,37 @@ class CloudStorageManager:
             logger.error(f"Failed to cleanup local files {local_session_path}: {e}")
 
     async def retrieve_session_from_cloud(self, session_id: str) -> Optional[Dict]:
-        """Retrieve session metadata from MongoDB"""
+        """Retrieve session metadata from MongoDB using cached connection"""
+        import time
+        start_time = time.time()
+
         try:
-            collection = get_mongodb_collection(self.database_name, self.sessions_collection)
+            # Use cached MongoDB connection instead of creating new one
+            conn_start = time.time()
+            collection = self._get_cached_mongodb_collection(self.sessions_collection)
+            print(f"[PERF retrieve_session_from_cloud] Get cached connection: {(time.time() - conn_start) * 1000:.2f} ms")
+
             if collection is None:
+                print(f"[PERF retrieve_session_from_cloud] ERROR: Collection is None")
                 return None
 
+            query_start = time.time()
             session_doc = collection.find_one({"_id": session_id})
+            print(f"[PERF retrieve_session_from_cloud] MongoDB query: {(time.time() - query_start) * 1000:.2f} ms")
+            print(f"[PERF retrieve_session_from_cloud] Total: {(time.time() - start_time) * 1000:.2f} ms")
+
             return session_doc
 
         except Exception as e:
+            print(f"[PERF retrieve_session_from_cloud] ERROR: {e}")
             logger.error(f"Failed to retrieve session {session_id} from cloud: {e}")
             return None
 
     async def update_session_metadata(self, session_id: str, updates: Dict) -> bool:
-        """Update session metadata in MongoDB"""
+        """Update session metadata in MongoDB using cached connection"""
         try:
-            collection = get_mongodb_collection(self.database_name, self.sessions_collection)
+            # Use cached MongoDB connection
+            collection = self._get_cached_mongodb_collection(self.sessions_collection)
             if collection is None:
                 return False
 
@@ -442,8 +502,8 @@ class CloudStorageManager:
                 if turn_result.deleted_count > 0:
                     deleted_docs.append(f"sessions_turns:{turn_result.deleted_count}")
 
-            # Also delete from 'multiturn_sessions' collection
-            multiturn_collection = get_mongodb_collection(self.database_name, "multiturn_sessions")
+            # Also delete from 'multiturn_sessions' collection (use cached connection)
+            multiturn_collection = self._get_cached_mongodb_collection(self.multiturn_collection)
             if multiturn_collection is not None:
                 # Try deleting by session_id field
                 multiturn_result = multiturn_collection.delete_one({"session_id": session_id})
@@ -463,9 +523,10 @@ class CloudStorageManager:
         return deleted_docs
 
     async def list_cloud_sessions(self, limit: int = 100, status_filter: str = None, user_id: str = None) -> List[Dict]:
-        """List sessions stored in cloud with optional filtering"""
+        """List sessions stored in cloud with optional filtering using cached connection"""
         try:
-            collection = get_mongodb_collection(self.database_name, self.sessions_collection)
+            # Use cached MongoDB connection
+            collection = self._get_cached_mongodb_collection(self.sessions_collection)
             if collection is None:
                 return []
 

@@ -3158,9 +3158,18 @@ def generate_file_urls(files_data, session_id: str = None):
     """
     from datetime import datetime, timedelta
     import os
+    import time
+
+    func_start = time.time()
+    file_count = 0
+    head_object_count = 0
+    upload_count = 0
 
     def process_file_item(file_item):
         """Process a single file item to add S3 URL"""
+        nonlocal file_count, head_object_count, upload_count
+        file_count += 1
+
         # Handle string paths (convert to dict with URL)
         if isinstance(file_item, str):
             filename = file_item.split("/")[-1]
@@ -3171,15 +3180,15 @@ def generate_file_urls(files_data, session_id: str = None):
                 try:
                     s3_key = f"sessions/{session_id}/files/{filename}"
 
-                    # Check if file already exists in S3 first
+                    # Check if file already exists in S3 to avoid re-uploading
                     try:
+                        head_object_count += 1
                         cloud_storage_manager.s3_client.head_object(
                             Bucket=cloud_storage_manager.bucket_name,
                             Key=s3_key
                         )
-                        # File exists in S3, just generate presigned URL without uploading
+                        # File exists in S3, just generate fresh presigned URL
                         url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
-                        print(f"✓ File {filename} already exists in S3, generated presigned URL")
                         return {
                             "path": file_path,
                             "filename": filename,
@@ -3188,14 +3197,15 @@ def generate_file_urls(files_data, session_id: str = None):
                             "expires_at": (datetime.now() + timedelta(hours=2)).isoformat()
                         }
                     except cloud_storage_manager.s3_client.exceptions.ClientError:
-                        # File doesn't exist in S3, upload it
+                        # File doesn't exist in S3, upload it once
+                        upload_count += 1
                         cloud_storage_manager.s3_client.upload_file(
                             file_path,
                             cloud_storage_manager.bucket_name,
                             s3_key
                         )
+                        # Generate presigned URL after upload
                         url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
-                        print(f"✓ Uploaded {filename} to S3 and generated presigned URL")
                         return {
                             "path": file_path,
                             "filename": filename,
@@ -3204,7 +3214,12 @@ def generate_file_urls(files_data, session_id: str = None):
                             "expires_at": (datetime.now() + timedelta(hours=2)).isoformat()
                         }
                 except Exception as e:
-                    print(f"Warning: Failed to upload {filename} to S3: {e}")
+                    print(f"Warning: Failed to upload {filename} to S3 or generate URL: {e}")
+                    return {
+                        "path": file_path,
+                        "filename": filename,
+                        "download_url": f"/download-file/{session_id}/{filename}" if session_id else None
+                    }
 
             return {
                 "path": file_path,
@@ -3244,37 +3259,37 @@ def generate_file_urls(files_data, session_id: str = None):
                     else:
                         s3_key = f"sessions/{session_id}/files/{filename}"
 
-                    # Check if file already exists in S3 first
+                    # Check if file already exists in S3 to avoid re-uploading
                     try:
+                        head_object_count += 1
                         cloud_storage_manager.s3_client.head_object(
                             Bucket=cloud_storage_manager.bucket_name,
                             Key=s3_key
                         )
-                        # File exists in S3, just generate presigned URL without uploading
+                        # File exists in S3, just generate fresh presigned URL
                         url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
                         result["s3_key"] = s3_key
                         result["url"] = url
                         result["expires_at"] = (datetime.now() + timedelta(hours=2)).isoformat()
-                        print(f"✓ File {filename} already exists in S3, generated presigned URL")
                     except cloud_storage_manager.s3_client.exceptions.ClientError:
-                        # File doesn't exist in S3, upload it
+                        # File doesn't exist in S3, upload it once
+                        upload_count += 1
                         cloud_storage_manager.s3_client.upload_file(
                             file_path,
                             cloud_storage_manager.bucket_name,
                             s3_key
                         )
-                        # Generate presigned URL
+                        # Generate presigned URL after upload
                         url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
                         result["s3_key"] = s3_key
                         result["url"] = url
                         result["expires_at"] = (datetime.now() + timedelta(hours=2)).isoformat()
-                        print(f"✓ Uploaded {filename} to S3 and generated presigned URL")
-                    except Exception as upload_error:
-                        # Upload failed, fall back to local download
+                    except Exception as process_error:
+                        # S3 operation failed, fall back to local download
                         result["download_url"] = f"/download-file/{session_id}/{filename}"
-                        print(f"Warning: Failed to upload {filename} to S3: {upload_error}")
+                        print(f"Warning: Failed to process {filename} with S3: {process_error}")
                 except Exception as e:
-                    print(f"Warning: Error uploading {filename} to S3: {e}")
+                    print(f"Warning: Error processing {filename} for S3: {e}")
                     # Fall back to local download URL
                     result["download_url"] = f"/download-file/{session_id}/{filename}"
             else:
@@ -3286,7 +3301,7 @@ def generate_file_urls(files_data, session_id: str = None):
 
     # Handle different data structures
     if isinstance(files_data, list):
-        return [process_file_item(item) for item in files_data]
+        result = [process_file_item(item) for item in files_data]
     elif isinstance(files_data, dict):
         result = {}
         for key, value in files_data.items():
@@ -3299,9 +3314,14 @@ def generate_file_urls(files_data, session_id: str = None):
                 result[key] = process_file_item(value)
             else:
                 result[key] = value
-        return result
     else:
-        return files_data
+        result = files_data
+
+    # Print summary statistics
+    total_time = (time.time() - func_start) * 1000
+    print(f"[PERF generate_file_urls] Total: {total_time:.2f} ms | Files: {file_count} | head_object calls: {head_object_count} | Uploads: {upload_count}")
+
+    return result
 
 
 @app.get("/results/{session_id}")
@@ -3313,23 +3333,35 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
         user_id: The user ID
         turn_number: Optional turn number to retrieve. If not provided, returns current/latest turn results.
     """
+    import time
+    start_time = time.time()
+    print(f"[PERF /results] Started for session {session_id}")
+
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
 
+    # Get unified_manager ONCE and reuse it throughout this function
+    step1_start = time.time()
+    unified_manager = get_unified_session_manager(queue_manager)
+    print(f"[PERF /results] Step 1 (get_unified_manager): {(time.time() - step1_start) * 1000:.2f} ms")
+
     # Get multi-turn session info to determine turn number and sharing status
     # First check in-memory sessions
+    step2_start = time.time()
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     current_turn = None
     total_turns = None
     is_shared = False
     session_owner_id = None
+    cloud_multiturn_session = None  # Cache this for reuse in Step 4
 
     # If not in memory, try to get from MongoDB/cloud
     if not multiturn_session:
         try:
-            unified_manager = get_unified_session_manager(queue_manager)
-            cloud_multiturn_session = await unified_manager.get_multiturn_session_by_id(session_id)
+            # Use projection (include_turns=False) to only fetch metadata, not full turn data
+            # This is much faster since we only need: current_turn, total_turns, is_shared, user_id
+            cloud_multiturn_session = await unified_manager.get_multiturn_session_by_id(session_id, include_turns=False)
             if cloud_multiturn_session:
                 current_turn = cloud_multiturn_session.get("current_turn")
                 total_turns = cloud_multiturn_session.get("total_turns")
@@ -3342,6 +3374,7 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
         total_turns = multiturn_session.total_turns
         is_shared = multiturn_session.is_shared if hasattr(multiturn_session, 'is_shared') else False
         session_owner_id = multiturn_session.user_id if hasattr(multiturn_session, 'user_id') else None
+    print(f"[PERF /results] Step 2 (get multiturn info): {(time.time() - step2_start) * 1000:.2f} ms")
 
     # Process turn_number if we have turn information
     if current_turn is not None and total_turns is not None:
@@ -3358,9 +3391,10 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
     if session_owner_id and session_owner_id != user_id and not is_shared:
         raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-    # Use unified session manager to check both local and cloud storage
-    unified_manager = get_unified_session_manager(queue_manager)
+    # Use unified session manager to check both local and cloud storage (reuse existing instance)
+    step3_start = time.time()
     session_data = await unified_manager.get_session_by_id(session_id)
+    print(f"[PERF /results] Step 3 (get_session_by_id): {(time.time() - step3_start) * 1000:.2f} ms")
 
     if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -3379,8 +3413,19 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
     # For multi-turn sessions with specific turn_number, return turn-specific results
     if turn_number is not None and (current_turn is not None or total_turns is not None):
         # Load full multiturn session to get turn data
-        unified_manager_mt = get_unified_session_manager(queue_manager)
-        cloud_multiturn_session = await unified_manager_mt.get_multiturn_session_by_id(session_id)
+        # Step 2 used projection (no turns), so we need to fetch the full data WITH turns here
+        step4_start = time.time()
+        if cloud_multiturn_session and "turns" not in cloud_multiturn_session:
+            # Step 2 fetched metadata only (no turns) - need to fetch full session with turns
+            cloud_multiturn_session = await unified_manager.get_multiturn_session_by_id(session_id, include_turns=True)
+            print(f"[PERF /results] Step 4 (get full multiturn session with turns): {(time.time() - step4_start) * 1000:.2f} ms")
+        elif not cloud_multiturn_session:
+            # Not fetched at all yet
+            cloud_multiturn_session = await unified_manager.get_multiturn_session_by_id(session_id, include_turns=True)
+            print(f"[PERF /results] Step 4 (get full multiturn session): {(time.time() - step4_start) * 1000:.2f} ms")
+        else:
+            # Already has turns (unlikely path since Step 2 uses projection)
+            print(f"[PERF /results] Step 4 (get full multiturn session): 0.01 ms (already had turns - CACHED!)")
 
         if cloud_multiturn_session and "turns" in cloud_multiturn_session:
             turns = cloud_multiturn_session["turns"]
@@ -3396,22 +3441,30 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                 # Get turn-specific results
                 turn_files = target_turn.get("files", {})
 
-                # Try to include S3 files (like images) from cloud storage
-                try:
-                    cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
-                    if cloud_session and "s3_files" in cloud_session:
-                        s3_files = cloud_session["s3_files"]
-                        # Merge S3 files (especially images) into turn files
-                        if isinstance(turn_files, dict):
-                            # Add images from S3 if not already in turn_files
-                            if "images" in s3_files and "images" not in turn_files:
+                # OPTIMIZATION: Skip expensive sessions collection query if turn_files already has images
+                # Only fetch S3 files from sessions collection if turn_files is missing images
+                step5_start = time.time()
+                should_fetch_s3 = isinstance(turn_files, dict) and "images" not in turn_files
+
+                if should_fetch_s3:
+                    try:
+                        cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+                        if cloud_session and "s3_files" in cloud_session:
+                            s3_files = cloud_session["s3_files"]
+                            # Merge S3 files (especially images) into turn files
+                            if "images" in s3_files:
                                 turn_files["images"] = s3_files["images"]
-                except Exception as e:
-                    print(f"Warning: Could not retrieve S3 files for turn results: {e}")
+                    except Exception as e:
+                        print(f"Warning: Could not retrieve S3 files for turn results: {e}")
+                    print(f"[PERF /results] Step 5 (retrieve_session_from_cloud for S3 files): {(time.time() - step5_start) * 1000:.2f} ms - FETCHED")
+                else:
+                    print(f"[PERF /results] Step 5 (retrieve_session_from_cloud for S3 files): {(time.time() - step5_start) * 1000:.2f} ms - SKIPPED (already have files)")
 
                 # Generate URLs for turn files
+                step6_start = time.time()
                 if turn_files:
                     turn_files = generate_file_urls(turn_files, session_id)
+                print(f"[PERF /results] Step 6 (generate_file_urls): {(time.time() - step6_start) * 1000:.2f} ms")
 
                 # Append images to final report
                 final_report = target_turn.get("final_report", "")
@@ -3432,17 +3485,23 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                         "final_report": final_report_with_images
                     }
                 }
+                print(f"[PERF /results] TOTAL TIME: {(time.time() - start_time) * 1000:.2f} ms (turn-specific path)")
                 return result
 
     # For cloud sessions, retrieve from MongoDB
     storage_location = session_data.get("_storage_location", "unknown")
     if storage_location == "cloud":
         # Get full session data from cloud
+        step5_start = time.time()
         cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+        print(f"[PERF /results] Step 5 (retrieve_session_from_cloud): {(time.time() - step5_start) * 1000:.2f} ms")
+
         if cloud_session:
             # Generate URLs for S3 files
+            step6_start = time.time()
             s3_files = cloud_session.get("s3_files", {})
             s3_files_with_urls = generate_file_urls(s3_files, session_id)
+            print(f"[PERF /results] Step 6 (generate_file_urls): {(time.time() - step6_start) * 1000:.2f} ms")
 
             # Append images to final report
             final_report = cloud_session.get("final_report", "")
@@ -3463,6 +3522,7 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                 result["turn_number"] = turn_number
                 result["current_turn"] = current_turn
                 result["total_turns"] = total_turns
+            print(f"[PERF /results] TOTAL TIME: {(time.time() - start_time) * 1000:.2f} ms (cloud path)")
             return result
 
     # For local/active sessions, use existing json_result
@@ -4118,10 +4178,16 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
         include_thinking: If True, includes thinking process (response_content) in each turn.
                          Default is False to reduce response size for sessions with many turns.
     """
+    import time
+    start_time = time.time()
+    print(f"[PERF /multiturn-session] Started for session {session_id}")
+
     try:
         # Use Unified Session Manager to get session from any storage location
+        step1_start = time.time()
         unified_manager = get_unified_session_manager(queue_manager)
         session = await unified_manager.get_multiturn_session_by_id(session_id)
+        print(f"[PERF /multiturn-session] Step 1 (get_multiturn_session_by_id): {(time.time() - step1_start) * 1000:.2f} ms")
 
         if not session:
             raise HTTPException(status_code=404, detail="Multi-turn session not found")
@@ -4135,6 +4201,7 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
         cloud_session = None
 
         # Process turns: generate URLs and optionally exclude thinking process
+        step2_start = time.time()
         if "turns" in session and isinstance(session["turns"], list):
             for turn in session["turns"]:
                 # Generate URLs for files in each turn
@@ -4172,7 +4239,9 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
                     # If local files are missing, try to get S3 files from cloud (once)
                     if has_missing_files and cloud_session is None:
                         try:
+                            cloud_fetch_start = time.time()
                             cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+                            print(f"[PERF /multiturn-session] Cloud fetch: {(time.time() - cloud_fetch_start) * 1000:.2f} ms")
                             if cloud_session:
                                 print(f"Local files missing for session {session_id}, fetched S3 files from cloud storage")
                         except Exception as e:
@@ -4191,6 +4260,9 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
                     turn.pop("response_content", None)
                     # Keep final_report as it's the main output
 
+            print(f"[PERF /multiturn-session] Step 2 (process turns & generate URLs): {(time.time() - step2_start) * 1000:.2f} ms")
+
+        print(f"[PERF /multiturn-session] TOTAL TIME: {(time.time() - start_time) * 1000:.2f} ms")
         return session
 
     except HTTPException:

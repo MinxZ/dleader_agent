@@ -24,6 +24,34 @@ class UnifiedSessionManager:
     def __init__(self, queue_manager):
         self.queue_manager = queue_manager
         self.cloud_manager = cloud_storage_manager
+        # Cache MongoDB connection to avoid 1.5s overhead on every request
+        self._mongodb_collection_cache = None
+        self._mongodb_connection_failed = False
+
+    def _get_cached_mongodb_collection(self):
+        """Get cached MongoDB collection or create new connection if needed"""
+        # If connection previously failed, don't try again
+        if self._mongodb_connection_failed:
+            return None
+
+        # Return cached connection if available
+        if self._mongodb_collection_cache is not None:
+            return self._mongodb_collection_cache
+
+        # Create new connection and cache it
+        try:
+            from s3_mongodb.func_mongodb import get_mongodb_collection
+            import os
+            self._mongodb_collection_cache = get_mongodb_collection(
+                os.getenv("SESSION_DB_NAME", "dleader_agent"),
+                "multiturn_sessions"
+            )
+            print(f"[MongoDB] Connection established and cached")
+            return self._mongodb_collection_cache
+        except Exception as e:
+            print(f"[MongoDB] Connection failed: {e}")
+            self._mongodb_connection_failed = True
+            return None
 
     async def get_all_sessions(self, include_cloud: bool = True, user_id: str = None) -> List[Dict[str, Any]]:
         """
@@ -402,35 +430,23 @@ class UnifiedSessionManager:
         Returns:
             Dict containing sessions list and total count
         """
+        import time
+        start_time = time.time()
+
         all_sessions = []
         session_ids_seen = set()
+        in_memory_session_ids = set()
 
         # 1. Get in-memory active multi-turn sessions (currently being processed)
-        # Check if sessions are also in MongoDB to determine correct storage location
-        mongodb_session_ids = set()
-        if include_cloud:
-            try:
-                from s3_mongodb.func_mongodb import get_mongodb_collection
-                import os
-                collection = get_mongodb_collection(
-                    os.getenv("SESSION_DB_NAME", "dleader_agent"),
-                    "multiturn_sessions"
-                )
-                if collection is not None:
-                    # Get list of session IDs in MongoDB
-                    query = {}
-                    if user_id:
-                        query["user_id"] = user_id
-                    mongodb_session_ids = set([doc["session_id"] for doc in collection.find(query, {"session_id": 1})])
-            except Exception as e:
-                print(f"Warning: Could not fetch MongoDB session IDs: {e}")
-
+        # Filter by user_id upfront and collect session IDs
+        step1_start = time.time()
         for session_id, session in self.queue_manager.multiturn_sessions.items():
-            # Determine storage location: if session is complete and in MongoDB, mark as mongodb
-            is_complete = session.session_status == "completed"
-            in_mongodb = session_id in mongodb_session_ids
-            storage_location = "mongodb" if (is_complete and in_mongodb) else "memory"
+            # Filter by user_id if provided
+            session_user_id = getattr(session, 'user_id', None)
+            if user_id and session_user_id != user_id:
+                continue
 
+            in_memory_session_ids.add(session_id)
             session_data = {
                 "session_id": session_id,
                 "session_name": getattr(session, 'session_name', ""),
@@ -441,73 +457,192 @@ class UnifiedSessionManager:
                 "session_status": session.session_status,
                 "first_query": session.first_query,
                 "latest_query": session.latest_query,
-                "user_id": getattr(session, 'user_id', None),
+                "user_id": session_user_id,
                 # Sharing metadata
                 "is_shared": getattr(session, 'is_shared', False),
                 "shared_at": getattr(session, 'shared_at', None),
-                "_storage_location": storage_location
+                "_storage_location": "memory"  # Will update if also in MongoDB
             }
             all_sessions.append(session_data)
             session_ids_seen.add(session_id)
 
-        # 2. Get multi-turn sessions from MongoDB (all persisted sessions)
+        print(f"[PERF] Step 1 (in-memory): {(time.time() - step1_start) * 1000:.2f} ms - Found {len(all_sessions)} sessions")
+
+        # Get MongoDB collection from cache (fast!) or establish connection (slow, but only first time)
+        step_mongo_connect = time.time()
+        mongodb_collection = None
+        was_cached = False
         if include_cloud:
+            # Check if connection is already cached before getting it
+            was_cached = (self._mongodb_collection_cache is not None)
+            mongodb_collection = self._get_cached_mongodb_collection()
+        connection_time = (time.time() - step_mongo_connect) * 1000
+        if mongodb_collection is not None:
+            cache_status = "CACHED ✅" if was_cached else "NEW CONNECTION (will be cached)"
+            print(f"[PERF] MongoDB connection: {connection_time:.2f} ms ({cache_status})")
+        else:
+            print(f"[PERF] MongoDB connection: FAILED or SKIPPED")
+
+        # 2. Efficiently check which in-memory sessions are also in MongoDB (batch query)
+        step2_start = time.time()
+        if mongodb_collection is not None and in_memory_session_ids:
             try:
-                # Get from MongoDB multiturn collection
-                from s3_mongodb.func_mongodb import get_mongodb_collection
-                import os
-                collection = get_mongodb_collection(
-                    os.getenv("SESSION_DB_NAME", "dleader_agent"),
-                    "multiturn_sessions"
+                # Only check for the specific in-memory session IDs (much faster)
+                mongodb_in_memory_sessions = set([
+                    doc["session_id"] for doc in mongodb_collection.find(
+                        {"session_id": {"$in": list(in_memory_session_ids)}},
+                        {"session_id": 1}
+                    )
+                ])
+                # Update storage location for sessions that are both in memory and MongoDB
+                for session_data in all_sessions:
+                    if session_data["session_id"] in mongodb_in_memory_sessions:
+                        is_complete = session_data["session_status"] == "completed"
+                        if is_complete:
+                            session_data["_storage_location"] = "mongodb"
+            except Exception as e:
+                print(f"Warning: Could not check MongoDB for in-memory sessions: {e}")
+
+        print(f"[PERF] Step 2 (check in-memory in MongoDB): {(time.time() - step2_start) * 1000:.2f} ms")
+
+        # 3. Get total count from MongoDB (fast - just count, no data fetch)
+        step3_start = time.time()
+        total_mongodb_sessions = 0
+        if mongodb_collection is not None:
+            try:
+                query = {}
+                if user_id:
+                    query["user_id"] = user_id
+                # Only add $nin if there are sessions to exclude (empty $nin can slow down queries)
+                if session_ids_seen:
+                    query["session_id"] = {"$nin": list(session_ids_seen)}
+
+                print(f"[PERF] Count query: {query}")
+
+                # For initial page load (offset=0), skip expensive count
+                # We'll estimate the total after fetching the data
+                if offset == 0:
+                    # For first page, just indicate "has more" without exact count
+                    # This is much faster and sufficient for most UX
+                    total_mongodb_sessions = -1  # Will calculate after fetch
+                else:
+                    # For pagination (offset > 0), we need the exact count
+                    # Use index hint to speed up count
+                    try:
+                        total_mongodb_sessions = mongodb_collection.count_documents(
+                            query,
+                            hint="user_id_last_updated"  # Force use of our index
+                        )
+                    except:
+                        # If hint fails, fall back to regular count
+                        total_mongodb_sessions = mongodb_collection.count_documents(query)
+            except Exception as e:
+                print(f"Warning: Could not count MongoDB sessions: {e}")
+
+        print(f"[PERF] Step 3 (count MongoDB): {(time.time() - step3_start) * 1000:.2f} ms - Total: {total_mongodb_sessions}")
+
+        # 4. Calculate total and determine how many MongoDB sessions to fetch
+        if total_mongodb_sessions == -1:
+            # We skipped count for performance - will estimate after fetch
+            total_count = -1  # Unknown for now
+        else:
+            total_count = len(all_sessions) + total_mongodb_sessions
+
+        # Sort in-memory sessions by last_updated
+        all_sessions.sort(key=lambda x: x.get('last_updated', x.get('created_at', '')), reverse=True)
+
+        # Determine if we need MongoDB sessions for this page
+        in_memory_count = len(all_sessions)
+        need_mongodb_sessions = False
+        mongodb_offset = 0
+        mongodb_limit = 0
+
+        if offset < in_memory_count:
+            # Page starts within in-memory sessions
+            paginated_sessions = all_sessions[offset:offset + limit]
+            remaining_slots = limit - len(paginated_sessions)
+            if remaining_slots > 0:
+                # Need to fill remaining slots from MongoDB
+                need_mongodb_sessions = True
+                mongodb_offset = 0
+                mongodb_limit = remaining_slots
+        else:
+            # Page is entirely from MongoDB
+            need_mongodb_sessions = True
+            mongodb_offset = offset - in_memory_count
+            mongodb_limit = limit
+            paginated_sessions = []
+
+        # 5. Fetch only the needed MongoDB sessions with server-side sorting and pagination
+        step5_start = time.time()
+        if include_cloud and need_mongodb_sessions and mongodb_collection is not None:
+            try:
+                query = {}
+                if user_id:
+                    query["user_id"] = user_id
+                # Only add $nin if there are sessions to exclude (empty $nin can slow down queries)
+                if session_ids_seen:
+                    query["session_id"] = {"$nin": list(session_ids_seen)}
+
+                # Use MongoDB's server-side sort, skip, and limit (MUCH faster!)
+                mongodb_sessions = list(
+                    mongodb_collection.find(
+                        query,
+                        {
+                            "session_id": 1,
+                            "session_name": 1,
+                            "user_id": 1,
+                            "total_turns": 1,
+                            "created_at": 1,
+                            "last_updated": 1,
+                            "language": 1,
+                            "session_status": 1,
+                            "first_query": 1,
+                            "latest_query": 1,
+                            "is_shared": 1,
+                            "shared_at": 1
+                        }
+                    )
+                    .sort("last_updated", -1)  # Sort by last_updated descending
+                    .skip(mongodb_offset)
+                    .limit(mongodb_limit)
                 )
-                if collection is not None:
-                    # Build query for multiturn sessions
-                    query = {}
-                    if user_id:
-                        query["user_id"] = user_id
-                    # Get all sessions without limit first (we'll paginate after sorting)
-                    mongodb_sessions = list(collection.find(query).sort("created_at", -1))
-                    for session in mongodb_sessions:
-                        session_id = session.get("session_id")
-                        if session_id and session_id not in session_ids_seen:
-                            # Extract only necessary metadata (exclude heavy content like turns data)
-                            session_metadata = {
-                                "session_id": session_id,
-                                "session_name": session.get("session_name", ""),
-                                "user_id": session.get("user_id"),
-                                "total_turns": session.get("total_turns", 0),
-                                "created_at": session.get("created_at"),
-                                "last_updated": session.get("last_updated"),
-                                "language": session.get("language", "en"),
-                                "session_status": session.get("session_status", "active"),
-                                "first_query": session.get("first_query", ""),
-                                "latest_query": session.get("latest_query", ""),
-                                "is_shared": session.get("is_shared", False),
-                                "shared_at": session.get("shared_at"),
-                                "_storage_location": "mongodb"
-                            }
-                            all_sessions.append(session_metadata)
-                            session_ids_seen.add(session_id)
+
+                for session in mongodb_sessions:
+                    session_metadata = {
+                        "session_id": session.get("session_id"),
+                        "session_name": session.get("session_name", ""),
+                        "user_id": session.get("user_id"),
+                        "total_turns": session.get("total_turns", 0),
+                        "created_at": session.get("created_at"),
+                        "last_updated": session.get("last_updated"),
+                        "language": session.get("language", "en"),
+                        "session_status": session.get("session_status", "active"),
+                        "first_query": session.get("first_query", ""),
+                        "latest_query": session.get("latest_query", ""),
+                        "is_shared": session.get("is_shared", False),
+                        "shared_at": session.get("shared_at"),
+                        "_storage_location": "mongodb"
+                    }
+                    paginated_sessions.append(session_metadata)
             except Exception as e:
                 print(f"Warning: Could not fetch MongoDB multi-turn sessions: {e}")
 
-        # Filter by user_id if provided (for in-memory sessions that might not have been filtered)
-        if user_id:
-            filtered_sessions = []
-            for session in all_sessions:
-                session_user_id = session.get("user_id")
-                if session_user_id == user_id:
-                    filtered_sessions.append(session)
-            all_sessions = filtered_sessions
+        print(f"[PERF] Step 5 (fetch MongoDB): {(time.time() - step5_start) * 1000:.2f} ms")
 
-        # Sort by last_updated (newest first)
-        all_sessions.sort(key=lambda x: x.get('last_updated', x.get('created_at', '')), reverse=True)
+        # Calculate total if we skipped the count
+        if total_count == -1:
+            # We skipped count for performance
+            # Estimate based on fetch results
+            fetched_count = len(paginated_sessions)
+            if offset == 0 and fetched_count < limit:
+                # First page and got less than limit = this is the exact total
+                total_count = in_memory_count + fetched_count
+            else:
+                # Either not first page or got full limit = unknown total, but at least offset + fetched
+                total_count = in_memory_count + offset + fetched_count
 
-        # Get total count before pagination
-        total_count = len(all_sessions)
-
-        # Apply pagination
-        paginated_sessions = all_sessions[offset:offset + limit]
+        print(f"[PERF] TOTAL TIME: {(time.time() - start_time) * 1000:.2f} ms")
 
         return {
             "sessions": paginated_sessions,
@@ -516,10 +651,21 @@ class UnifiedSessionManager:
             "offset": offset
         }
 
-    async def get_multiturn_session_by_id(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get a specific multi-turn session by ID from any storage location"""
+    async def get_multiturn_session_by_id(self, session_id: str, include_turns: bool = True) -> Optional[Dict[str, Any]]:
+        """Get a specific multi-turn session by ID from any storage location
+
+        Args:
+            session_id: The session ID to fetch
+            include_turns: If False, excludes the 'turns' array to improve performance (default: True)
+        """
+        import os
+        import json
+        import time
+
+        func_start = time.time()
 
         # 1. Check in-memory first (currently active)
+        step_start = time.time()
         if session_id in self.queue_manager.multiturn_sessions:
             session = self.queue_manager.multiturn_sessions[session_id]
             return {
@@ -538,33 +684,68 @@ class UnifiedSessionManager:
                 "_storage_location": "memory",
                 "_session_object": session  # Include the actual object for updates
             }
+        print(f"[PERF get_multiturn_session_by_id] Step 1 (in-memory check): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
 
         # 2. Check local storage
+        step_start = time.time()
         multiturn_file = os.path.join(self.queue_manager.multiturn_storage_dir, f"{session_id}.json")
         if os.path.exists(multiturn_file):
             try:
                 with open(multiturn_file, 'r', encoding='utf-8') as f:
                     session_data = json.load(f)
                     session_data["_storage_location"] = "local"
+                    print(f"[PERF get_multiturn_session_by_id] Step 2 (local storage): {(time.time() - step_start) * 1000:.2f} ms - FOUND")
                     return session_data
             except Exception as e:
                 print(f"Error loading multiturn session from local storage: {e}")
+        print(f"[PERF get_multiturn_session_by_id] Step 2 (local storage): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
 
-        # 3. Check MongoDB (primary storage)
+        # 3. Check MongoDB (primary storage) - use cached connection
+        step_start = time.time()
         try:
-            from s3_mongodb.func_mongodb import get_mongodb_collection
-            collection = get_mongodb_collection(
-                os.getenv("SESSION_DB_NAME", "dleader_agent"),
-                "multiturn_sessions"
-            )
-            if collection is not None:
-                session_data = collection.find_one({"session_id": session_id})
+            get_conn_start = time.time()
+            mongodb_collection = self._get_cached_mongodb_collection()
+            print(f"[PERF get_multiturn_session_by_id] Step 3a (get MongoDB connection): {(time.time() - get_conn_start) * 1000:.2f} ms")
+
+            if mongodb_collection is not None:
+                query_start = time.time()
+
+                # Use projection to exclude large 'turns' array if not needed
+                if not include_turns:
+                    # Only include the fields we need (turns will be automatically excluded)
+                    projection = {
+                        "session_id": 1,
+                        "session_name": 1,
+                        "user_id": 1,
+                        "total_turns": 1,
+                        "current_turn": 1,
+                        "created_at": 1,
+                        "last_updated": 1,
+                        "language": 1,
+                        "session_status": 1,
+                        "first_query": 1,
+                        "latest_query": 1,
+                        "is_shared": 1,
+                        "shared_at": 1
+                        # Note: 'turns' is automatically excluded when not listed
+                    }
+                    session_data = mongodb_collection.find_one({"session_id": session_id}, projection)
+                    print(f"[PERF get_multiturn_session_by_id] Step 3b (MongoDB find_one query WITH PROJECTION): {(time.time() - query_start) * 1000:.2f} ms")
+                else:
+                    session_data = mongodb_collection.find_one({"session_id": session_id})
+                    print(f"[PERF get_multiturn_session_by_id] Step 3b (MongoDB find_one query FULL): {(time.time() - query_start) * 1000:.2f} ms")
+
                 if session_data:
                     session_data["_storage_location"] = "mongodb"
+                    print(f"[PERF get_multiturn_session_by_id] Step 3 (MongoDB total): {(time.time() - step_start) * 1000:.2f} ms - FOUND")
+                    print(f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms")
                     return session_data
+                else:
+                    print(f"[PERF get_multiturn_session_by_id] Step 3 (MongoDB total): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
         except Exception as e:
             print(f"Error loading multiturn session from MongoDB: {e}")
 
+        print(f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms - SESSION NOT FOUND ANYWHERE")
         return None
 
     async def update_multiturn_session(self, session_id: str, updates: Dict[str, Any], user_id: str = None) -> bool:

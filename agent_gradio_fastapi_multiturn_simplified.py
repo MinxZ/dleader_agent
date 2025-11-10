@@ -736,45 +736,23 @@ async def check_status_with_history(session_id: str, server_url: str, user_id: s
 
 """
 
-            # Extract and download images from /results (optimized)
-            if 'files' in results_data:
-                files = results_data['files']
-                if 'images' in files and files['images']:
-                    print(f"Found {len(files['images'])} images in /results")
-                    start_images = time.time()
-                    # Limit to first 10 images for faster rendering
-                    image_urls = files['images'][:10] if len(files['images']) > 10 else files['images']
-                    status_images = download_images_from_urls(image_urls)
-                    print(f"⏱️  [STATUS] download_images: {(time.time() - start_images) * 1000:.2f} ms")
-                    if len(files['images']) > 10:
-                        print(f"⚠️  Showing first 10 of {len(files['images'])} images for performance")
-
-            # Add image count info
-            if status_images:
-                result_display += f"\n\n**📸 {len(status_images)} images from latest turn shown below**\n\n"
-
             # Add note about thinking process in separate tab
             result_display += f"""
 
 ---
 
-💡 **Tip:** Click the "🧠 Thinking Process" tab to view detailed agent reasoning steps.
+💡 **Tips:**
+- Click the "🧠 Thinking Process" tab to view detailed agent reasoning steps
+- Use the turn selector above to view images from specific turns
 
 """
 
-            # Return with images if available (NO snapshots call for completed sessions)
+            # Return without downloading images (much faster!)
             backend_time = (time.time() - start_total) * 1000
-            print(f"⏱️  [BACKEND] Total processing time: {backend_time:.2f} ms")
-            print(f"⏱️  [GRADIO] About to return to Gradio (render time will be added by Gradio)")
+            print(f"⏱️  [BACKEND] Total processing time (WITHOUT image download): {backend_time:.2f} ms")
 
-            start_return = time.time()
-            if status_images:
-                result = (result_display, gr.update(visible=False), gr.update(value=status_images, visible=True), results_data)
-            else:
-                result = (result_display, gr.update(visible=False), gr.update(value=[], visible=False), results_data)
-
-            print(f"⏱️  [RETURN] Preparing return objects: {(time.time() - start_return) * 1000:.2f} ms")
-            return result
+            # Return with no images in gallery (images shown when user selects a turn)
+            return (result_display, gr.update(visible=False), gr.update(value=[], visible=False), results_data)
 
         # For non-completed sessions (in progress), show thinking process from /snapshots
         else:
