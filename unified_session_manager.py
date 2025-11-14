@@ -668,12 +668,13 @@ class UnifiedSessionManager:
         step_start = time.time()
         if session_id in self.queue_manager.multiturn_sessions:
             session = self.queue_manager.multiturn_sessions[session_id]
-            return {
+            result = {
                 "session_id": session_id,
                 "session_name": getattr(session, 'session_name', ""),
                 "created_at": session.created_at,
                 "last_updated": session.last_updated,
                 "total_turns": session.total_turns,
+                "current_turn": session.current_turn,
                 "language": session.language,
                 "session_status": session.session_status,
                 "first_query": session.first_query,
@@ -684,28 +685,32 @@ class UnifiedSessionManager:
                 "_storage_location": "memory",
                 "_session_object": session  # Include the actual object for updates
             }
+
+            # Extract turns if requested
+            if include_turns and hasattr(session, 'turns'):
+                result["turns"] = []
+                for turn in session.turns:
+                    turn_dict = {
+                        "turn_number": turn.turn_number,
+                        "turn_type": turn.turn_type,
+                        "query": turn.query,
+                        "final_report": turn.final_report,
+                        "timestamp": turn.timestamp,
+                        "status": turn.status,
+                        "files": turn.files if hasattr(turn, 'files') else {},
+                        "response_content": turn.response_content if hasattr(turn, 'response_content') else None
+                    }
+                    result["turns"].append(turn_dict)
+
+            return result
         print(f"[PERF get_multiturn_session_by_id] Step 1 (in-memory check): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
 
-        # 2. Check local storage
-        step_start = time.time()
-        multiturn_file = os.path.join(self.queue_manager.multiturn_storage_dir, f"{session_id}.json")
-        if os.path.exists(multiturn_file):
-            try:
-                with open(multiturn_file, 'r', encoding='utf-8') as f:
-                    session_data = json.load(f)
-                    session_data["_storage_location"] = "local"
-                    print(f"[PERF get_multiturn_session_by_id] Step 2 (local storage): {(time.time() - step_start) * 1000:.2f} ms - FOUND")
-                    return session_data
-            except Exception as e:
-                print(f"Error loading multiturn session from local storage: {e}")
-        print(f"[PERF get_multiturn_session_by_id] Step 2 (local storage): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
-
-        # 3. Check MongoDB (primary storage) - use cached connection
+        # 2. Check MongoDB (primary storage) - use cached connection
         step_start = time.time()
         try:
             get_conn_start = time.time()
             mongodb_collection = self._get_cached_mongodb_collection()
-            print(f"[PERF get_multiturn_session_by_id] Step 3a (get MongoDB connection): {(time.time() - get_conn_start) * 1000:.2f} ms")
+            print(f"[PERF get_multiturn_session_by_id] Step 2a (get MongoDB connection): {(time.time() - get_conn_start) * 1000:.2f} ms")
 
             if mongodb_collection is not None:
                 query_start = time.time()
@@ -730,20 +735,36 @@ class UnifiedSessionManager:
                         # Note: 'turns' is automatically excluded when not listed
                     }
                     session_data = mongodb_collection.find_one({"session_id": session_id}, projection)
-                    print(f"[PERF get_multiturn_session_by_id] Step 3b (MongoDB find_one query WITH PROJECTION): {(time.time() - query_start) * 1000:.2f} ms")
+                    print(f"[PERF get_multiturn_session_by_id] Step 2b (MongoDB find_one query WITH PROJECTION): {(time.time() - query_start) * 1000:.2f} ms")
                 else:
                     session_data = mongodb_collection.find_one({"session_id": session_id})
-                    print(f"[PERF get_multiturn_session_by_id] Step 3b (MongoDB find_one query FULL): {(time.time() - query_start) * 1000:.2f} ms")
+                    print(f"[PERF get_multiturn_session_by_id] Step 2b (MongoDB find_one query FULL): {(time.time() - query_start) * 1000:.2f} ms")
 
                 if session_data:
                     session_data["_storage_location"] = "mongodb"
-                    print(f"[PERF get_multiturn_session_by_id] Step 3 (MongoDB total): {(time.time() - step_start) * 1000:.2f} ms - FOUND")
+                    print(f"[PERF get_multiturn_session_by_id] Step 2 (MongoDB total): {(time.time() - step_start) * 1000:.2f} ms - FOUND")
                     print(f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms")
                     return session_data
                 else:
-                    print(f"[PERF get_multiturn_session_by_id] Step 3 (MongoDB total): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
+                    print(f"[PERF get_multiturn_session_by_id] Step 2 (MongoDB total): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
         except Exception as e:
             print(f"Error loading multiturn session from MongoDB: {e}")
+        print(f"[PERF get_multiturn_session_by_id] Step 2 (MongoDB): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
+
+        # 3. Fallback to local storage (may be stale, but better than nothing)
+        step_start = time.time()
+        multiturn_file = os.path.join(self.queue_manager.multiturn_storage_dir, f"{session_id}.json")
+        if os.path.exists(multiturn_file):
+            try:
+                with open(multiturn_file, 'r', encoding='utf-8') as f:
+                    session_data = json.load(f)
+                    session_data["_storage_location"] = "local"
+                    print(f"[PERF get_multiturn_session_by_id] Step 3 (local storage fallback): {(time.time() - step_start) * 1000:.2f} ms - FOUND")
+                    print(f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms")
+                    return session_data
+            except Exception as e:
+                print(f"Error loading multiturn session from local storage: {e}")
+        print(f"[PERF get_multiturn_session_by_id] Step 3 (local storage fallback): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
 
         print(f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms - SESSION NOT FOUND ANYWHERE")
         return None

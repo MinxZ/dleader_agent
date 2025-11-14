@@ -58,6 +58,8 @@ from enhanced_multiturn_handler import EnhancedMultiTurnHandler
 from template_retriever import TemplateRetriever
 # Import unified session manager
 from unified_session_manager import get_unified_session_manager
+# Import TurnType enum from models
+from api.models import TurnType
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -77,6 +79,104 @@ class Language(str, Enum):
 def now_jst():
     """Get current time in JST (UTC+9)"""
     return datetime.now(JST)
+
+
+def should_use_template_matching(query: str, language: str = "en") -> bool:
+    """
+    Use LLM to intelligently determine if a query needs template matching based on complexity.
+    Uses the same LLM configuration as the main agent for consistency.
+
+    The LLM will analyze the query to determine if it:
+    - Is a simple query (e.g., "1+1", "hello", "what is DNA") -> No template matching
+    - Requires complex biomedical workflow execution -> Template matching
+
+    Args:
+        query: The user's query string
+        language: The language of the query ("en" or "jp")
+
+    Returns:
+        bool: True if template matching should be used, False otherwise
+    """
+    try:
+        # Import Anthropic client
+        from anthropic import Anthropic
+        import os
+
+        # Create Anthropic client
+        client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+        # Use the same model as the main agent (Claude Sonnet 4.5)
+        model = "claude-sonnet-4-5-20250929"
+
+        # Prepare the prompt for the LLM
+        if language == "jp":
+            system_prompt = """あなたは、クエリが複雑なバイオメディカルワークフローテンプレートを必要とするかどうかを判断する分類器です。
+
+次のようなシンプルなクエリには「NO」と答えてください：
+- 簡単な数式（1+1、2*3など）
+- 挨拶や基本的な会話
+- 単純な定義の質問
+- 単一の概念の簡単な説明
+
+次のような複雑なクエリには「YES」と答えてください：
+- バイオメディカル分析ワークフロー
+- 多段階のデータ処理
+- 統計分析やモデリング
+- 複数のツールやステップを必要とするタスク
+
+「YES」または「NO」のみで回答してください。"""
+        else:
+            system_prompt = """You are a classifier that determines if a query requires complex biomedical workflow template matching.
+
+Answer "NO" for simple queries like:
+- Simple math expressions (1+1, 2*3, etc.)
+- Greetings and basic conversation
+- Simple definition questions
+- Brief explanations of single concepts
+- General questions that don't require tool execution or workflows
+
+Answer "YES" for complex queries that require:
+- Biomedical analysis workflows
+- Multi-step data processing
+- Statistical analysis or modeling
+- Tasks requiring multiple tools or steps
+- Scientific research or experimental design
+
+Respond with ONLY "YES" or "NO"."""
+
+        # Call the LLM with same model as main agent
+        response = client.messages.create(
+            model=model,
+            max_tokens=10,
+            temperature=0,
+            system=system_prompt,
+            messages=[{
+                "role": "user",
+                "content": f"Query: {query}\n\nDoes this query require workflow template matching?"
+            }]
+        )
+
+        # Parse response
+        answer = response.content[0].text.strip().upper()
+
+        # Extract YES/NO from response
+        if "YES" in answer:
+            logger.info(f"LLM decided: USE template matching for query: {query[:100]}")
+            return True
+        elif "NO" in answer:
+            logger.info(f"LLM decided: SKIP template matching for query: {query[:100]}")
+            return False
+        else:
+            # If unclear, default to using template matching (safer)
+            logger.warning(f"LLM response unclear ('{answer}'), defaulting to template matching")
+            return True
+
+    except Exception as e:
+        # If LLM call fails, default to template matching (safer)
+        logger.error(f"Error in LLM-based template detection: {e}")
+        logger.info("Falling back to default: using template matching")
+        return True
+
 
 # Request/Response Models
 class ChatRequest(BaseModel):
@@ -109,12 +209,14 @@ class SessionInfo(BaseModel):
 # Multi-Turn Data Structures
 class ConversationTurn(BaseModel):
     turn_number: int
+    turn_type: str = "execution"  # "planning" or "execution"
     query: str
     response_content: Optional[str] = None
     final_report: Optional[str] = None
     files: Optional[Dict[str, Any]] = None  # Changed to Any to support richer file metadata
     timestamp: str
     status: str = "processing"
+    ready_for_execution: Optional[bool] = None  # Only relevant for planning turns
 
 class MultiTurnSession(BaseModel):
     session_id: str
@@ -195,7 +297,7 @@ class SharedSessionInfo(BaseModel):
 class UserRequest:
     def __init__(self, session_id: str, message: str, language: Language, uploaded_files: List[str] = None,
                  is_continuation: bool = False, previous_context: str = "", turn_number: int = 1, user_id: str = None,
-                 use_template: bool = True):
+                 use_template: bool = True, turn_type: str = "execution"):
         self.session_id = session_id
         self.message = message
         self.language = language
@@ -224,7 +326,12 @@ class UserRequest:
         self.is_continuation = is_continuation
         self.previous_context = previous_context
         self.turn_number = turn_number
+        self.turn_type = turn_type  # "planning" or "execution"
         self.enhanced_message = self._build_enhanced_message()
+
+        # Planning mode specific attributes
+        self.ready_for_execution = None  # Set after planning turn completes
+        self.agent_config = None  # Custom agent config for planning mode
 
         # Template matching attributes
         self.template_matched = False
@@ -1065,8 +1172,19 @@ Reasoning: {user_request.template_reasoning}
         return turn_number
 
     def complete_turn(self, session_id: str, turn_number: int, response_content: str,
-                     final_report: str, files: Dict[str, str]):
-        """Complete a turn with results"""
+                     final_report: str, files: Dict[str, str], turn_type: str = "execution",
+                     ready_for_execution: bool = None):
+        """Complete a turn with results
+
+        Args:
+            session_id: Session identifier
+            turn_number: Turn number
+            response_content: Response content (thinking process)
+            final_report: Final report
+            files: Generated files
+            turn_type: Type of turn ("planning" or "execution")
+            ready_for_execution: For planning turns, whether agent is ready to execute
+        """
         session = self.multiturn_sessions.get(session_id)
         if not session:
             return
@@ -1076,6 +1194,9 @@ Reasoning: {user_request.template_reasoning}
             if turn.turn_number == turn_number:
                 turn.response_content = response_content
                 turn.final_report = final_report
+                turn.turn_type = turn_type  # NEW FIELD
+                if ready_for_execution is not None:
+                    turn.ready_for_execution = ready_for_execution  # NEW FIELD for planning
 
                 # Enhanced file tracking with metadata
                 if files:
@@ -1150,12 +1271,14 @@ Reasoning: {user_request.template_reasoning}
                 "turns": [
                     {
                         "turn_number": turn.turn_number,
+                        "turn_type": turn.turn_type,  # NEW FIELD
                         "query": turn.query,
                         "response_content": turn.response_content,
                         "final_report": turn.final_report,
                         "files": turn.files,
                         "status": turn.status,
-                        "created_at": turn.timestamp
+                        "created_at": turn.timestamp,
+                        "ready_for_execution": turn.ready_for_execution  # NEW FIELD for planning
                     } for turn in session.turns
                 ]
             }
@@ -1438,7 +1561,8 @@ Reasoning: {user_request.template_reasoning}
             # Create and start process
             agent_process = Process(
                 target=run_agent_in_process,
-                args=(message_queue, result_queue, user_request.enhanced_message, session_path, user_request.use_template)
+                args=(message_queue, result_queue, user_request.enhanced_message, session_path,
+                      user_request.use_template, user_request.turn_type, user_request.agent_config)
             )
             user_request.agent_process = agent_process
             agent_process.start()
@@ -1534,6 +1658,9 @@ Reasoning: {user_request.template_reasoning}
                         elif msg["type"] == "result":
                             user_request.result = msg["content"]
                             accumulated_thinking = msg.get("output", "")
+                            # Store planning mode fields
+                            if msg.get("turn_type") == "planning":
+                                user_request.ready_for_execution = msg.get("ready_for_execution", False)
                         elif msg["type"] == "error":
                             user_request.error = msg["content"]
                             print(f"Process error: {msg.get('traceback', msg['content'])}")
@@ -1553,6 +1680,9 @@ Reasoning: {user_request.template_reasoning}
                     if msg["type"] == "result":
                         user_request.result = msg["content"]
                         accumulated_thinking = msg.get("output", accumulated_thinking)
+                        # Store planning mode fields
+                        if msg.get("turn_type") == "planning":
+                            user_request.ready_for_execution = msg.get("ready_for_execution", False)
                         # Extract template info from final result
                         if "template_info" in msg:
                             template_info = msg["template_info"]
@@ -1904,7 +2034,9 @@ Reasoning: {user_request.template_reasoning}
                     user_request.turn_number,
                     cleaned_thinking,
                     final_report_content,
-                    files_dict
+                    files_dict,
+                    turn_type=user_request.turn_type,
+                    ready_for_execution=getattr(user_request, 'ready_for_execution', None)
                 )
             
         except Exception as e:
@@ -2005,7 +2137,8 @@ Reasoning: {user_request.template_reasoning}
 queue_manager = QueueManager()
 
 # Process-based agent runner (defined at module level for pickling)
-def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced_message: str, session_path: str, use_template: bool = True):
+def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced_message: str, session_path: str,
+                         use_template: bool = True, turn_type: str = "execution", agent_config: dict = None):
     """
     Run agent in a separate process for true termination capability
     This function runs in a separate process and communicates via queues
@@ -2016,6 +2149,8 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
         enhanced_message: The message/query to process
         session_path: Path to session directory
         use_template: Whether to use template matching (default: True)
+        turn_type: Type of turn - "planning" or "execution" (default: "execution")
+        agent_config: Custom agent configuration for planning mode
     """
     import atexit
     import glob
@@ -2111,6 +2246,76 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                 "content": "Agent starting in separate process with snapshot tracking..."
             })
 
+            # Check if this is a planning turn
+            if turn_type == "planning":
+                # PLANNING MODE - No tools, just LLM reasoning
+                result_queue.put({
+                    "type": "status",
+                    "content": "Planning mode: Agent will ask clarifying questions without executing tools..."
+                })
+
+                # Use direct LLM call without tools
+                from langchain_anthropic import ChatAnthropic
+
+                llm = ChatAnthropic(
+                    model=agent_config.get("model", "claude-sonnet-4-5-20250929"),
+                    temperature=agent_config.get("temperature", 0.7)
+                )
+
+                # Build prompt with system and user message
+                system_prompt = agent_config.get("system_prompt", "You are a helpful assistant.")
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": enhanced_message}
+                ]
+
+                # Call LLM
+                result_queue.put({
+                    "type": "status",
+                    "content": "Generating planning response..."
+                })
+
+                response = llm.invoke(messages)
+                result_content = response.content
+
+                # Check if agent signals readiness for execution
+                ready_for_execution = "[READY_FOR_EXECUTION]" in result_content
+
+                # Remove the signal from content (keep it clean for display)
+                if ready_for_execution:
+                    result_content = result_content.replace("[READY_FOR_EXECUTION]", "").strip()
+
+                # Signal completion
+                agent_complete.set()
+
+                # Get final output
+                with output_lock:
+                    final_output = output_buffer.getvalue()
+
+                # Send final result with readiness flag
+                result_queue.put({
+                    "type": "result",
+                    "content": result_content,
+                    "output": final_output,
+                    "ready_for_execution": ready_for_execution,  # NEW FLAG
+                    "turn_type": "planning",
+                    "template_info": {"matched": False}  # No template matching in planning mode
+                })
+
+                # Send final snapshot
+                result_queue.put({
+                    "type": "final_snapshot",
+                    "content": final_output,
+                    "result": result_content,
+                    "ready_for_execution": ready_for_execution,
+                    "timestamp": time.time(),
+                    "template_info": {"matched": False}
+                })
+
+                # Skip the rest of execution logic
+                return
+
+            # EXECUTION MODE - Full agent with tools
             # Create agent
             from agent_fastapi_server_multiturn import create_agent
             agent = create_agent()
@@ -2535,6 +2740,101 @@ def create_agent():
     )
     return agent
 
+
+def create_planning_agent(language: str = "en"):
+    """
+    Create a planning agent for clarification phase
+
+    Uses same model as execution (Claude Sonnet 4) for high-quality planning,
+    but with NO tool access and focused system prompt.
+
+    Args:
+        language: "en" or "jp" for language-specific prompts
+
+    Returns:
+        dict with agent configuration for planning mode
+    """
+
+    if language == "en":
+        planning_system_prompt = """You are a helpful AI assistant in planning mode for biomedical data analysis.
+Your goal is to understand the user's needs by asking clarifying questions.
+
+DO NOT execute any analysis or use tools yet. Your job is to:
+1. Ask 2-4 focused clarifying questions to understand:
+   - What type of data/analysis they need
+   - What their goals are
+   - What outputs they expect
+2. Help them refine their request
+3. Build a clear plan of what you'll do
+
+Keep responses concise (2-3 paragraphs max).
+
+IMPORTANT - When to suggest execution:
+- When you have enough information about: data type, analysis goals, and expected outputs
+- When the user has answered your key questions
+- When you can create a clear execution plan
+
+Signal readiness by including this EXACT phrase at the end of your response:
+"[READY_FOR_EXECUTION]"
+
+When ready, structure your response like this:
+1. Summarize what you understand
+2. Outline the execution plan (3-5 steps)
+3. End with: "I have enough information to proceed! [READY_FOR_EXECUTION]"
+
+Example ready response:
+"Great! I now understand you want to:
+- Analyze gene expression data from your CSV file
+- Perform hierarchical clustering
+- Generate a heatmap and PCA plot
+
+Here's my execution plan:
+1. Load and validate the gene expression data
+2. Perform data preprocessing and normalization
+3. Apply hierarchical clustering
+4. Generate heatmap visualization
+5. Create PCA plot with cluster annotations
+
+I have enough information to proceed! [READY_FOR_EXECUTION]"
+"""
+    else:  # Japanese
+        planning_system_prompt = """あなたは計画モードのAIアシスタントです。
+ユーザーのニーズを理解するために質問をすることが目標です。
+
+まだ分析やツールの実行はしないでください。あなたの仕事は:
+1. 2-4の焦点を絞った質問をして理解する:
+   - どのようなデータ/分析が必要か
+   - 目標は何か
+   - どのような出力を期待しているか
+2. リクエストを洗練させる
+3. 実行計画を明確に作成する
+
+回答は簡潔に（2-3段落以内）。
+
+重要 - 実行を提案するタイミング:
+- データタイプ、分析目標、期待される出力について十分な情報がある時
+- ユーザーが重要な質問に答えた時
+- 明確な実行計画を作成できる時
+
+準備ができたら、このフレーズを応答の最後に含めてください:
+"[READY_FOR_EXECUTION]"
+
+準備ができた時の回答構造:
+1. 理解した内容を要約
+2. 実行計画を概説（3-5ステップ）
+3. 最後に: "十分な情報が揃いました！実行に進むことができます。[READY_FOR_EXECUTION]"
+"""
+
+    return {
+        "system_prompt": planning_system_prompt,
+        "model": "claude-sonnet-4-5-20250929",  # Same model as execution
+        "tools": [],  # NO TOOLS - key difference
+        "timeout": 90,  # Shorter timeout (90s vs 600s)
+        "temperature": 0.7,
+        "mode": "planning"
+    }
+
+
 # Global template retriever instance (initialized once, reused for all requests)
 template_retriever = None
 
@@ -2626,7 +2926,7 @@ async def start_chat_queue(
     language: Language = Form(Language.EN),
     user_id: str = Form(...),
     session_id: Optional[str] = Form(None),
-    use_template: bool = Form(True),
+    use_template: Optional[bool] = Form(None),
     files: List[UploadFile] = File(default=[])
 ):
     """Add chat request to queue with S3 file uploads
@@ -2636,12 +2936,18 @@ async def start_chat_queue(
         language: Language for response (en/jp)
         user_id: User identifier
         session_id: Optional session ID (creates new if not provided)
-        use_template: Whether to use template matching (default: True)
+        use_template: Whether to use template matching (None = auto-detect based on query complexity)
         files: Uploaded files
     """
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    # Automatically determine if template matching should be used
+    # If use_template is None (not specified), use LLM to auto-detect based on query complexity
+    if use_template is None:
+        use_template = should_use_template_matching(message, language=language.value)
+        logger.info(f"LLM auto-detected template matching: {use_template} for query: {message[:100]}")
 
     session_id = session_id or str(uuid.uuid4())
 
@@ -3092,54 +3398,80 @@ async def download_individual_file(session_id: str, filename: str, user_id: str)
 
 def append_images_to_report(final_report: str, files_data: dict) -> str:
     """
-    Append images to the final report in Markdown format
+    Append images and download links to the final report in Markdown format
 
     Args:
         final_report: The original final report content
         files_data: Dictionary containing file information with URLs
 
     Returns:
-        Enhanced final report with images appended
+        Enhanced final report with images and downloads appended
     """
     if not files_data or not isinstance(files_data, dict):
         return final_report
 
+    added_content = ""
+
     # Extract images from files_data
     images = files_data.get("images", [])
-    if not images:
-        return final_report
+    if images:
+        # Start building the images section
+        images_section = "\n\n---\n\n## 📊 Generated Images\n\n"
 
-    # Start building the images section
-    images_section = "\n\n---\n\n## 📊 Generated Images\n\n"
+        # Process each image
+        image_count = 0
+        for image_item in images:
+            # Handle both dict and string formats
+            if isinstance(image_item, dict):
+                filename = image_item.get("filename", "image")
+                url = image_item.get("url")
+                s3_key = image_item.get("s3_key")
 
-    # Process each image
-    image_count = 0
-    for image_item in images:
-        # Handle both dict and string formats
-        if isinstance(image_item, dict):
-            filename = image_item.get("filename", "image")
-            url = image_item.get("url")
-            s3_key = image_item.get("s3_key")
-
-            if url:
-                # Use the presigned URL (works with S3 URLs even without .png/.jpg extension)
+                if url:
+                    # Use the presigned URL (works with S3 URLs even without .png/.jpg extension)
+                    image_count += 1
+                    # Extract a cleaner name from filename or s3_key
+                    display_name = filename.replace("_", " ").replace("-", " ").title()
+                    images_section += f"### {display_name}\n\n"
+                    images_section += f"![{display_name}]({url})\n\n"
+            elif isinstance(image_item, str):
+                # Handle string URL directly
                 image_count += 1
-                # Extract a cleaner name from filename or s3_key
-                display_name = filename.replace("_", " ").replace("-", " ").title()
+                display_name = f"Image {image_count}"
                 images_section += f"### {display_name}\n\n"
-                images_section += f"![{display_name}]({url})\n\n"
-        elif isinstance(image_item, str):
-            # Handle string URL directly
-            image_count += 1
-            display_name = f"Image {image_count}"
-            images_section += f"### {display_name}\n\n"
-            images_section += f"![{display_name}]({image_item})\n\n"
+                images_section += f"![{display_name}]({image_item})\n\n"
 
-    # Only append the section if we found images
-    if image_count > 0:
-        return final_report + images_section
+        # Only append the section if we found images
+        if image_count > 0:
+            added_content += images_section
 
-    return final_report
+    # Add download section for session zip
+    session_zip = files_data.get("session_zip")
+    if session_zip and isinstance(session_zip, dict):
+        url = session_zip.get("url")
+        if url:
+            downloads_section = "\n\n---\n\n## 📦 Downloads\n\n"
+            filename = session_zip.get("filename", "session.zip")
+            file_size = session_zip.get("file_size")
+
+            # Format file size for display
+            if file_size:
+                if file_size > 1024 * 1024:  # MB
+                    size_display = f"{file_size / (1024 * 1024):.2f} MB"
+                elif file_size > 1024:  # KB
+                    size_display = f"{file_size / 1024:.2f} KB"
+                else:
+                    size_display = f"{file_size} bytes"
+                downloads_section += f"**Complete Session Package** ({size_display})\n\n"
+            else:
+                downloads_section += f"**Complete Session Package**\n\n"
+
+            downloads_section += f"[📥 Download {filename}]({url})\n\n"
+            downloads_section += "*Includes all session files, reports, and generated outputs*\n\n"
+
+            added_content += downloads_section
+
+    return final_report + added_content
 
 
 def generate_file_urls(files_data, session_id: str = None):
@@ -3377,10 +3709,10 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
     print(f"[PERF /results] Step 2 (get multiturn info): {(time.time() - step2_start) * 1000:.2f} ms")
 
     # Process turn_number if we have turn information
-    if current_turn is not None and total_turns is not None:
-        # If turn_number not specified, use current turn
+    if total_turns is not None:
+        # If turn_number not specified, use current_turn (or fall back to total_turns for last turn)
         if turn_number is None:
-            turn_number = current_turn
+            turn_number = current_turn if current_turn is not None else total_turns
         # Validate turn_number is within range
         elif turn_number < 1 or turn_number > total_turns:
             raise HTTPException(status_code=400, detail=f"Invalid turn_number. Must be between 1 and {total_turns}")
@@ -3481,10 +3813,15 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                     "language": cloud_multiturn_session.get("language", "en"),
                     "query": target_turn.get("query"),
                     "files": turn_files,
+                    "turn_type": target_turn.get("turn_type", "execution"),  # NEW FIELD
                     "content": {
                         "final_report": final_report_with_images
                     }
                 }
+
+                # Add ready_for_execution flag for planning turns
+                if target_turn.get("turn_type") == "planning":
+                    result["ready_for_execution"] = target_turn.get("ready_for_execution", False)
                 print(f"[PERF /results] TOTAL TIME: {(time.time() - start_time) * 1000:.2f} ms (turn-specific path)")
                 return result
 
@@ -3654,14 +3991,39 @@ async def stop_task(session_id: str, user_id: str):
 # REMOVED: /stream/{session_id} endpoint - SSE streaming not used by Gradio (uses polling instead)
 
 
+def filter_execute_blocks(text: str, include_execute: bool = False) -> str:
+    """Filter out <execute>...</execute> blocks from text if include_execute is False
+
+    Args:
+        text: The text to filter
+        include_execute: If True, return text as-is. If False, remove execute blocks.
+
+    Returns:
+        Filtered text with execute blocks removed (or original text if include_execute=True)
+    """
+    if include_execute or not text:
+        return text
+
+    import re
+    # Remove <execute>...</execute> blocks (including multiline)
+    filtered_text = re.sub(r'<execute>.*?</execute>', '', text, flags=re.DOTALL)
+    return filtered_text
+
+
 @app.get("/snapshots/{session_id}")
-async def get_session_snapshots(session_id: str, user_id: str, turn_number: Optional[int] = None):
+async def get_session_snapshots(
+    session_id: str,
+    user_id: str,
+    turn_number: Optional[int] = None,
+    include_execute: bool = False
+):
     """Get all periodic snapshots for a session
 
     Args:
         session_id: The session ID
         user_id: The user ID
         turn_number: Optional turn number to retrieve snapshots for. If not provided, returns current/latest turn snapshots.
+        include_execute: If True, include <execute>...</execute> blocks in response. If False (default), exclude them.
     """
     # Validate user_id
     if not user_id or user_id.strip() == "":
@@ -3824,7 +4186,7 @@ async def get_session_snapshots(session_id: str, user_id: str, turn_number: Opti
                     "turn_number": turn_number,
                     "current_turn": current_turn,
                     "total_turns": total_turns,
-                    "thinking_process": thinking_process_text,
+                    "thinking_process": filter_execute_blocks(thinking_process_text, include_execute),
                     "storage_location": "turn_specific"
                 }
                 return result
@@ -3888,7 +4250,7 @@ async def get_session_snapshots(session_id: str, user_id: str, turn_number: Opti
         "turn_number": turn_number,
         "current_turn": current_turn,
         "total_turns": total_turns,
-        "thinking_process": thinking_process_text,
+        "thinking_process": filter_execute_blocks(thinking_process_text, include_execute),
         "storage_location": storage_location
     }
     return result
@@ -3943,7 +4305,7 @@ async def continue_session(
     message: str = Form(...),
     language: Language = Form(Language.EN),
     user_id: str = Form(...),
-    use_template: bool = Form(True),
+    use_template: Optional[bool] = Form(None),
     files: List[UploadFile] = File(default=[])
 ):
     """Continue an existing multi-turn session with S3 file handling
@@ -3953,12 +4315,18 @@ async def continue_session(
         message: User's message/query
         language: Language for response (en/jp)
         user_id: User identifier
-        use_template: Whether to use template matching (default: True)
+        use_template: Whether to use template matching (None = auto-detect based on query complexity)
         files: Uploaded files
     """
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    # Automatically determine if template matching should be used
+    # If use_template is None (not specified), use LLM to auto-detect based on query complexity
+    if use_template is None:
+        use_template = should_use_template_matching(message, language=language.value)
+        logger.info(f"LLM auto-detected template matching for continuation: {use_template} for query: {message[:100]}")
 
     # Check if multi-turn session exists in memory
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
@@ -4168,6 +4536,191 @@ async def continue_session(
 
     return response
 
+
+@app.post("/plan-session")
+async def plan_session(
+    session_id: Optional[str] = Form(None),  # None for new session
+    message: str = Form(...),
+    language: Language = Form(Language.EN),
+    user_id: str = Form(...),
+    files: List[UploadFile] = File(default=[])
+):
+    """
+    Planning/clarification endpoint - agent asks questions without tool execution
+
+    This creates "planning" turns in the multi-turn session that will be included
+    in context when execution starts.
+
+    Args:
+        session_id: Existing session ID (None for new session)
+        message: User's message/question
+        language: Response language (en/jp)
+        user_id: User identifier
+        files: Optional file uploads (stored but not analyzed yet)
+
+    Returns:
+        {
+            "session_id": "abc123",
+            "turn_session_id": "abc123_turn_1",
+            "turn_number": 1,
+            "turn_type": "planning",
+            "status": "queued",
+            "message": "Planning request queued"
+        }
+    """
+
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    # Validate message
+    if not message or message.strip() == "":
+        raise HTTPException(status_code=400, detail="message is required")
+
+    try:
+        # Check if this is a new session or continuation
+        if session_id:
+            # Continue existing session in planning mode
+            multiturn_session = queue_manager.multiturn_sessions.get(session_id)
+
+            if not multiturn_session:
+                # Try to load from cloud storage
+                unified_manager = get_unified_session_manager(queue_manager)
+                cloud_session_data = await unified_manager.get_multiturn_session_by_id(session_id)
+
+                if not cloud_session_data:
+                    raise HTTPException(status_code=404, detail="Session not found")
+
+                # Verify user ownership
+                if cloud_session_data.get("user_id") != user_id:
+                    raise HTTPException(status_code=403, detail="Access denied")
+
+                # Restore session to memory
+                multiturn_session = MultiTurnSession(
+                    session_id=cloud_session_data.get("session_id"),
+                    user_id=cloud_session_data.get("user_id"),
+                    language=cloud_session_data.get("language", "en"),
+                    created_at=cloud_session_data.get("created_at", datetime.now().isoformat()),
+                    last_updated=cloud_session_data.get("last_updated", datetime.now().isoformat()),
+                    total_turns=cloud_session_data.get("total_turns", 0),
+                    current_turn=cloud_session_data.get("current_turn", 0),
+                    accumulated_context=cloud_session_data.get("accumulated_context", ""),
+                    session_status=cloud_session_data.get("session_status", "active"),
+                    session_name=cloud_session_data.get("session_name", "")
+                )
+
+                # Restore turns
+                if "turns" in cloud_session_data and isinstance(cloud_session_data["turns"], list):
+                    for turn_data in cloud_session_data["turns"]:
+                        turn = ConversationTurn(
+                            turn_number=turn_data.get("turn_number"),
+                            turn_type=turn_data.get("turn_type", "execution"),
+                            query=turn_data.get("query", ""),
+                            final_report=turn_data.get("final_report"),
+                            response_content=turn_data.get("response_content"),
+                            files=turn_data.get("files"),
+                            timestamp=turn_data.get("timestamp", datetime.now().isoformat()),
+                            status=turn_data.get("status", "completed"),
+                            ready_for_execution=turn_data.get("ready_for_execution")
+                        )
+                        multiturn_session.turns.append(turn)
+
+                # Add back to in-memory sessions
+                queue_manager.multiturn_sessions[session_id] = multiturn_session
+                print(f"Restored session {session_id} from cloud storage for planning")
+            else:
+                # Verify user ownership for in-memory session
+                if multiturn_session.user_id and multiturn_session.user_id != user_id:
+                    raise HTTPException(status_code=403, detail="Access denied")
+
+            # Add new planning turn
+            turn_number = queue_manager.add_turn_to_session(session_id, message)
+
+        else:
+            # Create new session starting with planning
+            session_id = str(uuid.uuid4())
+            turn_number = 1
+
+            # Create new multi-turn session
+            multiturn_session = MultiTurnSession(
+                session_id=session_id,
+                user_id=user_id,
+                language=language,
+                created_at=datetime.now().isoformat(),
+                last_updated=datetime.now().isoformat(),
+                session_name=message[:50] + ("..." if len(message) > 50 else ""),
+                total_turns=0,
+                current_turn=0
+            )
+            queue_manager.multiturn_sessions[session_id] = multiturn_session
+
+            # Add first turn
+            turn_number = queue_manager.add_turn_to_session(session_id, message)
+
+        # Handle file uploads (if any)
+        uploaded_file_paths = []
+        if files and any(file.filename for file in files):
+            session_dir = os.path.join(os.getcwd(), "chat_sessions", session_id)
+            os.makedirs(session_dir, exist_ok=True)
+
+            for file in files:
+                if file.filename:
+                    file_path = os.path.join(session_dir, file.filename)
+                    with open(file_path, "wb") as f:
+                        content = await file.read()
+                        f.write(content)
+                    uploaded_file_paths.append(file_path)
+                    logger.info(f"Saved file for planning: {file.filename}")
+
+        # Build planning context (simpler than execution context)
+        planning_context = ""
+        if multiturn_session.turns:
+            # Include previous planning turns for context
+            for turn in multiturn_session.turns[:-1]:  # Exclude current turn
+                planning_context += f"\nUser: {turn.query}"
+                if turn.final_report:
+                    planning_context += f"\nAssistant: {turn.final_report}"
+
+        # Create user request with planning configuration
+        turn_session_id = f"{session_id}_turn_{turn_number}"
+        user_request = UserRequest(
+            session_id=turn_session_id,
+            message=message,
+            language=language,
+            uploaded_files=uploaded_file_paths,
+            is_continuation=(turn_number > 1),
+            previous_context=planning_context,
+            turn_number=turn_number,
+            user_id=user_id,
+            turn_type="planning"  # Mark as planning turn
+        )
+
+        # Set planning agent configuration
+        user_request.agent_config = create_planning_agent(language.value)
+        user_request.original_session_id = session_id
+
+        # Add to queue
+        position = queue_manager.add_request(user_request)
+
+        return JSONResponse({
+            "session_id": session_id,
+            "turn_session_id": turn_session_id,
+            "turn_number": turn_number,
+            "turn_type": "planning",
+            "status": "queued",
+            "position": position,
+            "message": "Planning request queued successfully"
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in plan_session: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/multiturn-session/{session_id}")
 async def get_multiturn_session(session_id: str, user_id: str, include_thinking: bool = False):
     """Get complete multi-turn session history using Unified Session Manager
@@ -4199,6 +4752,26 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
 
         # Get cloud session data in case we need S3 files
         cloud_session = None
+
+        # Handle in-memory sessions: Extract turns from _session_object
+        if session.get("_storage_location") == "memory" and "_session_object" in session:
+            session_obj = session["_session_object"]
+            if hasattr(session_obj, 'turns'):
+                # Convert MultiTurnSession object's turns to dict format
+                session["turns"] = []
+                for turn in session_obj.turns:
+                    turn_dict = {
+                        "turn_number": turn.turn_number,
+                        "turn_type": turn.turn_type,
+                        "query": turn.query,
+                        "final_report": turn.final_report,
+                        "timestamp": turn.timestamp,
+                        "status": turn.status,
+                        "files": turn.files if hasattr(turn, 'files') else {}
+                    }
+                    if include_thinking and hasattr(turn, 'response_content'):
+                        turn_dict["response_content"] = turn.response_content
+                    session["turns"].append(turn_dict)
 
         # Process turns: generate URLs and optionally exclude thinking process
         step2_start = time.time()
@@ -4253,6 +4826,10 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
                         turn["files"] = cloud_session["s3_files"]
 
                     turn["files"] = generate_file_urls(turn["files"], session_id)
+
+                # Append images to final_report (same as /results endpoint)
+                if "final_report" in turn and turn["files"]:
+                    turn["final_report"] = append_images_to_report(turn["final_report"], turn["files"])
 
                 # Remove thinking process unless explicitly requested
                 if not include_thinking:

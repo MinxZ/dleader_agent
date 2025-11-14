@@ -19,6 +19,12 @@ class Language(str, Enum):
     JP = "jp"
 
 
+class TurnType(str, Enum):
+    """Types of conversation turns"""
+    PLANNING = "planning"  # Clarification/planning phase - no tool execution
+    EXECUTION = "execution"  # Full agent execution with tools
+
+
 def now_jst():
     """Get current time in JST (UTC+9)"""
     return datetime.now(JST)
@@ -64,12 +70,14 @@ class SessionInfo(BaseModel):
 class ConversationTurn(BaseModel):
     """Represents a single turn in a multi-turn conversation"""
     turn_number: int
+    turn_type: str = "execution"  # "planning" or "execution" (TurnType enum)
     query: str
     response_content: Optional[str] = None
     final_report: Optional[str] = None
     files: Optional[Dict[str, Any]] = None
     timestamp: str
     status: str = "processing"
+    ready_for_execution: Optional[bool] = None  # Only relevant for planning turns
 
 
 class MultiTurnSession(BaseModel):
@@ -165,7 +173,8 @@ class UserRequest:
     """Represents a user request in the queue system"""
 
     def __init__(self, session_id: str, message: str, language: Language, uploaded_files: List[str] = None,
-                 is_continuation: bool = False, previous_context: str = "", turn_number: int = 1, user_id: str = None):
+                 is_continuation: bool = False, previous_context: str = "", turn_number: int = 1, user_id: str = None,
+                 turn_type: str = "execution"):
         self.session_id = session_id
         self.message = message
         self.language = language
@@ -193,7 +202,12 @@ class UserRequest:
         self.is_continuation = is_continuation
         self.previous_context = previous_context
         self.turn_number = turn_number
+        self.turn_type = turn_type  # "planning" or "execution"
         self.enhanced_message = self._build_enhanced_message()
+
+        # Planning mode specific attributes
+        self.ready_for_execution = None  # Set after planning turn completes
+        self.agent_config = None  # Custom agent config for planning mode
 
         # Template matching attributes
         self.template_matched = False
