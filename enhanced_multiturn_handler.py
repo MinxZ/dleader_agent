@@ -63,9 +63,20 @@ class EnhancedMultiTurnHandler:
                 # Track files from this turn
                 if turn.files:
                     for file_name, file_info in turn.files.items():
+                        # Handle different file_info formats: str, dict, or list
+                        if isinstance(file_info, str):
+                            file_path = file_info
+                        elif isinstance(file_info, dict):
+                            file_path = file_info.get('path')
+                        elif isinstance(file_info, list) and file_info:
+                            # If it's a list, take the first element
+                            first_item = file_info[0]
+                            file_path = first_item if isinstance(first_item, str) else (first_item.get('path') if isinstance(first_item, dict) else None)
+                        else:
+                            file_path = None
                         all_available_files[file_name] = {
                             'turn': turn.turn_number,
-                            'path': file_info if isinstance(file_info, str) else file_info.get('path'),
+                            'path': file_path,
                             'type': self._get_file_type(file_name)
                         }
 

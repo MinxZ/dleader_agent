@@ -185,23 +185,39 @@ class CloudStorageManager:
         for file_type, pattern in file_patterns.items():
             files = list(session_path.glob(pattern))
 
-            if file_type == "snapshots":
-                # Handle multiple snapshot files
-                snapshot_files = []
+            # For multi-turn sessions, upload ALL files, not just the latest
+            # This ensures each turn's files are available in S3
+            if file_type == "snapshots" or len(files) > 1:
+                # Handle multiple files (snapshots or multi-turn session files)
+                file_list = []
                 for file_path in files:
-                    s3_key = f"sessions/{session_id}/snapshots/{file_path.name}"
-                    # Upload file to S3 without getting URL
-                    self.s3_client.upload_file(str(file_path), self.bucket_name, s3_key)
-                    snapshot_files.append({
-                        "filename": file_path.name,
-                        "s3_key": s3_key,
-                        "file_size": file_path.stat().st_size,
-                        "uploaded_at": datetime.now().isoformat()
-                    })
-                s3_files[file_type] = snapshot_files
+                    if file_path.exists():
+                        try:
+                            s3_key = f"sessions/{session_id}/{file_type}/{file_path.name}"
+                            # Upload file to S3 without getting URL
+                            self.s3_client.upload_file(str(file_path), self.bucket_name, s3_key)
+                            file_list.append({
+                                "filename": file_path.name,
+                                "s3_key": s3_key,
+                                "file_size": file_path.stat().st_size,
+                                "uploaded_at": datetime.now().isoformat()
+                            })
+                            logger.info(f"Uploaded {file_type} file to S3: {file_path.name}")
+                        except FileNotFoundError as e:
+                            logger.warning(f"File not found for {file_type}: {file_path} - {e}")
+                        except Exception as e:
+                            logger.warning(f"Failed to upload {file_type} file {file_path.name}: {e}")
+
+                if file_list:
+                    # For backward compatibility, if there's only one file, store as dict
+                    # Otherwise, store as list
+                    if len(file_list) == 1 and file_type != "snapshots":
+                        s3_files[file_type] = file_list[0]
+                    else:
+                        s3_files[file_type] = file_list
 
             elif files:
-                # Handle single file types (take the first/latest file)
+                # Single file - upload as before (for backward compatibility)
                 file_path = files[0]
                 if file_path.exists():
                     try:
@@ -214,6 +230,7 @@ class CloudStorageManager:
                             "file_size": file_path.stat().st_size,
                             "uploaded_at": datetime.now().isoformat()
                         }
+                        logger.info(f"Uploaded {file_type} file to S3: {file_path.name}")
                     except FileNotFoundError as e:
                         logger.warning(f"File not found for {file_type}: {file_path} - {e}")
                     except Exception as e:
@@ -582,65 +599,74 @@ class CloudStorageManager:
             # Ensure session directory exists
             os.makedirs(session_path, exist_ok=True)
 
-            # List all objects with the session prefix
-            prefix = f"sessions/{session_id}/"
+            # For multi-turn sessions, we need to check multiple prefixes:
+            # - sessions/{session_id}/ (Turn 1)
+            # - sessions/{session_id}_turn_2/ (Turn 2)
+            # - sessions/{session_id}_turn_3/ (Turn 3), etc.
+            prefixes_to_check = [f"sessions/{session_id}/"]
+
+            # Also check for turn-specific paths (up to 10 turns)
+            for turn_num in range(2, 11):
+                prefixes_to_check.append(f"sessions/{session_id}_turn_{turn_num}/")
 
             paginator = self.s3_client.get_paginator('list_objects_v2')
-            page_iterator = paginator.paginate(
-                Bucket=self.bucket_name,
-                Prefix=prefix
-            )
 
-            for page in page_iterator:
-                if 'Contents' in page:
-                    for obj in page['Contents']:
-                        s3_key = obj['Key']
+            for prefix in prefixes_to_check:
+                page_iterator = paginator.paginate(
+                    Bucket=self.bucket_name,
+                    Prefix=prefix
+                )
 
-                        # Skip system-generated file directories
-                        if any(x in s3_key for x in ['/report_md/', '/thinking_process/', '/query_file/',
-                                                     '/result_json/', '/snapshots/', '/session_zip/']):
-                            logger.debug(f"Skipping system file: {s3_key}")
-                            continue
+                for page in page_iterator:
+                    if 'Contents' in page:
+                        for obj in page['Contents']:
+                            s3_key = obj['Key']
 
-                        # Extract filename from S3 key
-                        # Keys are like: sessions/{session_id}/turn{n}_{filename}
-                        # or sessions/{session_id}/images/{filename}
-                        filename_parts = s3_key.split('/')[-1]  # Get last part
+                            # Skip system-generated file directories
+                            if any(x in s3_key for x in ['/report_md/', '/thinking_process/', '/query_file/',
+                                                         '/result_json/', '/snapshots/', '/session_zip/']):
+                                logger.debug(f"Skipping system file: {s3_key}")
+                                continue
 
-                        # Remove turn prefix if present (e.g., "turn1_file.txt" -> "file.txt")
-                        if filename_parts.startswith('turn'):
-                            # Find the underscore after turn number
-                            underscore_pos = filename_parts.find('_')
-                            if underscore_pos > 0:
-                                filename = filename_parts[underscore_pos + 1:]
+                            # Extract filename from S3 key
+                            # Keys are like: sessions/{session_id}/turn{n}_{filename}
+                            # or sessions/{session_id}/images/{filename}
+                            filename_parts = s3_key.split('/')[-1]  # Get last part
+
+                            # Remove turn prefix if present (e.g., "turn1_file.txt" -> "file.txt")
+                            if filename_parts.startswith('turn'):
+                                # Find the underscore after turn number
+                                underscore_pos = filename_parts.find('_')
+                                if underscore_pos > 0:
+                                    filename = filename_parts[underscore_pos + 1:]
+                                else:
+                                    filename = filename_parts
                             else:
                                 filename = filename_parts
-                        else:
-                            filename = filename_parts
 
-                        # Skip system-generated files
-                        if is_system_file(filename):
-                            logger.debug(f"Skipping system-generated file: {filename}")
-                            continue
+                            # Skip system-generated files
+                            if is_system_file(filename):
+                                logger.debug(f"Skipping system-generated file: {filename}")
+                                continue
 
-                        # Skip if file already exists locally
-                        local_path = os.path.join(session_path, filename)
-                        if os.path.exists(local_path):
-                            logger.info(f"File {filename} already exists locally, skipping download")
-                            downloaded_files[filename] = local_path
-                            continue
+                            # Skip if file already exists locally
+                            local_path = os.path.join(session_path, filename)
+                            if os.path.exists(local_path):
+                                logger.info(f"File {filename} already exists locally, skipping download")
+                                downloaded_files[filename] = local_path
+                                continue
 
-                        # Download file from S3
-                        try:
-                            self.s3_client.download_file(
-                                self.bucket_name,
-                                s3_key,
-                                local_path
-                            )
-                            downloaded_files[filename] = local_path
-                            logger.info(f"Downloaded user file {filename} from S3 (key: {s3_key})")
-                        except Exception as e:
-                            logger.error(f"Failed to download {s3_key} from S3: {e}")
+                            # Download file from S3
+                            try:
+                                self.s3_client.download_file(
+                                    self.bucket_name,
+                                    s3_key,
+                                    local_path
+                                )
+                                downloaded_files[filename] = local_path
+                                logger.info(f"Downloaded user file {filename} from S3 (key: {s3_key})")
+                            except Exception as e:
+                                logger.error(f"Failed to download {s3_key} from S3: {e}")
 
             logger.info(f"Downloaded {len(downloaded_files)} user files from S3 for session {session_id}")
 
@@ -669,6 +695,28 @@ class CloudStorageManager:
         except Exception as e:
             logger.error(f"Failed to download content from S3 key {s3_key}: {e}")
             return None
+
+    async def upload_file(self, local_path: str, s3_key: str) -> bool:
+        """Upload a single file to S3
+
+        Args:
+            local_path: Local file path to upload
+            s3_key: S3 object key (path in bucket)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if not self.s3_client:
+                logger.warning("S3 client not initialized, skipping upload")
+                return False
+
+            self.s3_client.upload_file(str(local_path), self.bucket_name, s3_key)
+            logger.info(f"Uploaded {local_path} to S3: {s3_key}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to upload {local_path} to S3: {e}")
+            return False
 
     async def get_session_download_urls(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get fresh download URLs for all session's S3 files including images"""

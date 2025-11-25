@@ -315,6 +315,7 @@ class UserRequest:
         self.json_result = None  # Store structured JSON result
         self.periodic_snapshots = []  # Store periodic JSON snapshots
         self.last_snapshot_time = None  # Track last snapshot time
+        self.snapshot_files = []  # Track snapshot file paths for S3 upload
         self.session_path = None  # Store session path for JSON updates
         self.all_progress_updates = []  # Store all progress updates permanently
         self.user_id = user_id  # User ownership tracking
@@ -505,7 +506,8 @@ class QueueManager:
                 "json_result": user_request.json_result,
                 "periodic_snapshots": user_request.periodic_snapshots,
                 "snapshot_count": len(user_request.periodic_snapshots),
-                "user_id": getattr(user_request, 'user_id', None)  # Include user_id for security
+                "user_id": getattr(user_request, 'user_id', None),  # Include user_id for security
+                "storage_location": "active"  # Mark as active session for /status endpoint
             }
 
         # Try to load from persistent storage if not in active sessions
@@ -1084,10 +1086,39 @@ Reasoning: {user_request.template_reasoning}
         try:
             from s3_mongodb.func_mongodb import get_mongodb_collection, upsert_wrapper
 
+            # DEBUG: Print in-memory turn files before serialization
+            print(f"\n[DEBUG _save_multiturn_session] Session {session.session_id}")
+            print(f"[DEBUG] Total turns in memory: {len(session.turns)}")
+            for turn in session.turns:
+                files_info = turn.files
+                if isinstance(files_info, dict):
+                    tp_file = files_info.get('thinking_process', {})
+                    if isinstance(tp_file, dict):
+                        tp_filename = tp_file.get('filename', 'N/A')
+                    else:
+                        tp_filename = str(tp_file)[:50]
+                else:
+                    tp_filename = str(files_info)[:50] if files_info else 'None'
+                print(f"[DEBUG]   Turn {turn.turn_number}: TP file = {tp_filename}")
+
             # Prepare session data for MongoDB
             session_data = session.dict()
             session_data["_id"] = session.session_id
             session_data["last_updated"] = datetime.now().isoformat()
+
+            # DEBUG: Print serialized data going to MongoDB
+            print(f"[DEBUG] Serialized data for MongoDB:")
+            for i, turn in enumerate(session_data.get('turns', [])):
+                files_info = turn.get('files', {})
+                if isinstance(files_info, dict):
+                    tp_file = files_info.get('thinking_process', {})
+                    if isinstance(tp_file, dict):
+                        tp_filename = tp_file.get('filename', 'N/A')
+                    else:
+                        tp_filename = str(tp_file)[:50]
+                else:
+                    tp_filename = str(files_info)[:50] if files_info else 'None'
+                print(f"[DEBUG]   Turn {turn.get('turn_number')}: TP file = {tp_filename}")
 
             # Save to MongoDB
             event = {
@@ -1100,6 +1131,8 @@ Reasoning: {user_request.template_reasoning}
             result = upsert_wrapper(event)
             if result.get("statusCode") != 200:
                 print(f"Warning: MongoDB save failed for session {session.session_id}: {result}")
+            else:
+                print(f"[DEBUG] MongoDB save successful for session {session.session_id}\n")
         except Exception as e:
             print(f"Error saving multi-turn session {session.session_id} to MongoDB: {e}")
 
@@ -1119,11 +1152,23 @@ Reasoning: {user_request.template_reasoning}
             if collection is not None:
                 session_data = collection.find_one({"session_id": session_id})
                 if session_data:
+                    # DEBUG: Log file references from MongoDB load
+                    print(f"[DEBUG QUEUEMGR LOAD FROM MONGODB] Session {session_id} found in MongoDB")
+                    if "turns" in session_data and isinstance(session_data["turns"], list):
+                        print(f"[DEBUG QUEUEMGR LOAD FROM MONGODB] Session has {len(session_data['turns'])} turns:")
+                        for t in session_data["turns"]:
+                            turn_num = t.get("turn_number")
+                            files = t.get("files", {})
+                            tp_file = files.get("thinking_process", {}).get("filename", "NONE") if isinstance(files.get("thinking_process"), dict) else "NONE"
+                            report_file = files.get("final_report", {}).get("filename", "NONE") if isinstance(files.get("final_report"), dict) else "NONE"
+                            print(f"[DEBUG QUEUEMGR LOAD FROM MONGODB]   Turn {turn_num}: TP={tp_file}, Report={report_file}")
+
                     # Remove MongoDB _id field
                     session_data.pop("_id", None)
                     session_data.pop("uploaded_to_cloud_at", None)
                     session = MultiTurnSession(**session_data)
                     self.multiturn_sessions[session_id] = session
+                    print(f"[DEBUG QUEUEMGR LOAD FROM MONGODB] Session restored to in-memory cache")
                     return session
         except Exception as e:
             print(f"Error loading session {session_id} from MongoDB: {e}")
@@ -1185,6 +1230,20 @@ Reasoning: {user_request.template_reasoning}
             turn_type: Type of turn ("planning" or "execution")
             ready_for_execution: For planning turns, whether agent is ready to execute
         """
+        # DEBUG: Print what files were passed in
+        print(f"\n[DEBUG complete_turn] Session {session_id}, Turn {turn_number}")
+        print(f"[DEBUG] Files passed in:")
+        if isinstance(files, dict):
+            for fname, fpath in files.items():
+                if isinstance(fpath, str):
+                    # Extract just the filename from path
+                    filename_only = os.path.basename(fpath) if '/' in fpath else fpath
+                    print(f"[DEBUG]   {fname}: {filename_only}")
+                else:
+                    print(f"[DEBUG]   {fname}: {str(fpath)[:50]}")
+        else:
+            print(f"[DEBUG]   {files}")
+
         session = self.multiturn_sessions.get(session_id)
         if not session:
             return
@@ -1204,8 +1263,11 @@ Reasoning: {user_request.template_reasoning}
                     enhanced_files = {}
                     for file_name, file_path in (files.items() if isinstance(files, dict) else enumerate(files)):
                         if isinstance(file_path, str):
+                            # Extract filename from path
+                            filename = os.path.basename(file_path) if '/' in file_path or '\\' in file_path else file_path
                             file_metadata = {
                                 'path': file_path,
+                                'filename': filename,
                                 'turn': turn_number,
                                 'created_at': datetime.now().isoformat()
                             }
@@ -1225,6 +1287,14 @@ Reasoning: {user_request.template_reasoning}
                         else:
                             enhanced_files[file_name] = file_path
                     turn.files = enhanced_files
+
+                    # DEBUG: Print what turn.files was set to
+                    print(f"[DEBUG] Turn.files SET TO:")
+                    tp_file = enhanced_files.get('thinking_process', {})
+                    if isinstance(tp_file, dict):
+                        print(f"[DEBUG]   thinking_process: {tp_file.get('path', 'N/A')}")
+                    else:
+                        print(f"[DEBUG]   thinking_process: {str(tp_file)[:50]}")
                 else:
                     # Check session folder for any generated files during this turn
                     session_path = f"session_storage/{session_id}_turn_{turn_number}"
@@ -1255,73 +1325,6 @@ Reasoning: {user_request.template_reasoning}
 
         session.last_updated = datetime.now().isoformat()
         self._save_multiturn_session(session)
-
-        # Upload updated multi-turn session to cloud storage
-        try:
-            multiturn_session_data = {
-                "session_id": session.session_id,
-                "created_at": session.created_at,
-                "last_updated": session.last_updated,
-                "total_turns": session.total_turns,
-                "language": session.language,
-                "user_id": getattr(session, 'user_id', None),
-                "session_status": session.session_status,
-                "first_query": session.first_query,
-                "latest_query": session.latest_query,
-                "turns": [
-                    {
-                        "turn_number": turn.turn_number,
-                        "turn_type": turn.turn_type,  # NEW FIELD
-                        "query": turn.query,
-                        "response_content": turn.response_content,
-                        "final_report": turn.final_report,
-                        "files": turn.files,
-                        "status": turn.status,
-                        "created_at": turn.timestamp,
-                        "ready_for_execution": turn.ready_for_execution  # NEW FIELD for planning
-                    } for turn in session.turns
-                ]
-            }
-            # Upload to cloud asynchronously and cleanup memory after successful upload
-            def upload_multiturn_in_thread():
-                import asyncio
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(cloud_storage_manager.upload_multiturn_session(multiturn_session_data))
-                    loop.close()
-                    print(f"Successfully uploaded multi-turn session {session_id} to cloud")
-
-                    # If all turns are completed, clean up memory after delay (allow time for final queries)
-                    if session and session.total_turns == turn_number:
-                        print(f"All turns completed for session {session_id}, scheduling memory cleanup")
-                        time.sleep(10)  # Wait 10 seconds to ensure upload is fully complete
-                        if session_id in self.multiturn_sessions:
-                            # Check session age - only remove if older than 1 hour or explicitly completed
-                            session_obj = self.multiturn_sessions[session_id]
-                            last_updated_str = session_obj.last_updated
-                            try:
-                                from datetime import datetime
-                                last_updated = datetime.fromisoformat(last_updated_str)
-                                age_hours = (datetime.now() - last_updated).total_seconds() / 3600
-                                # Remove if older than 1 hour OR if session is marked completed
-                                if age_hours > 1.0 or session_obj.session_status == "completed":
-                                    del self.multiturn_sessions[session_id]
-                                    print(f"Removed completed session {session_id} from memory (age: {age_hours:.2f}h)")
-                                else:
-                                    print(f"Keeping recent session {session_id} in cache (age: {age_hours:.2f}h)")
-                            except Exception as e:
-                                # If date parsing fails, just remove it
-                                del self.multiturn_sessions[session_id]
-                                print(f"Removed session {session_id} from memory: {e}")
-                except Exception as e:
-                    print(f"Background multiturn cloud upload failed for session {session_id}: {e}")
-
-            upload_thread = threading.Thread(target=upload_multiturn_in_thread, daemon=True)
-            upload_thread.start()
-            print(f"Initiated cloud upload for multi-turn session {session_id}")
-        except Exception as e:
-            print(f"Failed to initiate cloud upload for multi-turn session {session_id}: {e}")
 
     def _process_queue(self):
         """Background thread to process queue requests"""
@@ -1633,16 +1636,30 @@ Reasoning: {user_request.template_reasoning}
 
                             # Save snapshot to file
                             try:
+                                # IMPORTANT: Ensure session directory exists before saving snapshots
+                                os.makedirs(session_path, exist_ok=True)
+
                                 # Delete old snapshot files
                                 for file in os.listdir(session_path):
                                     if file.startswith('snapshot_') and file.endswith('.json'):
                                         os.remove(os.path.join(session_path, file))
+
+                                # Clear the snapshot_files list since we deleted the old files
+                                # Only track the latest snapshot for S3 upload
+                                user_request.snapshot_files.clear()
 
                                 # Save new snapshot
                                 snapshot_filename = f"snapshot_latest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                                 snapshot_path = os.path.join(session_path, snapshot_filename)
                                 with open(snapshot_path, 'w', encoding='utf-8') as f:
                                     json.dump(snapshot, f, indent=2, ensure_ascii=False)
+
+                                # Track snapshot file for S3 upload after completion
+                                user_request.snapshot_files.append({
+                                    'path': snapshot_path,
+                                    'filename': snapshot_filename,
+                                    'timestamp': datetime.now().isoformat()
+                                })
 
                                 user_request.progress_queue.put({
                                     "type": "snapshot_saved",
@@ -1924,9 +1941,21 @@ Reasoning: {user_request.template_reasoning}
             except Exception as e:
                 print(f"Error saving session files: {e}")
 
-            # Create session zip file and save to chat_zips
+            # Create ZIP files - both session-wide and per-turn
+            zip_file_path = None
+            turn_zip_file_path = None
+
             try:
-                zip_file_path = create_session_zip(session_path, save_to_chat_zips=True)
+                # Create session zip file
+                # For multi-turn sessions, pass turn_number and start_time to create turn-specific zip files
+                # containing only files created during this turn
+                current_turn_number = None
+                turn_start_time = None
+                if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+                    current_turn_number = user_request.turn_number
+                    turn_start_time = start_time  # start_time was recorded at beginning of turn processing
+
+                zip_file_path = create_session_zip(session_path, save_to_chat_zips=True, turn_number=current_turn_number, turn_start_time=turn_start_time)
                 if zip_file_path:
                     # Update JSON result with zip path
                     if user_request.json_result:
@@ -1940,9 +1969,88 @@ Reasoning: {user_request.template_reasoning}
                         "type": "status",
                         "message": f"Session zip created: {os.path.basename(zip_file_path)}"
                     })
+
+                # For multi-turn sessions, also create per-turn ZIP
+                if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+                    base_session_id = user_request.original_session_id
+                    turn_number = user_request.turn_number
+
+                    user_request.progress_queue.put({
+                        "type": "status",
+                        "message": f"Creating turn {turn_number} ZIP..."
+                    })
+
+                    turn_zip_result = create_turn_zip(
+                        session_path,
+                        base_session_id,
+                        turn_number,
+                        save_to_chat_zips=True
+                    )
+
+                    if turn_zip_result:
+                        turn_zip_file_path = turn_zip_result['zip_path']
+                        print(f"Created turn {turn_number} ZIP: {turn_zip_file_path} "
+                              f"({turn_zip_result['file_count']} files, "
+                              f"{turn_zip_result['total_size'] / 1024 / 1024:.2f}MB)")
+
+                        user_request.progress_queue.put({
+                            "type": "status",
+                            "message": f"Turn {turn_number} ZIP created: {os.path.basename(turn_zip_file_path)}"
+                        })
+
+                        # Copy turn ZIP to session folder for S3 upload
+                        turn_zip_filename = os.path.basename(turn_zip_file_path)
+                        session_turn_zip_path = os.path.join(session_path, turn_zip_filename)
+                        shutil.copy2(turn_zip_file_path, session_turn_zip_path)
+                        print(f"Copied turn ZIP to session folder for S3 upload: {session_turn_zip_path}")
+                    else:
+                        print(f"Warning: Failed to create turn {turn_number} ZIP")
+
             except Exception as e:
-                print(f"Error creating session zip: {e}")
-            
+                print(f"Error creating ZIP files: {e}")
+
+            # Upload snapshots to S3 for persistence
+            if hasattr(user_request, 'snapshot_files') and user_request.snapshot_files:
+                try:
+                    print(f"Uploading {len(user_request.snapshot_files)} snapshot(s) to S3...")
+                    uploaded_snapshots = []
+
+                    for snapshot_file in user_request.snapshot_files:
+                        try:
+                            # Determine session ID for S3 key
+                            if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+                                snapshot_session_id = user_request.original_session_id
+                            else:
+                                snapshot_session_id = user_request.session_id
+
+                            s3_key = f"sessions/{snapshot_session_id}/snapshots/{snapshot_file['filename']}"
+
+                            # Upload to S3
+                            if os.path.exists(snapshot_file['path']):
+                                asyncio.run(cloud_storage_manager.upload_file(
+                                    snapshot_file['path'],
+                                    s3_key
+                                ))
+
+                                uploaded_snapshots.append({
+                                    'filename': snapshot_file['filename'],
+                                    's3_key': s3_key,
+                                    'timestamp': snapshot_file['timestamp']
+                                })
+                                print(f"Uploaded snapshot: {snapshot_file['filename']}")
+                            else:
+                                print(f"Snapshot file not found: {snapshot_file['path']}")
+
+                        except Exception as e:
+                            print(f"Failed to upload snapshot {snapshot_file['filename']}: {e}")
+
+                    # Store snapshot metadata in session data for MongoDB
+                    user_request.uploaded_snapshots = uploaded_snapshots
+                    print(f"Successfully uploaded {len(uploaded_snapshots)} snapshot(s) to S3")
+
+                except Exception as e:
+                    print(f"Error uploading snapshots to S3: {e}")
+
             # Mark as complete
             user_request.status = "completed"
             user_request.is_complete = True
@@ -1998,6 +2106,10 @@ Reasoning: {user_request.template_reasoning}
                     "result": user_request.result,
                     "json_result": user_request.json_result
                 }
+
+                # Add snapshot metadata if snapshots were uploaded
+                if hasattr(user_request, 'uploaded_snapshots'):
+                    session_data["snapshots"] = user_request.uploaded_snapshots
                 # Upload to cloud asynchronously (don't wait for completion)
                 def upload_in_thread():
                     import asyncio
@@ -2020,13 +2132,20 @@ Reasoning: {user_request.template_reasoning}
             # Update multi-turn session if this is a turn
             if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
                 # Get file paths for the turn
+                # For multi-turn sessions, use turn-specific zip as session_zip (so it shows in final report)
+                turn_session_zip = turn_zip_file_path if turn_zip_file_path else zip_file_path
                 files_dict = {
                     'report_md': report_path,
                     'thinking_process': thinking_path,
                     'query_file': query_path,
-                    'session_zip': zip_file_path,
+                    'session_zip': turn_session_zip,  # Use turn-specific zip for multi-turn
                     'result_json': json_path
                 }
+
+                # Also keep turn_zip for backwards compatibility
+                if turn_zip_file_path:
+                    files_dict['turn_zip'] = turn_zip_file_path
+                    print(f"[DEBUG] Using turn ZIP as session_zip: {os.path.basename(turn_zip_file_path)}")
 
                 # Complete the turn in multi-turn session
                 queue_manager.complete_turn(
@@ -2386,10 +2505,10 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                     print(f"Warning: Template matching failed: {e}")
                     # Continue without template matching
             else:
-                print("Template matching disabled by user")
+                print("Template matching is not using")
                 result_queue.put({
                     "type": "status",
-                    "content": "Template matching disabled, proceeding with direct query..."
+                    "content": "Template matching is not using, proceeding with direct query..."
                 })
 
             # === END TEMPLATE MATCHING ===
@@ -2661,14 +2780,21 @@ def move_files_to_session(file_paths, session_path):
     return moved_files
 
 
-def create_session_zip(session_path, save_to_chat_zips=True):
-    """Create a zip file containing all session content and optionally save to chat_zips"""
+def create_session_zip(session_path, save_to_chat_zips=True, turn_number=None, turn_start_time=None):
+    """Create a zip file containing all session content and optionally save to chat_zips
+
+    Args:
+        session_path: Path to the session directory
+        save_to_chat_zips: Whether to save to chat_zips directory
+        turn_number: Optional turn number for multi-turn sessions (creates turn-specific filename)
+        turn_start_time: Optional start time (epoch) for filtering files to only include those
+                         created during this turn (files modified after this time)
+    """
     if not os.path.exists(session_path):
         return None
 
     try:
         session_name = os.path.basename(session_path)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
         # Create chat_zips directory if saving there
         if save_to_chat_zips:
@@ -2676,7 +2802,11 @@ def create_session_zip(session_path, save_to_chat_zips=True):
             os.makedirs(chat_zips_dir, exist_ok=True)
 
             # Create zip file in chat_zips directory
-            zip_filename = f"{session_name}_{timestamp}.zip"
+            # For multi-turn sessions, include turn number to create unique filenames per turn
+            if turn_number is not None:
+                zip_filename = f"{session_name}_turn_{turn_number}.zip"
+            else:
+                zip_filename = f"{session_name}.zip"
             zip_file_path = os.path.join(chat_zips_dir, zip_filename)
         else:
             # Create temporary zip file
@@ -2699,6 +2829,13 @@ def create_session_zip(session_path, save_to_chat_zips=True):
                 for file in files:
                     file_path = os.path.join(root, file)
                     file_size = os.path.getsize(file_path)
+
+                    # For multi-turn sessions with turn_start_time, only include files created during this turn
+                    if turn_start_time is not None:
+                        file_mtime = os.path.getmtime(file_path)
+                        if file_mtime < turn_start_time:
+                            # File was created before this turn started, skip it
+                            continue
 
                     # Skip individual files larger than 100MB
                     if file_size > 100 * 1024 * 1024:
@@ -2728,6 +2865,99 @@ def create_session_zip(session_path, save_to_chat_zips=True):
         return zip_file_path
     except Exception as e:
         print(f"Error creating session zip: {e}")
+        return None
+
+
+def create_turn_zip(session_path, base_session_id, turn_number, save_to_chat_zips=True):
+    """Create a ZIP file for a specific turn with all turn-generated files
+
+    Args:
+        session_path: Path to the session directory
+        base_session_id: Base session ID (without _turn_X suffix)
+        turn_number: Turn number (1, 2, 3, etc.)
+        save_to_chat_zips: Whether to save to chat_zips directory
+
+    Returns:
+        Dictionary with zip_path, zip_filename, and metadata
+    """
+    if not os.path.exists(session_path):
+        return None
+
+    try:
+        # Generate timestamp and ZIP filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zip_filename = f"multiturn_{timestamp}_{base_session_id[:12]}_turn_{turn_number}.zip"
+
+        if save_to_chat_zips:
+            chat_zips_dir = os.path.join(os.getcwd(), "chat_zips")
+            os.makedirs(chat_zips_dir, exist_ok=True)
+            zip_file_path = os.path.join(chat_zips_dir, zip_filename)
+        else:
+            # Create temporary zip file
+            zip_file = tempfile.NamedTemporaryFile(
+                suffix='.zip',
+                prefix=f"turn_{turn_number}_",
+                delete=False
+            )
+            zip_file.close()
+            zip_file_path = zip_file.name
+
+        # Create ZIP archive
+        with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            total_size = 0
+            max_zip_size = 500 * 1024 * 1024  # 500MB max
+            skipped_files = []
+            included_files = []
+
+            # Walk through all files in session directory
+            for root, dirs, files in os.walk(session_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+
+                    # Skip snapshot files (not needed in turn ZIP)
+                    if file.startswith('snapshot_'):
+                        continue
+
+                    # For turn-specific ZIP, we want ALL files generated so far
+                    # This includes all images, CSVs, and outputs from current and previous turns
+                    # This way turn_2.zip contains everything from turn 1 and turn 2
+
+                    file_size = os.path.getsize(file_path)
+
+                    # Skip individual files larger than 100MB
+                    if file_size > 100 * 1024 * 1024:
+                        skipped_files.append(f"{file} ({file_size / 1024 / 1024:.1f}MB)")
+                        continue
+
+                    # Check total zip size limit
+                    if total_size + file_size > max_zip_size:
+                        skipped_files.append(f"{file} (would exceed 500MB limit)")
+                        continue
+
+                    # Add file to ZIP
+                    arcname = os.path.relpath(file_path, session_path)
+                    zipf.write(file_path, arcname)
+                    total_size += file_size
+                    included_files.append(file)
+
+            # Add notice file if files were skipped
+            if skipped_files:
+                notice_content = "LARGE FILES EXCLUDED FROM ZIP:\n\n"
+                notice_content += "\n".join(skipped_files)
+                notice_content += "\n\nThese files were too large and excluded to keep download size manageable."
+                zipf.writestr("SKIPPED_LARGE_FILES.txt", notice_content)
+
+        print(f"Created turn {turn_number} zip: {zip_file_path} ({len(included_files)} files, {total_size / 1024 / 1024:.2f}MB)")
+
+        return {
+            'zip_path': zip_file_path,
+            'zip_filename': zip_filename,
+            'turn_number': turn_number,
+            'file_count': len(included_files),
+            'total_size': total_size
+        }
+    except Exception as e:
+        print(f"Error creating turn {turn_number} zip: {e}")
         return None
 
 
@@ -3148,8 +3378,27 @@ async def get_status(session_id: str, user_id: str, turn_number: Optional[int] =
         storage_location = status_data.get("storage_location", "unknown")
 
         if storage_location == "active":
-            # Active sessions: include real-time progress updates
-            response["progress_updates"] = status_data.get("progress_updates", [])
+            # Active sessions: include real-time progress updates (but strip out full snapshot content to reduce payload)
+            progress_updates = status_data.get("progress_updates", [])
+            filtered_updates = []
+            for update in progress_updates:
+                if update.get("type") == "snapshot_saved":
+                    # For snapshot updates, only include minimal metadata (not the full content)
+                    filtered_update = {
+                        "type": update.get("type"),
+                        "message": update.get("message"),
+                        "snapshot_summary": {
+                            "timestamp": update.get("snapshot", {}).get("timestamp"),
+                            "status": update.get("snapshot", {}).get("status"),
+                            "thinking_length": update.get("snapshot", {}).get("content", {}).get("thinking_length", 0) if isinstance(update.get("snapshot", {}).get("content"), dict) else 0,
+                            "is_complete": update.get("snapshot", {}).get("is_complete", False)
+                        }
+                    }
+                    filtered_updates.append(filtered_update)
+                else:
+                    # Include other update types as-is
+                    filtered_updates.append(update)
+            response["progress_updates"] = filtered_updates
 
             # Extract final report for completed active sessions
             if status_data["is_complete"]:
@@ -3447,6 +3696,12 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
 
     # Add download section for session zip
     session_zip = files_data.get("session_zip")
+
+    # Handle session_zip being a list (from cloud storage) - use the last item (turn-specific zip)
+    if session_zip and isinstance(session_zip, list) and len(session_zip) > 0:
+        # Use the last zip in the list (most recent/turn-specific)
+        session_zip = session_zip[-1]
+
     if session_zip and isinstance(session_zip, dict):
         url = session_zip.get("url")
         if url:
@@ -3739,7 +3994,23 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
         if session_user_id_fallback and session_user_id_fallback != user_id and not is_shared_fallback:
             raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-    if not session_data.get("is_complete", False):
+    # For multi-turn sessions, check if the specific turn is complete (not the whole session)
+    # The session might have is_complete=True from previous turns, but current turn might be processing
+    if turn_number is not None and current_turn is not None:
+        # Check if the requested turn is currently being processed
+        turn_specific_id = f"{session_id}_turn_{turn_number}"
+        if turn_specific_id in queue_manager.active_sessions or (turn_number == current_turn and session_id in queue_manager.active_sessions):
+            # Return processing status instead of error
+            return {
+                "session_id": session_id,
+                "turn_number": turn_number,
+                "current_turn": current_turn,
+                "total_turns": total_turns,
+                "status": "processing",
+                "is_complete": False,
+                "message": f"Turn {turn_number} is still being processed"
+            }
+    elif not session_data.get("is_complete", False):
         raise HTTPException(status_code=400, detail="Session is not yet complete")
 
     # For multi-turn sessions with specific turn_number, return turn-specific results
@@ -3771,7 +4042,13 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
 
             if target_turn:
                 # Get turn-specific results
-                turn_files = target_turn.get("files", {})
+                turn_files = target_turn.get("files", {}) or {}
+
+                # DEBUG: Log what files we extracted from the turn
+                print(f"[DEBUG /results] Turn {turn_number} files extracted:")
+                print(f"[DEBUG /results]   Raw turn_files: {turn_files}")
+                tp_file = turn_files.get("thinking_process", {}).get("filename", "NOT_FOUND") if isinstance(turn_files.get("thinking_process"), dict) else f"NOT_DICT: {turn_files.get('thinking_process')}"
+                print(f"[DEBUG /results]   Extracted TP filename: {tp_file}")
 
                 # OPTIMIZATION: Skip expensive sessions collection query if turn_files already has images
                 # Only fetch S3 files from sessions collection if turn_files is missing images
@@ -3792,10 +4069,44 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                 else:
                     print(f"[PERF /results] Step 5 (retrieve_session_from_cloud for S3 files): {(time.time() - step5_start) * 1000:.2f} ms - SKIPPED (already have files)")
 
-                # Generate URLs for turn files
+                # Generate URLs for turn files (use turn-specific session ID for turn 2+)
                 step6_start = time.time()
                 if turn_files:
-                    turn_files = generate_file_urls(turn_files, session_id)
+                    turn_session_id = f"{session_id}_turn_{turn_number}" if turn_number > 1 else session_id
+                    turn_files = generate_file_urls(turn_files, turn_session_id)
+
+                    # For existing data: if turn_zip exists, use it as session_zip (for backwards compatibility)
+                    if isinstance(turn_files, dict):
+                        if "turn_zip" in turn_files and turn_files["turn_zip"]:
+                            # Prefer turn_zip over session_zip for turn-specific downloads
+                            turn_files["session_zip"] = turn_files["turn_zip"]
+                        elif "session_zip" in turn_files:
+                            session_zips = turn_files["session_zip"]
+                            # Handle session_zip being a list (from cloud storage)
+                            if isinstance(session_zips, list) and len(session_zips) > 0:
+                                # Find the zip for this specific turn
+                                turn_zip_pattern = f"_turn_{turn_number}.zip"
+                                matching_zip = None
+                                for zip_item in session_zips:
+                                    if isinstance(zip_item, dict):
+                                        filename = zip_item.get("filename", "")
+                                        if turn_zip_pattern in filename:
+                                            matching_zip = zip_item
+                                            break
+                                # If no turn-specific zip found for turn 1, use one without _turn_ suffix
+                                if not matching_zip and turn_number == 1:
+                                    for zip_item in session_zips:
+                                        if isinstance(zip_item, dict):
+                                            filename = zip_item.get("filename", "")
+                                            if "_turn_" not in filename:
+                                                matching_zip = zip_item
+                                                break
+                                # If still no match, use the last item as fallback
+                                if not matching_zip:
+                                    matching_zip = session_zips[-1]
+                                # Replace list with the single matching zip
+                                turn_files["session_zip"] = matching_zip
+
                 print(f"[PERF /results] Step 6 (generate_file_urls): {(time.time() - step6_start) * 1000:.2f} ms")
 
                 # Append images to final report
@@ -3992,14 +4303,14 @@ async def stop_task(session_id: str, user_id: str):
 
 
 def filter_execute_blocks(text: str, include_execute: bool = False) -> str:
-    """Filter out <execute>...</execute> blocks from text if include_execute is False
+    """Filter out <execute>...</execute> blocks and verbose directory listings from text
 
     Args:
         text: The text to filter
-        include_execute: If True, return text as-is. If False, remove execute blocks.
+        include_execute: If True, return text as-is. If False, remove execute blocks and hide verbose listings.
 
     Returns:
-        Filtered text with execute blocks removed (or original text if include_execute=True)
+        Filtered text with execute blocks removed and directory listings summarized
     """
     if include_execute or not text:
         return text
@@ -4007,6 +4318,23 @@ def filter_execute_blocks(text: str, include_execute: bool = False) -> str:
     import re
     # Remove <execute>...</execute> blocks (including multiline)
     filtered_text = re.sub(r'<execute>.*?</execute>', '', text, flags=re.DOTALL)
+
+    # Hide verbose directory listings - match "Current directory files:" followed by file list
+    # Pattern: "Current directory files:\n  - file1\n  - file2\n..."
+    def replace_file_listing(match):
+        full_match = match.group(0)
+        # Count number of files in the listing (lines starting with "  - ")
+        file_count = len(re.findall(r'^\s+-\s+', full_match, re.MULTILINE))
+        return f"Current directory files: Found {file_count} items. (Full listing hidden for readability)"
+
+    # Replace verbose file listings with summary
+    filtered_text = re.sub(
+        r'Current directory files:.*?(?=\n\n|\n[A-Z]|\Z)',
+        replace_file_listing,
+        filtered_text,
+        flags=re.DOTALL
+    )
+
     return filtered_text
 
 
@@ -4020,7 +4348,7 @@ async def get_session_snapshots(
     """Get all periodic snapshots for a session
 
     Args:
-        session_id: The session ID
+        session_id: The session ID (can be base session_id or turn-specific like session_id_turn_2)
         user_id: The user ID
         turn_number: Optional turn number to retrieve snapshots for. If not provided, returns current/latest turn snapshots.
         include_execute: If True, include <execute>...</execute> blocks in response. If False (default), exclude them.
@@ -4029,16 +4357,31 @@ async def get_session_snapshots(
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
 
+    # Parse turn-specific session IDs (e.g., "session_id_turn_2")
+    base_session_id = session_id
+    turn_from_id = None
+    if "_turn_" in session_id:
+        parts = session_id.rsplit("_turn_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            base_session_id = parts[0]
+            turn_from_id = int(parts[1])
+            if turn_number is None:
+                turn_number = turn_from_id
+            print(f"[SNAPSHOTS] Parsed turn-specific ID: base={base_session_id}, turn={turn_from_id}")
+
     # Get multi-turn session info to determine turn number
-    multiturn_session = queue_manager.multiturn_sessions.get(session_id)
+    # Try with base_session_id first, then fall back to original session_id
+    multiturn_session = queue_manager.multiturn_sessions.get(base_session_id)
+    if not multiturn_session:
+        multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     current_turn = None
     total_turns = None
 
-    # If not in memory, try to load from cloud
+    # If not in memory, try to load from cloud (use base_session_id)
     if not multiturn_session:
         try:
             unified_manager = get_unified_session_manager(queue_manager)
-            cloud_multiturn_session = await unified_manager.get_multiturn_session_by_id(session_id)
+            cloud_multiturn_session = await unified_manager.get_multiturn_session_by_id(base_session_id)
             if cloud_multiturn_session:
                 current_turn = cloud_multiturn_session.get("current_turn")
                 total_turns = cloud_multiturn_session.get("total_turns")
@@ -4049,17 +4392,23 @@ async def get_session_snapshots(
         total_turns = multiturn_session.total_turns
 
     # Process turn_number if we have turn information
-    if current_turn is not None and total_turns is not None:
-        # If turn_number not specified, use current turn (latest)
-        if turn_number is None:
-            turn_number = current_turn
-        # Validate turn_number is within range
-        elif turn_number < 1 or turn_number > total_turns:
+    # Default to current (latest) turn if not specified
+    if turn_number is None and current_turn is not None:
+        turn_number = current_turn
+        print(f"[SNAPSHOTS] No turn_number specified, defaulting to current_turn={current_turn}")
+
+    # Validate turn_number is within range (only if we have total_turns info)
+    if turn_number is not None and total_turns is not None:
+        if turn_number < 1 or turn_number > total_turns:
             raise HTTPException(status_code=400, detail=f"Invalid turn_number. Must be between 1 and {total_turns}")
 
     # Use unified session manager to check both local and cloud storage
+    # Try with original session_id first (for turn-specific active sessions), then base_session_id
     unified_manager = get_unified_session_manager(queue_manager)
     session_data = await unified_manager.get_session_by_id(session_id)
+    if not session_data and session_id != base_session_id:
+        # For turn-specific IDs, also try with base session ID
+        session_data = await unified_manager.get_session_by_id(base_session_id)
 
     if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -4069,11 +4418,84 @@ async def get_session_snapshots(
     if session_user_id and session_user_id != user_id:
         raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-    # For multi-turn sessions with specific turn_number, return turn-specific snapshot
+    # Determine storage location to choose the right path
+    # IMPORTANT: Check if session is actively processing FIRST before using storage_location from session_data
+    # For multi-turn sessions, session_data from cloud might have storage_location="turn_specific" even if actively processing
+    storage_location = session_data.get("_storage_location", "unknown")
+
+    # Override storage_location to "active" if session is currently being processed
+    # For multi-turn sessions, check turn-specific session IDs (e.g., base_session_id_turn_4)
+    active_turn_session_id = None
+    if session_id in queue_manager.active_sessions:
+        storage_location = "active"
+        active_turn_session_id = session_id
+        print(f"[SNAPSHOTS] Overriding storage_location to 'active' for session_id={session_id}")
+    elif base_session_id in queue_manager.active_sessions:
+        storage_location = "active"
+        active_turn_session_id = base_session_id
+        print(f"[SNAPSHOTS] Overriding storage_location to 'active' for base_session_id={base_session_id}")
+    elif current_turn is not None:
+        # Check if there's an active session for the current turn
+        turn_specific_id = f"{base_session_id}_turn_{current_turn}"
+        if turn_specific_id in queue_manager.active_sessions:
+            storage_location = "active"
+            active_turn_session_id = turn_specific_id
+            print(f"[SNAPSHOTS] Overriding storage_location to 'active' for turn_specific_id={turn_specific_id}")
+
+    # For ACTIVE sessions (in-progress), use live snapshot extraction from progress_updates
+    if storage_location == "active":
+        # For active sessions, get real-time progress data from queue_manager using active_turn_session_id
+        if active_turn_session_id:
+            active_session_data = queue_manager.get_session_progress(active_turn_session_id)
+            progress_updates = active_session_data.get("progress_updates", [])
+            print(f"[SNAPSHOTS] Got active session data for: {active_turn_session_id}")
+        else:
+            # Fallback to session_data if not in active_sessions
+            progress_updates = session_data.get("progress_updates", [])
+            print(f"[SNAPSHOTS] Using session_data progress_updates (not in active_sessions)")
+        snapshots_list = []
+        latest_thinking_content = None
+
+        # Extract all snapshots from progress_updates
+        for update in progress_updates:
+            if update.get("type") == "snapshot_saved":
+                snapshot = update.get("snapshot")
+                if snapshot:
+                    snapshots_list.append({
+                        "timestamp": snapshot.get("timestamp"),
+                        "status": snapshot.get("status"),
+                        "session_path": snapshot.get("session_path"),
+                        "thinking_length": snapshot.get("content", {}).get("thinking_length", 0) if isinstance(snapshot.get("content"), dict) else 0,
+                        "is_complete": snapshot.get("is_complete", False),
+                        "is_cancelled": snapshot.get("is_cancelled", False),
+                        "error": snapshot.get("error")
+                    })
+                    # Keep track of latest thinking content
+                    if isinstance(snapshot.get("content"), dict):
+                        content = snapshot.get("content")
+                        if content.get("thinking_content"):
+                            latest_thinking_content = content.get("thinking_content")
+
+        print(f"[SNAPSHOTS DEBUG] Active session - extracted {len(snapshots_list)} snapshots from progress_updates")
+        print(f"[SNAPSHOTS DEBUG] Latest thinking content length: {len(latest_thinking_content) if latest_thinking_content else 0}")
+
+        result = {
+            "session_id": session_id,
+            "turn_number": turn_number,
+            "current_turn": current_turn,
+            "total_turns": total_turns,
+            "snapshot_count": len(snapshots_list),
+            "snapshots": snapshots_list,
+            "thinking_process": filter_execute_blocks(latest_thinking_content, include_execute),
+            "storage_location": storage_location
+        }
+        return result
+
+    # For multi-turn sessions with turn structure available, use turn-specific snapshot logic
     if turn_number is not None and (current_turn is not None or total_turns is not None):
-        # Load full multiturn session to get turn data
+        # Load full multiturn session to get turn data (use base_session_id for multi-turn lookup)
         unified_manager_mt = get_unified_session_manager(queue_manager)
-        cloud_multiturn_session = await unified_manager_mt.get_multiturn_session_by_id(session_id)
+        cloud_multiturn_session = await unified_manager_mt.get_multiturn_session_by_id(base_session_id)
 
         if cloud_multiturn_session and "turns" in cloud_multiturn_session:
             turns = cloud_multiturn_session["turns"]
@@ -4138,39 +4560,83 @@ async def get_session_snapshots(
                                 except Exception as e:
                                     print(f"Warning: Could not download thinking process from S3: {e}")
 
-                        # If still not found, try to retrieve from cloud storage
+                        # If still not found, try to retrieve from cloud storage using the specific filename
                         if not thinking_process_text:
                             print(f"[SNAPSHOTS DEBUG] Attempting to retrieve from cloud storage...")
                             try:
-                                cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
-                                print(f"[SNAPSHOTS DEBUG] Cloud session found: {cloud_session is not None}")
-                                if cloud_session and "s3_files" in cloud_session:
-                                    s3_files = cloud_session["s3_files"]
-                                    print(f"[SNAPSHOTS DEBUG] s3_files keys: {list(s3_files.keys())}")
+                                # We have the correct filename from thinking_process_file
+                                filename = thinking_process_file.get("filename")
+                                if filename:
+                                    # Construct the S3 key for this specific turn's file
+                                    # For multi-turn sessions, files are uploaded with turn-specific session IDs:
+                                    # - Turn 1: uses base_session_id
+                                    # - Turn 2+: uses {base_session_id}_turn_{turn_number}
+                                    if turn_number and turn_number > 1:
+                                        turn_session_id = f"{base_session_id}_turn_{turn_number}"
+                                    else:
+                                        turn_session_id = base_session_id
+                                    s3_key = f"sessions/{turn_session_id}/thinking_process/{filename}"
+                                    print(f"[SNAPSHOTS DEBUG] Constructed S3 key from filename (using turn_session_id={turn_session_id}): {s3_key}")
 
-                                    # Look for thinking process in S3 files
-                                    thinking_process_files = s3_files.get("thinking_process")
-                                    print(f"[SNAPSHOTS DEBUG] thinking_process files in S3: {thinking_process_files}")
+                                    try:
+                                        content = cloud_storage_manager.download_file_content(s3_key)
+                                        if content:
+                                            thinking_process_text = content.decode('utf-8')
+                                            print(f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3 using constructed key")
+                                    except Exception as e:
+                                        print(f"[SNAPSHOTS DEBUG] Failed to download with constructed key: {e}")
 
-                                    if thinking_process_files:
-                                        # Handle both dict (single file) and list (multiple files)
-                                        files_to_check = []
-                                        if isinstance(thinking_process_files, dict):
-                                            files_to_check = [thinking_process_files]
-                                        elif isinstance(thinking_process_files, list):
-                                            files_to_check = thinking_process_files
+                                # Fallback: try session-level retrieval using turn-specific session ID
+                                if not thinking_process_text:
+                                    # Use turn-specific session ID for multi-turn sessions
+                                    if turn_number and turn_number > 1:
+                                        fallback_session_id = f"{base_session_id}_turn_{turn_number}"
+                                    else:
+                                        fallback_session_id = base_session_id
+                                    cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(fallback_session_id)
+                                    print(f"[SNAPSHOTS DEBUG] Cloud session found for {fallback_session_id}: {cloud_session is not None}")
+                                    if cloud_session and "s3_files" in cloud_session:
+                                        s3_files = cloud_session["s3_files"]
+                                        print(f"[SNAPSHOTS DEBUG] s3_files keys: {list(s3_files.keys())}")
 
-                                        for file_info in files_to_check:
-                                            if isinstance(file_info, dict) and "s3_key" in file_info:
-                                                print(f"[SNAPSHOTS DEBUG] Downloading from S3 key: {file_info['s3_key']}")
-                                                # Download content from S3 (synchronous method)
-                                                content = cloud_storage_manager.download_file_content(file_info["s3_key"])
-                                                if content:
-                                                    thinking_process_text = content.decode('utf-8')
-                                                    print(f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3")
-                                                    break
-                                else:
-                                    print(f"[SNAPSHOTS DEBUG] No s3_files in cloud session")
+                                        # Look for thinking process in S3 files
+                                        thinking_process_files = s3_files.get("thinking_process")
+                                        print(f"[SNAPSHOTS DEBUG] thinking_process files in S3: {thinking_process_files}")
+
+                                        if thinking_process_files:
+                                            # Handle both dict (single file) and list (multiple files)
+                                            files_to_check = []
+                                            if isinstance(thinking_process_files, dict):
+                                                files_to_check = [thinking_process_files]
+                                            elif isinstance(thinking_process_files, list):
+                                                files_to_check = thinking_process_files
+
+                                            # For multi-turn sessions, try to find the file matching this turn's filename
+                                            if filename:
+                                                print(f"[SNAPSHOTS DEBUG] Looking for file matching: {filename}")
+                                                for file_info in files_to_check:
+                                                    if isinstance(file_info, dict):
+                                                        if file_info.get("filename") == filename and "s3_key" in file_info:
+                                                            print(f"[SNAPSHOTS DEBUG] Found matching file, downloading from S3 key: {file_info['s3_key']}")
+                                                            content = cloud_storage_manager.download_file_content(file_info["s3_key"])
+                                                            if content:
+                                                                thinking_process_text = content.decode('utf-8')
+                                                                print(f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3 (matched filename)")
+                                                                break
+
+                                            # If still not found, fall back to first available file
+                                            if not thinking_process_text:
+                                                print(f"[SNAPSHOTS DEBUG] No filename match, trying first available file")
+                                                for file_info in files_to_check:
+                                                    if isinstance(file_info, dict) and "s3_key" in file_info:
+                                                        print(f"[SNAPSHOTS DEBUG] Downloading from S3 key: {file_info['s3_key']}")
+                                                        content = cloud_storage_manager.download_file_content(file_info["s3_key"])
+                                                        if content:
+                                                            thinking_process_text = content.decode('utf-8')
+                                                            print(f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3")
+                                                            break
+                                    else:
+                                        print(f"[SNAPSHOTS DEBUG] No s3_files in cloud session")
                             except Exception as e:
                                 print(f"[SNAPSHOTS DEBUG] Error retrieving from cloud: {e}")
                                 import traceback
@@ -4224,36 +4690,18 @@ async def get_session_snapshots(
                 result["total_turns"] = total_turns
             return result
 
-    # For local/active sessions (in-progress), extract thinking process from periodic snapshots
-    periodic_snapshots = session_data.get("periodic_snapshots", [])
-    thinking_process_text = None
-
-    # Extract thinking content from the latest periodic snapshot
-    if periodic_snapshots and len(periodic_snapshots) > 0:
-        latest_snapshot = periodic_snapshots[-1]  # Get the most recent snapshot
-        print(f"[SNAPSHOTS DEBUG] Latest snapshot keys: {list(latest_snapshot.keys()) if isinstance(latest_snapshot, dict) else 'not a dict'}")
-
-        if isinstance(latest_snapshot, dict):
-            # Try to get thinking_content from the nested content object
-            content = latest_snapshot.get("content")
-            if isinstance(content, dict):
-                thinking_process_text = content.get("thinking_content")
-            # Fallback: try direct access
-            if not thinking_process_text:
-                thinking_process_text = latest_snapshot.get("thinking_content")
-
-    print(f"[SNAPSHOTS DEBUG] Local/active session - periodic_snapshots count: {len(periodic_snapshots)}")
-    print(f"[SNAPSHOTS DEBUG] Extracted thinking_process length: {len(thinking_process_text) if thinking_process_text else 0}")
-
-    result = {
+    # Fallback: no snapshots found
+    return {
         "session_id": session_id,
         "turn_number": turn_number,
         "current_turn": current_turn,
         "total_turns": total_turns,
-        "thinking_process": filter_execute_blocks(thinking_process_text, include_execute),
-        "storage_location": storage_location
+        "snapshot_count": 0,
+        "snapshots": [],
+        "thinking_process": None,
+        "storage_location": storage_location,
+        "message": "No snapshots found for this session"
     }
-    return result
 
 
 @app.get("/all-sessions")
@@ -4334,10 +4782,22 @@ async def continue_session(
     # If not in memory, try to load from cloud storage
     if not multiturn_session:
         try:
+            print(f"[DEBUG /continue-session] Session {session_id} not in memory, loading from cloud...")
             unified_manager = get_unified_session_manager(queue_manager)
             cloud_session_data = await unified_manager.get_multiturn_session_by_id(session_id)
 
             if cloud_session_data:
+                # DEBUG: Log what data we got from cloud
+                print(f"[DEBUG /continue-session] Loaded session data from storage location: {cloud_session_data.get('_storage_location', 'unknown')}")
+                if "turns" in cloud_session_data and isinstance(cloud_session_data["turns"], list):
+                    print(f"[DEBUG /continue-session] Cloud data has {len(cloud_session_data['turns'])} turns:")
+                    for t in cloud_session_data["turns"]:
+                        turn_num = t.get("turn_number")
+                        files = t.get("files", {})
+                        tp_file = files.get("thinking_process", {}).get("filename", "NONE") if isinstance(files.get("thinking_process"), dict) else "NONE"
+                        report_file = files.get("final_report", {}).get("filename", "NONE") if isinstance(files.get("final_report"), dict) else "NONE"
+                        print(f"[DEBUG /continue-session]   Turn {turn_num}: TP={tp_file}, Report={report_file}")
+
                 # Verify user owns this session before restoring
                 session_user_id = cloud_session_data.get("user_id")
                 if session_user_id and session_user_id != user_id:
@@ -4373,6 +4833,7 @@ async def continue_session(
 
                 # Add back to in-memory sessions
                 queue_manager.multiturn_sessions[session_id] = multiturn_session
+                print(f"[DEBUG /continue-session] Session {session_id} restored to memory from cloud storage")
                 print(f"Restored session {session_id} from cloud storage to continue conversation")
             else:
                 raise HTTPException(status_code=404, detail="Multi-turn session not found")
@@ -4399,62 +4860,77 @@ async def continue_session(
     s3_file_metadata = {}  # Store S3 metadata for new files
     rejected_files = []  # Track rejected files
 
-    if files and any(file.filename for file in files):
+    # Handle files - could be UploadFile objects or strings (file paths)
+    has_upload_files = files and any(
+        (hasattr(file, 'filename') and file.filename) or (isinstance(file, str) and file)
+        for file in files
+    )
+
+    if has_upload_files:
         # Create temporary upload directory for this session
         upload_dir = os.path.join(os.getcwd(), "temp_uploads", session_id)
         os.makedirs(upload_dir, exist_ok=True)
 
         for file in files:
-            if file.filename:
-                # Read file content
-                content = await file.read()
-                file_size = len(content)
-                file_size_mb = file_size / (1024 * 1024)
+            # Skip empty entries
+            if isinstance(file, str):
+                # File is already a path string - add directly if it exists
+                if file and os.path.exists(file):
+                    uploaded_file_paths.append(file)
+                continue
 
-                # Check file size
-                if file_size > MAX_FILE_SIZE_BYTES:
-                    rejected_files.append({
-                        "filename": file.filename,
-                        "size_mb": round(file_size_mb, 2),
-                        "reason": f"File size {file_size_mb:.2f}MB exceeds maximum {MAX_FILE_SIZE_MB}MB"
-                    })
-                    logger.warning(f"Rejected file {file.filename}: size {file_size_mb:.2f}MB > {MAX_FILE_SIZE_MB}MB limit")
-                    continue
+            if not hasattr(file, 'filename') or not file.filename:
+                continue
 
-                # Save file temporarily (without turn prefix for compatibility)
-                temp_file_path = os.path.join(upload_dir, file.filename)
-                with open(temp_file_path, "wb") as buffer:
-                    buffer.write(content)
+            # UploadFile object - read file content
+            content = await file.read()
+            file_size = len(content)
+            file_size_mb = file_size / (1024 * 1024)
 
-                # Upload to S3 if cloud storage is configured
-                if cloud_storage_manager and cloud_storage_manager.s3_client:
-                    try:
-                        # Generate S3 object name with session and turn context
-                        s3_object_name = f"sessions/{session_id}/turn{turn_number}_{file.filename}"
+            # Check file size
+            if file_size > MAX_FILE_SIZE_BYTES:
+                rejected_files.append({
+                    "filename": file.filename,
+                    "size_mb": round(file_size_mb, 2),
+                    "reason": f"File size {file_size_mb:.2f}MB exceeds maximum {MAX_FILE_SIZE_MB}MB"
+                })
+                logger.warning(f"Rejected file {file.filename}: size {file_size_mb:.2f}MB > {MAX_FILE_SIZE_MB}MB limit")
+                continue
 
-                        # Upload to S3
-                        cloud_storage_manager.s3_client.upload_file(
-                            temp_file_path,
-                            cloud_storage_manager.bucket_name,
-                            s3_object_name
-                        )
+            # Save file temporarily (without turn prefix for compatibility)
+            temp_file_path = os.path.join(upload_dir, file.filename)
+            with open(temp_file_path, "wb") as buffer:
+                buffer.write(content)
 
-                        # Store S3 metadata
-                        s3_file_metadata[file.filename] = {
-                            "s3_key": s3_object_name,
-                            "bucket": cloud_storage_manager.bucket_name,
-                            "local_path": temp_file_path,
-                            "turn_number": turn_number,
-                            "upload_time": datetime.now().isoformat(),
-                            "file_size": file_size,
-                            "file_size_mb": round(file_size_mb, 2)
-                        }
+            # Upload to S3 if cloud storage is configured
+            if cloud_storage_manager and cloud_storage_manager.s3_client:
+                try:
+                    # Generate S3 object name with session and turn context
+                    s3_object_name = f"sessions/{session_id}/turn{turn_number}_{file.filename}"
 
-                        logger.info(f"Uploaded {file.filename} to S3: {s3_object_name} (size: {file_size_mb:.2f}MB)")
-                    except Exception as e:
-                        logger.error(f"Failed to upload {file.filename} to S3: {e}")
+                    # Upload to S3
+                    cloud_storage_manager.s3_client.upload_file(
+                        temp_file_path,
+                        cloud_storage_manager.bucket_name,
+                        s3_object_name
+                    )
 
-                uploaded_file_paths.append(temp_file_path)
+                    # Store S3 metadata
+                    s3_file_metadata[file.filename] = {
+                        "s3_key": s3_object_name,
+                        "bucket": cloud_storage_manager.bucket_name,
+                        "local_path": temp_file_path,
+                        "turn_number": turn_number,
+                        "upload_time": datetime.now().isoformat(),
+                        "file_size": file_size,
+                        "file_size_mb": round(file_size_mb, 2)
+                    }
+
+                    logger.info(f"Uploaded {file.filename} to S3: {s3_object_name} (size: {file_size_mb:.2f}MB)")
+                except Exception as e:
+                    logger.error(f"Failed to upload {file.filename} to S3: {e}")
+
+            uploaded_file_paths.append(temp_file_path)
 
     # Check if all files were rejected
     if rejected_files and not uploaded_file_paths:
@@ -4821,15 +5297,60 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
                             print(f"Warning: Could not retrieve S3 files from cloud for session {session_id}: {e}")
                             cloud_session = {}  # Set to empty dict to avoid retrying
 
-                    # If we have cloud S3 files, merge them for this turn
+                    # If we have cloud S3 files, MERGE them into turn files (don't replace)
+                    # Only add missing keys like 'images', preserve turn-specific files like 'session_zip'
                     if has_missing_files and cloud_session and "s3_files" in cloud_session:
-                        turn["files"] = cloud_session["s3_files"]
+                        s3_files = cloud_session["s3_files"]
+                        if isinstance(s3_files, dict) and isinstance(turn["files"], dict):
+                            # Only merge keys that don't exist in turn files
+                            for key, value in s3_files.items():
+                                if key not in turn["files"]:
+                                    turn["files"][key] = value
+                        elif not turn["files"]:
+                            # If turn has no files at all, use s3_files
+                            turn["files"] = s3_files
 
-                    turn["files"] = generate_file_urls(turn["files"], session_id)
+                    # Use turn-specific session ID for URL generation (turn 2+ use {session_id}_turn_N)
+                    turn_num = turn.get("turn_number", 1)
+                    turn_session_id = f"{session_id}_turn_{turn_num}" if turn_num > 1 else session_id
 
-                # Append images to final_report (same as /results endpoint)
-                if "final_report" in turn and turn["files"]:
-                    turn["final_report"] = append_images_to_report(turn["final_report"], turn["files"])
+                    turn["files"] = generate_file_urls(turn["files"], turn_session_id)
+
+                    # For existing data: if turn_zip exists, use it as session_zip (for backwards compatibility)
+                    if isinstance(turn["files"], dict):
+                        if "turn_zip" in turn["files"] and turn["files"]["turn_zip"]:
+                            # Prefer turn_zip over session_zip for turn-specific downloads
+                            turn["files"]["session_zip"] = turn["files"]["turn_zip"]
+                        elif "session_zip" in turn["files"]:
+                            session_zips = turn["files"]["session_zip"]
+                            # Handle session_zip being a list (from cloud storage)
+                            if isinstance(session_zips, list) and len(session_zips) > 0:
+                                # Find the zip for this specific turn
+                                turn_zip_pattern = f"_turn_{turn_num}.zip"
+                                matching_zip = None
+                                for zip_item in session_zips:
+                                    if isinstance(zip_item, dict):
+                                        filename = zip_item.get("filename", "")
+                                        if turn_zip_pattern in filename:
+                                            matching_zip = zip_item
+                                            break
+                                # If no turn-specific zip found for turn 1, use one without _turn_ suffix
+                                if not matching_zip and turn_num == 1:
+                                    for zip_item in session_zips:
+                                        if isinstance(zip_item, dict):
+                                            filename = zip_item.get("filename", "")
+                                            if "_turn_" not in filename:
+                                                matching_zip = zip_item
+                                                break
+                                # If still no match, use the last item as fallback
+                                if not matching_zip:
+                                    matching_zip = session_zips[-1]
+                                # Replace list with the single matching zip
+                                turn["files"]["session_zip"] = matching_zip
+
+                    # Append images and download links to final_report (same as /results endpoint)
+                    if "final_report" in turn and turn["files"]:
+                        turn["final_report"] = append_images_to_report(turn["final_report"], turn["files"])
 
                 # Remove thinking process unless explicitly requested
                 if not include_thinking:

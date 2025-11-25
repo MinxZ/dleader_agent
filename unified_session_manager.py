@@ -161,9 +161,28 @@ class UnifiedSessionManager:
         Get session status with intelligent routing based on session state
         """
 
+        # Parse turn-specific session IDs (e.g., "session_id_turn_2")
+        base_session_id = session_id
+        if "_turn_" in session_id:
+            parts = session_id.rsplit("_turn_", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                base_session_id = parts[0]
+
         # 1. For ongoing/pending sessions, get real-time status
+        # Check session_id first (handles turn-specific IDs)
         if session_id in self.queue_manager.active_sessions:
             return self.queue_manager.get_session_progress(session_id)
+        # Then check base_session_id
+        if base_session_id in self.queue_manager.active_sessions:
+            return self.queue_manager.get_session_progress(base_session_id)
+        # For multi-turn sessions, check if current turn is active
+        multiturn_session = self.queue_manager.multiturn_sessions.get(base_session_id)
+        if multiturn_session:
+            current_turn = multiturn_session.current_turn
+            if current_turn:
+                turn_specific_id = f"{base_session_id}_turn_{current_turn}"
+                if turn_specific_id in self.queue_manager.active_sessions:
+                    return self.queue_manager.get_session_progress(turn_specific_id)
 
         # 2. For completed sessions, get from appropriate storage
         session_data = await self.get_session_by_id(session_id)
@@ -702,6 +721,15 @@ class UnifiedSessionManager:
                     }
                     result["turns"].append(turn_dict)
 
+                # DEBUG: Log file references from in-memory session
+                print(f"[DEBUG LOAD FROM MEMORY] Session {session_id} has {len(result['turns'])} turns:")
+                for t in result["turns"]:
+                    turn_num = t.get("turn_number")
+                    files = t.get("files", {}) or {}
+                    tp_file = files.get("thinking_process", {}).get("filename", "NONE") if isinstance(files.get("thinking_process"), dict) else "NONE"
+                    report_file = files.get("final_report", {}).get("filename", "NONE") if isinstance(files.get("final_report"), dict) else "NONE"
+                    print(f"[DEBUG LOAD FROM MEMORY]   Turn {turn_num}: TP={tp_file}, Report={report_file}")
+
             return result
         print(f"[PERF get_multiturn_session_by_id] Step 1 (in-memory check): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
 
@@ -742,6 +770,17 @@ class UnifiedSessionManager:
 
                 if session_data:
                     session_data["_storage_location"] = "mongodb"
+
+                    # DEBUG: Log file references from MongoDB
+                    if "turns" in session_data and isinstance(session_data["turns"], list):
+                        print(f"[DEBUG LOAD FROM MONGODB] Session {session_id} has {len(session_data['turns'])} turns:")
+                        for t in session_data["turns"]:
+                            turn_num = t.get("turn_number")
+                            files = t.get("files", {}) or {}
+                            tp_file = files.get("thinking_process", {}).get("filename", "NONE") if isinstance(files.get("thinking_process"), dict) else "NONE"
+                            report_file = files.get("final_report", {}).get("filename", "NONE") if isinstance(files.get("final_report"), dict) else "NONE"
+                            print(f"[DEBUG LOAD FROM MONGODB]   Turn {turn_num}: TP={tp_file}, Report={report_file}")
+
                     print(f"[PERF get_multiturn_session_by_id] Step 2 (MongoDB total): {(time.time() - step_start) * 1000:.2f} ms - FOUND")
                     print(f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms")
                     return session_data

@@ -647,6 +647,9 @@ async def check_status_with_history(session_id: str, server_url: str, user_id: s
         return "## ❌ Server Error\n\nCannot connect to FastAPI server. Please ensure the server is running.", gr.update(visible=False), gr.update(visible=False), None
 
     try:
+        # Initialize status_data to None to avoid UnboundLocalError
+        status_data = None
+
         # STEP 1: Get results data (contains everything: status, report, images)
         start_api = time.time()
         results_data = client.get_json_results(session_id, user_id)
@@ -668,7 +671,8 @@ async def check_status_with_history(session_id: str, server_url: str, user_id: s
         else:
             # Extract status from results_data
             current_status = results_data.get("status", "completed")
-            is_complete = True  # /results only works for completed sessions
+            # Check actual status - /results can return data for processing turns too
+            is_complete = current_status in ("completed", "failed", "error", "cancelled")
             current_turn = results_data.get('current_turn')
             total_turns = results_data.get('total_turns')
 
@@ -757,7 +761,8 @@ async def check_status_with_history(session_id: str, server_url: str, user_id: s
         # For non-completed sessions (in progress), show thinking process from /snapshots
         else:
             # For in-progress sessions, try to get images from /status if available
-            if not results_data and 'progress_updates' in status_data:
+            # Make sure status_data is defined before accessing it
+            if not results_data and status_data and 'progress_updates' in status_data:
                 # Check if there are images in progress updates
                 for update in status_data.get('progress_updates', []):
                     if update.get('type') == 'completion' and 'files' in update:
@@ -1892,11 +1897,14 @@ Please wait while I process your request..."""
                 response = client.continue_session(session_id, query, language="en", user_id=user_id, files=file_paths, use_template=use_template)
 
                 if response and 'session_id' in response:
-                    # Show progress
+                    # Show progress - use turn_session_id for status checking
+                    turn_session_id = response.get('turn_session_id', session_id)
+                    turn_number = response.get('turn_number', 'N/A')
                     files_info = f"\n**Files Uploaded:** {len(files)}" if files else ""
                     progress_text = f"""## 💬 Conversation Continued
 
-**Session ID:** `{session_id}`
+**Session ID:** `{turn_session_id}`
+**Turn:** {turn_number}
 **Status:** Processing...
 **Follow-up Query:** {query}{files_info}
 

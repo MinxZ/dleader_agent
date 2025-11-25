@@ -1291,11 +1291,20 @@ Each library is listed with its description to help you understand its functiona
                     self._inject_custom_functions_to_repl()
                     result = run_with_timeout(run_python_repl, [code], timeout=timeout)
 
-                if len(result) > 10000:
+                # Check if this is a directory listing command and suppress verbose output
+                is_listing_cmd = any(cmd in code.lower() for cmd in ['ls -', 'ls\n', 'dir ', 'find ', 'tree ', 'listdir', 'os.walk', 'glob.glob', 'scandir'])
+
+                if is_listing_cmd:
+                    # For directory listings, provide only a summary
+                    lines = result.split('\n')
+                    line_count = len([l for l in lines if l.strip()])
+                    result = f"Directory scan completed. Found {line_count} items. (Full listing hidden for readability)"
+                elif len(result) > 10000:
                     result = (
                         "The output is too long to be added to context. Here are the first 10K characters...\n"
                         + result[:10000]
                     )
+
                 observation = f"\n<observation>{result}</observation>"
                 state["messages"].append(AIMessage(content=observation.strip()))
 
