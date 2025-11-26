@@ -3694,37 +3694,59 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
         if image_count > 0:
             added_content += images_section
 
-    # Add download section for session zip
-    session_zip = files_data.get("session_zip")
+    # Add download links section
+    download_links = []
 
-    # Handle session_zip being a list (from cloud storage) - use the last item (turn-specific zip)
-    if session_zip and isinstance(session_zip, list) and len(session_zip) > 0:
-        # Use the last zip in the list (most recent/turn-specific)
-        session_zip = session_zip[-1]
+    # Check for session_zip or turn_zip
+    for key in ["session_zip", "turn_zip"]:
+        zip_info = files_data.get(key)
+        # Handle zip being a list (from cloud storage) - use the last item (turn-specific zip)
+        if zip_info and isinstance(zip_info, list) and len(zip_info) > 0:
+            zip_info = zip_info[-1]
 
-    if session_zip and isinstance(session_zip, dict):
-        url = session_zip.get("url")
-        if url:
-            downloads_section = "\n\n---\n\n## 📦 Downloads\n\n"
-            filename = session_zip.get("filename", "session.zip")
-            file_size = session_zip.get("file_size")
+        if zip_info and isinstance(zip_info, dict):
+            url = zip_info.get("url") or zip_info.get("download_url")
+            filename = zip_info.get("filename", f"{key}.zip")
+            file_size = zip_info.get("file_size")
 
-            # Format file size for display
-            if file_size:
-                if file_size > 1024 * 1024:  # MB
-                    size_display = f"{file_size / (1024 * 1024):.2f} MB"
-                elif file_size > 1024:  # KB
-                    size_display = f"{file_size / 1024:.2f} KB"
-                else:
-                    size_display = f"{file_size} bytes"
-                downloads_section += f"**Complete Session Package** ({size_display})\n\n"
-            else:
-                downloads_section += f"**Complete Session Package**\n\n"
+            if url:
+                # Format file size for display
+                size_display = ""
+                if file_size:
+                    if file_size > 1024 * 1024:  # MB
+                        size_display = f" ({file_size / (1024 * 1024):.2f} MB)"
+                    elif file_size > 1024:  # KB
+                        size_display = f" ({file_size / 1024:.2f} KB)"
+                    else:
+                        size_display = f" ({file_size} bytes)"
 
-            downloads_section += f"[📥 Download {filename}]({url})\n\n"
-            downloads_section += "*Includes all session files, reports, and generated outputs*\n\n"
+                download_links.append({
+                    "name": f"Download All Files (ZIP){size_display}",
+                    "url": url,
+                    "icon": "📦"
+                })
+                break  # Only add one zip download link
 
-            added_content += downloads_section
+    # Add other downloadable files (report_md and result_json)
+    for key in ["report_md", "result_json"]:
+        file_info = files_data.get(key)
+        if file_info and isinstance(file_info, dict):
+            url = file_info.get("url") or file_info.get("download_url")
+            if url:
+                name = "Final Report (Markdown)" if key == "report_md" else "Results (JSON)"
+                icon = "📄" if key == "report_md" else "📋"
+                download_links.append({
+                    "name": name,
+                    "url": url,
+                    "icon": icon
+                })
+
+    # Build download links section
+    if download_links:
+        downloads_section = "\n\n---\n\n## 📥 Downloads\n\n"
+        for link in download_links:
+            downloads_section += f"- {link['icon']} **[{link['name']}]({link['url']})**\n"
+        added_content += downloads_section
 
     return final_report + added_content
 
@@ -3880,9 +3902,50 @@ def generate_file_urls(files_data, session_id: str = None):
                     # Fall back to local download URL
                     result["download_url"] = f"/download-file/{session_id}/{filename}"
             else:
-                # File doesn't exist locally, provide download URL as fallback
-                result["download_url"] = f"/download-file/{session_id}/{filename}"
-                result["filename"] = filename
+                # File doesn't exist locally, check if it exists in S3
+                try:
+                    # Determine S3 key based on filename pattern
+                    # Files are organized in S3 by type: report_md/, result_json/, thinking_process/, query_file/, etc.
+                    file_ext = filename.split('.')[-1].lower()
+
+                    # Try to infer folder from filename prefix
+                    if filename.startswith('report_'):
+                        folder = 'report_md'
+                    elif filename.startswith('result_'):
+                        folder = 'result_json'
+                    elif filename.startswith('thinking_'):
+                        folder = 'thinking_process'
+                    elif filename.startswith('query_'):
+                        folder = 'query_file'
+                    elif file_ext in ['png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf']:
+                        folder = 'images'
+                    elif filename.endswith('.zip'):
+                        folder = 'files'
+                    else:
+                        folder = 'files'
+
+                    s3_key = f"sessions/{session_id}/{folder}/{filename}"
+
+                    # Check if file exists in S3
+                    head_object_count += 1
+                    cloud_storage_manager.s3_client.head_object(
+                        Bucket=cloud_storage_manager.bucket_name,
+                        Key=s3_key
+                    )
+                    # File exists in S3, generate presigned URL
+                    url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
+                    result["s3_key"] = s3_key
+                    result["url"] = url
+                    result["expires_at"] = (datetime.now() + timedelta(hours=2)).isoformat()
+                    result["filename"] = filename
+                except cloud_storage_manager.s3_client.exceptions.ClientError:
+                    # File doesn't exist in S3 either, fall back to download URL
+                    result["download_url"] = f"/download-file/{session_id}/{filename}"
+                    result["filename"] = filename
+                except Exception as e:
+                    print(f"Warning: Error checking S3 for {filename}: {e}")
+                    result["download_url"] = f"/download-file/{session_id}/{filename}"
+                    result["filename"] = filename
 
         return result
 
