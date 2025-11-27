@@ -3727,14 +3727,14 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
                 })
                 break  # Only add one zip download link
 
-    # Add other downloadable files (report_md and result_json)
-    for key in ["report_md", "result_json"]:
+    # Add other downloadable files (report_md only, exclude result_json)
+    for key in ["report_md"]:
         file_info = files_data.get(key)
         if file_info and isinstance(file_info, dict):
             url = file_info.get("url") or file_info.get("download_url")
             if url:
-                name = "Final Report (Markdown)" if key == "report_md" else "Results (JSON)"
-                icon = "📄" if key == "report_md" else "📋"
+                name = "Final Report (Markdown)"
+                icon = "📄"
                 download_links.append({
                     "name": name,
                     "url": url,
@@ -4120,7 +4120,9 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
 
                 if should_fetch_s3:
                     try:
-                        cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
+                        # Use turn-specific session ID for turn 2+ to get correct images
+                        turn_session_id_for_s3 = f"{session_id}_turn_{turn_number}" if turn_number > 1 else session_id
+                        cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(turn_session_id_for_s3)
                         if cloud_session and "s3_files" in cloud_session:
                             s3_files = cloud_session["s3_files"]
                             # Merge S3 files (especially images) into turn files
@@ -5289,9 +5291,6 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
         if session_user_id and session_user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-        # Get cloud session data in case we need S3 files
-        cloud_session = None
-
         # Handle in-memory sessions: Extract turns from _session_object
         if session.get("_storage_location") == "memory" and "_session_object" in session:
             session_obj = session["_session_object"]
@@ -5348,30 +5347,32 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
                             if has_missing_files:
                                 break
 
-                    # If local files are missing, try to get S3 files from cloud (once)
-                    if has_missing_files and cloud_session is None:
+                    # If local files are missing, try to get S3 files from cloud
+                    # Use turn-specific session ID for turn 2+ to get correct images
+                    turn_num = turn.get("turn_number", 1)
+                    turn_session_id_for_cloud = f"{session_id}_turn_{turn_num}" if turn_num > 1 else session_id
+
+                    if has_missing_files:
                         try:
                             cloud_fetch_start = time.time()
-                            cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
-                            print(f"[PERF /multiturn-session] Cloud fetch: {(time.time() - cloud_fetch_start) * 1000:.2f} ms")
-                            if cloud_session:
-                                print(f"Local files missing for session {session_id}, fetched S3 files from cloud storage")
-                        except Exception as e:
-                            print(f"Warning: Could not retrieve S3 files from cloud for session {session_id}: {e}")
-                            cloud_session = {}  # Set to empty dict to avoid retrying
+                            turn_cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(turn_session_id_for_cloud)
+                            print(f"[PERF /multiturn-session] Cloud fetch for turn {turn_num}: {(time.time() - cloud_fetch_start) * 1000:.2f} ms")
+                            if turn_cloud_session:
+                                print(f"Local files missing for turn {turn_num}, fetched S3 files from cloud storage")
 
-                    # If we have cloud S3 files, MERGE them into turn files (don't replace)
-                    # Only add missing keys like 'images', preserve turn-specific files like 'session_zip'
-                    if has_missing_files and cloud_session and "s3_files" in cloud_session:
-                        s3_files = cloud_session["s3_files"]
-                        if isinstance(s3_files, dict) and isinstance(turn["files"], dict):
-                            # Only merge keys that don't exist in turn files
-                            for key, value in s3_files.items():
-                                if key not in turn["files"]:
-                                    turn["files"][key] = value
-                        elif not turn["files"]:
-                            # If turn has no files at all, use s3_files
-                            turn["files"] = s3_files
+                                # Merge S3 files into turn files
+                                if "s3_files" in turn_cloud_session:
+                                    s3_files = turn_cloud_session["s3_files"]
+                                    if isinstance(s3_files, dict) and isinstance(turn["files"], dict):
+                                        # Only merge keys that don't exist in turn files
+                                        for key, value in s3_files.items():
+                                            if key not in turn["files"]:
+                                                turn["files"][key] = value
+                                    elif not turn["files"]:
+                                        # If turn has no files at all, use s3_files
+                                        turn["files"] = s3_files
+                        except Exception as e:
+                            print(f"Warning: Could not retrieve S3 files from cloud for turn {turn_num}: {e}")
 
                     # Use turn-specific session ID for URL generation (turn 2+ use {session_id}_turn_N)
                     turn_num = turn.get("turn_number", 1)
