@@ -60,6 +60,8 @@ from template_retriever import TemplateRetriever
 from unified_session_manager import get_unified_session_manager
 # Import TurnType enum from models
 from api.models import TurnType
+# Import allowed users list
+from allowed_emails import is_user_allowed, ALLOWED_EMAILS
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -555,12 +557,20 @@ Reasoning: {user_request.template_reasoning}
     def create_json_snapshot(self, user_request: UserRequest, accumulated_thinking: str = "", session_path: str = "") -> dict:
         """Create a JSON snapshot of current progress"""
         # Collect image files from session if path exists
+        # For multi-turn sessions, only include images created during this turn
         image_files = []
         if session_path and os.path.exists(session_path):
             image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp'}
+            turn_start_time = user_request.turn_start_time if hasattr(user_request, 'turn_start_time') else None
             for file in os.listdir(session_path):
                 if any(file.lower().endswith(ext) for ext in image_extensions):
-                    image_files.append(os.path.join(session_path, file))
+                    file_path = os.path.join(session_path, file)
+                    # Filter by turn_start_time for multi-turn sessions
+                    if turn_start_time is not None:
+                        file_mtime = os.path.getmtime(file_path)
+                        if file_mtime < turn_start_time:
+                            continue  # Skip images from previous turns
+                    image_files.append(file_path)
 
         # Clean the thinking content to show only original user message and add template header
         cleaned_thinking = self._clean_thinking_content(accumulated_thinking, user_request.message)
@@ -1429,7 +1439,9 @@ Reasoning: {user_request.template_reasoning}
             user_request.session_path = session_path
 
             # Record start time for new file tracking
+            # Store on user_request so it can be used for filtering images created during this turn
             start_time = time.time()
+            user_request.turn_start_time = start_time
             current_path = os.getcwd()
             chat_sessions_path = os.path.join(current_path, "chat_sessions")
             
@@ -1557,6 +1569,10 @@ Reasoning: {user_request.template_reasoning}
             # Create multiprocessing queues for communication
             message_queue = MPQueue()
             result_queue = MPQueue()
+
+            # Update turn_start_time to NOW (after downloading previous files)
+            # This ensures we only capture images created during THIS turn's processing
+            user_request.turn_start_time = time.time()
 
             # Store queues in user_request
             user_request.process_queue = result_queue
@@ -1897,11 +1913,19 @@ Reasoning: {user_request.template_reasoning}
                     f.write(f"Query: {user_request.message}\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
                 # Collect image files from session
+                # For multi-turn sessions, only include images created during this turn
                 image_files = []
                 image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp'}
+                turn_start_time = user_request.turn_start_time if hasattr(user_request, 'turn_start_time') else None
                 for file in os.listdir(session_path):
                     if any(file.lower().endswith(ext) for ext in image_extensions):
-                        image_files.append(os.path.join(session_path, file))
+                        file_path = os.path.join(session_path, file)
+                        # Filter by turn_start_time for multi-turn sessions
+                        if turn_start_time is not None:
+                            file_mtime = os.path.getmtime(file_path)
+                            if file_mtime < turn_start_time:
+                                continue  # Skip images from previous turns
+                        image_files.append(file_path)
 
                 # Create structured JSON result
                 json_result = {
@@ -2104,7 +2128,9 @@ Reasoning: {user_request.template_reasoning}
                     "all_progress_updates": user_request.all_progress_updates,
                     "periodic_snapshots": user_request.periodic_snapshots,
                     "result": user_request.result,
-                    "json_result": user_request.json_result
+                    "json_result": user_request.json_result,
+                    # For multi-turn sessions, pass turn_start_time to filter images
+                    "turn_start_time": user_request.turn_start_time if hasattr(user_request, 'turn_start_time') else None
                 }
 
                 # Add snapshot metadata if snapshots were uploaded
@@ -3080,6 +3106,70 @@ def get_template_retriever():
             template_retriever = None
     return template_retriever
 
+# Email allow list middleware to restrict API access
+class EmailAllowListMiddleware(BaseHTTPMiddleware):
+    """Middleware to check if the user_id is in the allowed list."""
+
+    # Endpoints that don't require user authentication
+    EXEMPT_PATHS = {
+        "/health",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+        "/templates",
+        "/shared-sessions",
+    }
+
+    async def dispatch(self, request: Request, call_next):
+        # Skip OPTIONS requests (CORS preflight)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # Skip exempt paths
+        path = request.url.path
+        if path in self.EXEMPT_PATHS or path.startswith("/docs") or path.startswith("/redoc"):
+            return await call_next(request)
+
+        # Try to extract user_id from different sources
+        user_id = None
+
+        # 1. Try query parameters
+        user_id = request.query_params.get("user_id")
+
+        # 2. Try to read from form data (for POST requests)
+        if not user_id and request.method == "POST":
+            # We need to be careful here - reading the body consumes it
+            # So we'll check the content type and handle form data
+            content_type = request.headers.get("content-type", "")
+            if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+                # For form data, we can't easily peek without consuming
+                # So we'll let the endpoint handle validation
+                return await call_next(request)
+
+        # 3. Try path parameters for endpoints like /user/{user_id}/name
+        if not user_id:
+            path_parts = path.split("/")
+            if "user" in path_parts:
+                user_idx = path_parts.index("user")
+                if user_idx + 1 < len(path_parts):
+                    user_id = path_parts[user_idx + 1]
+
+        # If we found a user_id, validate it
+        if user_id:
+            if not is_user_allowed(user_id):
+                logger.warning(f"Access denied for user_id: {user_id}")
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": f"Access denied: User '{user_id}' is not in the allowed list"},
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Credentials": "true",
+                    }
+                )
+
+        return await call_next(request)
+
+
 # Custom CORS middleware to ensure headers are always present
 class CORSHeaderMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -3133,6 +3223,9 @@ app.add_middleware(
 # Add custom CORS header middleware (belt and suspenders approach)
 app.add_middleware(CORSHeaderMiddleware)
 
+# Add email allow list middleware to restrict API access
+app.add_middleware(EmailAllowListMiddleware)
+
 # Global OPTIONS handler for CORS preflight requests
 @app.options("/{full_path:path}")
 async def options_handler(full_path: str):
@@ -3172,6 +3265,11 @@ async def start_chat_queue(
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /chat-queue: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
 
     # Automatically determine if template matching should be used
     # If use_template is None (not specified), use LLM to auto-detect based on query complexity
@@ -3317,6 +3415,11 @@ async def get_status(session_id: str, user_id: str, turn_number: Optional[int] =
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
 
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /status: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         # Get unified session manager
         unified_manager = get_unified_session_manager(queue_manager)
@@ -3447,6 +3550,11 @@ async def download_session_zip(session_id: str, user_id: str):
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
 
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /download: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     import requests
     from fastapi.responses import RedirectResponse
 
@@ -3540,6 +3648,11 @@ async def download_individual_file(session_id: str, filename: str, user_id: str)
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /download-file: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
 
     try:
         # Get unified session manager
@@ -3991,6 +4104,11 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
 
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /results: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     # Get unified_manager ONCE and reuse it throughout this function
     step1_start = time.time()
     unified_manager = get_unified_session_manager(queue_manager)
@@ -4344,6 +4462,11 @@ async def stop_task(session_id: str, user_id: str):
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
 
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /stop: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     # First verify user owns this session
     if session_id in queue_manager.active_sessions:
         session_user_id = getattr(queue_manager.active_sessions[session_id], 'user_id', None)
@@ -4421,6 +4544,11 @@ async def get_session_snapshots(
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /snapshots: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
 
     # Parse turn-specific session IDs (e.g., "session_id_turn_2")
     base_session_id = session_id
@@ -4777,6 +4905,11 @@ async def get_all_sessions(user_id: Optional[str] = None):
         if not user_id or user_id.strip() == "":
             return {"sessions": [], "error": "user_id is required", "message": "Please provide a valid user_id"}
 
+        # Check if user is in the allowed list
+        if not is_user_allowed(user_id):
+            logger.warning(f"Access denied for user_id in /all-sessions: {user_id}")
+            raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
         # Get unified session manager
         unified_manager = get_unified_session_manager(queue_manager)
 
@@ -4834,6 +4967,11 @@ async def continue_session(
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /continue-session: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
 
     # Automatically determine if template matching should be used
     # If use_template is None (not specified), use LLM to auto-detect based on query complexity
@@ -5114,6 +5252,11 @@ async def plan_session(
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required")
 
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /plan-session: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     # Validate message
     if not message or message.strip() == "":
         raise HTTPException(status_code=400, detail="message is required")
@@ -5272,6 +5415,11 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
         include_thinking: If True, includes thinking process (response_content) in each turn.
                          Default is False to reduce response size for sessions with many turns.
     """
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /multiturn-session: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     import time
     start_time = time.time()
     print(f"[PERF /multiturn-session] Started for session {session_id}")
@@ -5473,6 +5621,11 @@ async def get_all_multiturn_sessions(
                 "message": "Please provide a valid user_id"
             }
 
+        # Check if user is in the allowed list
+        if not is_user_allowed(user_id):
+            logger.warning(f"Access denied for user_id in /multiturn-sessions: {user_id}")
+            raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
         # Get unified session manager
         unified_manager = get_unified_session_manager(queue_manager)
 
@@ -5520,6 +5673,11 @@ async def get_all_multiturn_sessions(
 @app.get("/turn-report/{session_id}/{turn_number}")
 async def get_turn_report(session_id: str, turn_number: int, user_id: str):
     """Get specific turn report from multi-turn session"""
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /turn-report: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     if not multiturn_session:
         raise HTTPException(status_code=404, detail="Multi-turn session not found")
@@ -5547,6 +5705,11 @@ async def get_turn_report(session_id: str, turn_number: int, user_id: str):
 @app.get("/session-context/{session_id}")
 async def get_session_context(session_id: str, user_id: str):
     """Get accumulated context for a multi-turn session"""
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /session-context: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     multiturn_session = queue_manager.multiturn_sessions.get(session_id)
     if not multiturn_session:
         raise HTTPException(status_code=404, detail="Multi-turn session not found")
@@ -5566,6 +5729,11 @@ async def get_session_context(session_id: str, user_id: str):
 @app.post("/share-session")
 async def share_session(request: ShareSessionRequest):
     """Share a multi-turn session with the community"""
+    # Check if user is in the allowed list
+    if request.user_id and not is_user_allowed(request.user_id):
+        logger.warning(f"Access denied for user_id in /share-session: {request.user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{request.user_id}' is not in the allowed list")
+
     try:
         # Get the session to share
         multiturn_session = queue_manager.multiturn_sessions.get(request.session_id)
@@ -5626,6 +5794,11 @@ async def share_session(request: ShareSessionRequest):
 @app.post("/unshare-session")
 async def unshare_session(session_id: str, user_id: str):
     """Remove a session from community sharing"""
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /unshare-session: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         # Get the session
         multiturn_session = queue_manager.multiturn_sessions.get(session_id)
@@ -5704,6 +5877,11 @@ async def get_shared_sessions(limit: int = 50, offset: int = 0):
 @app.post("/rename-multisession")
 async def rename_multisession(request: RenameMultiSessionRequest):
     """Rename a multi-turn session using Unified Session Manager"""
+    # Check if user is in the allowed list
+    if not is_user_allowed(request.user_id):
+        logger.warning(f"Access denied for user_id in /rename-multisession: {request.user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{request.user_id}' is not in the allowed list")
+
     import time
     start_total = time.time()
 
@@ -5905,6 +6083,11 @@ async def get_user_name(user_id: str):
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
 
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /user/name (GET): {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         # Import MongoDB functions
         from s3_mongodb.func_mongodb import get_mongodb_collection
@@ -5963,6 +6146,11 @@ async def update_user_name(user_id: str, request: Request):
     """
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /user/name (PUT): {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
 
     try:
         # Parse request body
@@ -6031,6 +6219,11 @@ async def hard_delete_session(session_id: str, user_id: str, confirm: bool = Fal
     # Validate user_id
     if not user_id or user_id.strip() == "":
         raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /hard-delete: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
 
     try:
         if not confirm:
@@ -6175,6 +6368,11 @@ async def get_session_download_urls(session_id: str, user_id: str, turn_number: 
         user_id: The user ID
         turn_number: Optional turn number to retrieve files for. If not provided, returns current/latest turn files.
     """
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /download-urls: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         # For multi-turn sessions, extract base session ID
         base_session_id = session_id

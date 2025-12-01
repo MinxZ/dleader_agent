@@ -19,10 +19,15 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
+import logging
 
 # Import necessary dependencies
 from unified_session_manager import get_unified_session_manager
 from cloud_storage_manager import cloud_storage_manager
+from allowed_emails import is_user_allowed
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Create router for trash endpoints
 router = APIRouter(prefix="/trash", tags=["trash"])
@@ -31,6 +36,11 @@ router = APIRouter(prefix="/trash", tags=["trash"])
 @router.post("/move/{session_id}")
 async def move_to_trash(session_id: str, user_id: str):
     """Soft delete - Move session to trash (mark as deleted but keep data)"""
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /trash/move: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         # Get unified session manager - need queue_manager from main app
         from agent_fastapi_server_multiturn import queue_manager
@@ -86,6 +96,11 @@ async def move_to_trash(session_id: str, user_id: str):
 @router.post("/restore/{session_id}")
 async def restore_from_trash(session_id: str, user_id: str):
     """Restore session from trash"""
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /trash/restore: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         # Get unified session manager
         from agent_fastapi_server_multiturn import queue_manager
@@ -141,6 +156,11 @@ async def restore_from_trash(session_id: str, user_id: str):
 @router.delete("/permanent/{session_id}")
 async def permanent_delete_session(session_id: str, user_id: str, confirm: bool = False):
     """Permanently delete session from trash - removes all data from S3, MongoDB, and local storage"""
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /trash/permanent: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         if not confirm:
             raise HTTPException(status_code=400, detail="Must confirm permanent deletion with confirm=true")
@@ -244,6 +264,11 @@ async def permanent_delete_session(session_id: str, user_id: str, confirm: bool 
 @router.get("/sessions")
 async def get_trash_sessions(user_id: str):
     """Get all sessions in trash for a user"""
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /trash/sessions: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         # Get unified session manager
         from agent_fastapi_server_multiturn import queue_manager
@@ -285,6 +310,11 @@ async def get_trash_sessions(user_id: str):
 @router.post("/empty")
 async def empty_trash(user_id: str, confirm: bool = False):
     """Empty all trash for a user - permanently delete all trashed sessions"""
+    # Check if user is in the allowed list
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /trash/empty: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         if not confirm:
             raise HTTPException(status_code=400, detail="Must confirm emptying trash with confirm=true")

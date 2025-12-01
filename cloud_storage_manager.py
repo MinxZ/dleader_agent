@@ -135,8 +135,11 @@ class CloudStorageManager:
             if not local_session_path or not os.path.exists(local_session_path):
                 raise Exception(f"Local session path not found: {local_session_path}")
 
+            # Extract turn_start_time for filtering images in multi-turn sessions
+            turn_start_time = session_data.get("turn_start_time")
+
             # Upload files to S3 and get keys
-            s3_files = await self._upload_session_files_to_s3(session_id, local_session_path)
+            s3_files = await self._upload_session_files_to_s3(session_id, local_session_path, turn_start_time=turn_start_time)
 
             # Prepare metadata for MongoDB
             session_metadata = self._prepare_session_metadata(session_id, session_data, s3_files)
@@ -166,8 +169,14 @@ class CloudStorageManager:
                 "error": str(e)
             }
 
-    async def _upload_session_files_to_s3(self, session_id: str, local_session_path: str) -> Dict[str, str]:
-        """Upload all session files to S3 and return S3 keys (not URLs)"""
+    async def _upload_session_files_to_s3(self, session_id: str, local_session_path: str, turn_start_time: float = None) -> Dict[str, str]:
+        """Upload all session files to S3 and return S3 keys (not URLs)
+
+        Args:
+            session_id: Session identifier
+            local_session_path: Path to local session directory
+            turn_start_time: For multi-turn sessions, only upload images created after this timestamp
+        """
         s3_files = {}
         session_path = Path(local_session_path)
 
@@ -259,6 +268,12 @@ class CloudStorageManager:
 
                     # Determine file category and S3 path
                     if file_ext in image_extensions:
+                        # For multi-turn sessions, only include images created during this turn
+                        if turn_start_time is not None:
+                            file_mtime = file_path.stat().st_mtime
+                            if file_mtime < turn_start_time:
+                                logger.info(f"Skipping image {file_path.name} - created before turn start")
+                                continue  # Skip images from previous turns
                         s3_key = f"sessions/{session_id}/images/{file_path.name}"
                         category = "images"
                         target_list = images
