@@ -993,6 +993,24 @@ For R code, use the #!R marker at the beginning of your code block to indicate i
 For Bash scripts and commands, use the #!BASH marker at the beginning of your code block. This allows for both simple commands and multi-line scripts with variables, loops, conditionals, loops, and other Bash features.
 
 In each response, you must include EITHER <execute> or <solution> tag. Not both at the same time. Do not respond with messages without any tags. No empty messages.
+
+IMPORTANT - MARKDOWN FORMATTING FOR REPORTS:
+When generating final reports or summaries in markdown format, ensure proper line breaks for readability:
+- For checklist items with ✓ or ✗ symbols, put each item on its own line using markdown list format:
+  - ✓ Item one
+  - ✓ Item two
+  - ✗ Item three
+- For bullet points or property lists, use proper markdown list syntax with `-` or `*`:
+  - **Property**: Value
+  - **Another Property**: Value
+- When listing multiple criteria or scores, use numbered lists or bullet lists, NOT inline text:
+  WRONG: ✓ Length: 18-25 nt ✓ GC content: 40-60% ✓ Tm: 65-75°C
+  CORRECT:
+  - ✓ Length: 18-25 nt
+  - ✓ GC content: 40-60%
+  - ✓ Tm: 65-75°C
+- For comparison tables, use markdown table format with proper column alignment
+- Always add a blank line before and after lists, tables, and code blocks
 """
 
         # Add self-critic instructions if needed
