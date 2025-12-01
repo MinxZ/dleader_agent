@@ -598,13 +598,22 @@ Reasoning: {user_request.template_reasoning}
         }
         return snapshot
 
-    def stop_session(self, session_id: str) -> bool:
-        """Stop a running or queued session"""
+    def stop_session(self, session_id: str) -> dict:
+        """Stop a running or queued session
+
+        Returns:
+            dict with 'success' (bool), 'was_queued' (bool), and 'was_running' (bool)
+            Returns {'success': False} if session not found
+        """
         with self.processing_lock:
             if session_id not in self.active_sessions:
-                return False
+                return {"success": False}
 
             user_request = self.active_sessions[session_id]
+
+            # Determine if session is queued (not yet processing) or running
+            was_queued = user_request.status == "queued"
+            was_running = self.current_processing_session == session_id
 
             # Mark as cancelled
             user_request.is_cancelled = True
@@ -617,6 +626,8 @@ Reasoning: {user_request.template_reasoning}
             user_request.progress_queue.put({
                 "type": "cancelled",
                 "message": "Task was cancelled by user",
+                "was_queued": was_queued,
+                "was_running": was_running,
                 "timestamp": datetime.now().isoformat()
             })
 
@@ -686,6 +697,14 @@ Reasoning: {user_request.template_reasoning}
                 if not stopped:
                     print(f"ERROR: Thread for session {session_id} could not be stopped gracefully!")
 
+            # For queued sessions, no need for file cleanup or S3 upload (no work was done)
+            if was_queued:
+                print(f"Session {session_id} was cancelled while in queue (no processing occurred)")
+                # Remove from active sessions immediately for queued cancellations
+                if session_id in self.active_sessions:
+                    del self.active_sessions[session_id]
+                return {"success": True, "was_queued": True, "was_running": False}
+
             # Move any generated files to session folder to keep workspace clean
             self._move_generated_files_to_session(user_request)
 
@@ -695,7 +714,7 @@ Reasoning: {user_request.template_reasoning}
             # Ensure S3 upload for cancelled session
             self._trigger_s3_upload_for_session(user_request)
 
-            return True
+            return {"success": True, "was_queued": False, "was_running": was_running}
 
     def _wait_and_verify_stop(self, user_request: UserRequest, session_id: str, max_wait: int = 10) -> bool:
         """Wait for thread to stop and verify it's really stopped"""
@@ -1342,18 +1361,27 @@ Reasoning: {user_request.template_reasoning}
             try:
                 # Get next request from queue
                 user_request = self.request_queue.get(timeout=1)
-                
+
+                # Check if request was cancelled while in queue
+                if user_request.is_cancelled:
+                    print(f"Skipping cancelled request {user_request.session_id} (was stopped while in queue)")
+                    # Clean up the cancelled session from active_sessions
+                    with self.processing_lock:
+                        if user_request.session_id in self.active_sessions:
+                            del self.active_sessions[user_request.session_id]
+                    continue
+
                 with self.processing_lock:
                     self.is_processing = True
                     self.current_processing_session = user_request.session_id
-                
+
                 # Process the request
                 self._process_user_request(user_request)
-                
+
                 with self.processing_lock:
                     self.is_processing = False
                     self.current_processing_session = None
-                
+
             except queue.Empty:
                 continue
             except Exception as e:
@@ -1964,6 +1992,42 @@ Reasoning: {user_request.template_reasoning}
 
             except Exception as e:
                 print(f"Error saving session files: {e}")
+
+            # Generate PDF report with images before creating ZIP
+            pdf_path = None
+            try:
+                # Check if we have the required variables for PDF generation
+                report_content_for_pdf = locals().get('final_report_content')
+                images_for_pdf = locals().get('image_files', [])
+
+                if report_content_for_pdf and session_path:
+                    user_request.progress_queue.put({
+                        "type": "status",
+                        "message": "Generating PDF report..."
+                    })
+                    pdf_path = generate_report_pdf(session_path, report_content_for_pdf, images_for_pdf)
+                    if pdf_path:
+                        print(f"Generated PDF report: {pdf_path}")
+                        # Add PDF path to json_result files
+                        if hasattr(user_request, 'json_result') and user_request.json_result:
+                            user_request.json_result["files"]["report_pdf"] = pdf_path
+                            # Re-save JSON with updated PDF path
+                            if "result_json" in user_request.json_result["files"]:
+                                json_path_for_update = user_request.json_result["files"]["result_json"]
+                                with open(json_path_for_update, 'w', encoding='utf-8') as f:
+                                    json.dump(user_request.json_result, f, indent=2, ensure_ascii=False)
+                        user_request.progress_queue.put({
+                            "type": "status",
+                            "message": f"PDF report generated: {os.path.basename(pdf_path)}"
+                        })
+                    else:
+                        print("PDF generation returned None")
+                else:
+                    print(f"Skipping PDF generation: report_content={bool(report_content_for_pdf)}, session_path={bool(session_path)}")
+            except Exception as e:
+                print(f"Error generating PDF report: {e}")
+                import traceback
+                traceback.print_exc()
 
             # Create ZIP files - both session-wide and per-turn
             zip_file_path = None
@@ -2804,6 +2868,275 @@ def move_files_to_session(file_paths, session_path):
             print(f"Error moving file {file_path}: {e}")
 
     return moved_files
+
+
+def generate_report_pdf(session_path: str, report_content: str, image_files: list) -> Optional[str]:
+    """Generate a PDF from the final report with embedded images.
+
+    Args:
+        session_path: Path to the session directory where PDF will be saved
+        report_content: The markdown content of the final report
+        image_files: List of image file paths to include in the PDF
+
+    Returns:
+        Path to the generated PDF file, or None if generation fails
+    """
+    try:
+        from fpdf import FPDF
+        from PIL import Image
+        import re
+        import html
+
+        # Create PDF with UTF-8 support
+        class UTF8PDF(FPDF):
+            def __init__(self):
+                super().__init__()
+                # Use built-in fonts with latin-1 encoding fallback
+                self.set_auto_page_break(auto=True, margin=15)
+
+            def header(self):
+                self.set_font('Helvetica', 'B', 10)
+                self.set_text_color(128, 128, 128)
+                self.cell(0, 10, 'DLeader Agent Report', align='C')
+                self.ln(10)
+
+            def footer(self):
+                self.set_y(-15)
+                self.set_font('Helvetica', 'I', 8)
+                self.set_text_color(128, 128, 128)
+                self.cell(0, 10, f'Page {self.page_no()}', align='C')
+
+        pdf = UTF8PDF()
+        pdf.add_page()
+
+        # Helper function to clean text for PDF (handle non-latin characters)
+        def clean_text(text):
+            # Replace common problematic characters
+            replacements = {
+                '\u2018': "'", '\u2019': "'",  # Smart quotes
+                '\u201c': '"', '\u201d': '"',
+                '\u2013': '-', '\u2014': '--',
+                '\u2026': '...',
+                '\u00a0': ' ',  # Non-breaking space
+                '\u2022': '*',  # Bullet
+                '\u2713': '[x]',  # Checkmark
+                '\u2717': '[ ]',  # X mark
+            }
+            for old, new in replacements.items():
+                text = text.replace(old, new)
+            # Encode to latin-1, replacing unknown chars
+            return text.encode('latin-1', errors='replace').decode('latin-1')
+
+        # Helper function to add text with word wrapping
+        def add_paragraph(text, font='Helvetica', size=11, style=''):
+            pdf.set_font(font, style, size)
+            pdf.set_text_color(0, 0, 0)
+            # Clean the text for PDF compatibility
+            cleaned = clean_text(text)
+            pdf.multi_cell(0, 6, cleaned)
+            pdf.ln(2)
+
+        # Helper function to add heading
+        def add_heading(text, level=1):
+            sizes = {1: 18, 2: 16, 3: 14, 4: 12}
+            size = sizes.get(level, 12)
+            pdf.set_font('Helvetica', 'B', size)
+            pdf.set_text_color(0, 0, 0)
+            cleaned = clean_text(text)
+            pdf.multi_cell(0, 8, cleaned)
+            pdf.ln(3)
+
+        # Helper function to add code block
+        def add_code_block(code):
+            pdf.set_font('Courier', '', 9)
+            pdf.set_fill_color(245, 245, 245)
+            pdf.set_text_color(0, 0, 0)
+            cleaned = clean_text(code)
+            # Split into lines and add each line
+            for line in cleaned.split('\n'):
+                # Truncate very long lines
+                if len(line) > 100:
+                    line = line[:97] + '...'
+                pdf.cell(0, 5, line, fill=True)
+                pdf.ln()
+            pdf.ln(3)
+
+        # Helper function to add an image
+        def add_image(image_path, caption=None):
+            if not os.path.exists(image_path):
+                return
+
+            try:
+                # Get image dimensions
+                with Image.open(image_path) as img:
+                    img_width, img_height = img.size
+
+                # Calculate scaling to fit page width (max 180mm for A4)
+                max_width = 180
+                max_height = 200  # Leave room for caption and margins
+
+                # Calculate aspect ratio
+                aspect = img_height / img_width
+                if img_width > max_width:
+                    width = max_width
+                    height = width * aspect
+                else:
+                    width = img_width * 0.264583  # Convert pixels to mm (assuming 96 DPI)
+                    height = img_height * 0.264583
+
+                # Scale down if too tall
+                if height > max_height:
+                    height = max_height
+                    width = height / aspect
+
+                # Check if we need a new page
+                if pdf.get_y() + height + 20 > pdf.h - 20:
+                    pdf.add_page()
+
+                # Center the image
+                x = (pdf.w - width) / 2
+
+                # Add the image
+                pdf.image(image_path, x=x, y=pdf.get_y(), w=width)
+                pdf.ln(height + 5)
+
+                # Add caption if provided
+                if caption:
+                    pdf.set_font('Helvetica', 'I', 9)
+                    pdf.set_text_color(80, 80, 80)
+                    cleaned_caption = clean_text(caption)
+                    pdf.multi_cell(0, 5, cleaned_caption, align='C')
+                    pdf.ln(5)
+
+            except Exception as e:
+                print(f"Error adding image {image_path} to PDF: {e}")
+
+        # Parse markdown content and render to PDF
+        lines = report_content.split('\n')
+        in_code_block = False
+        code_block_content = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+
+            # Skip download links section
+            if '## 📥 Downloads' in line or '## Downloads' in line:
+                # Skip until next section or end
+                i += 1
+                while i < len(lines) and not lines[i].startswith('#'):
+                    i += 1
+                continue
+
+            # Handle code blocks
+            if line.strip().startswith('```'):
+                if in_code_block:
+                    # End of code block
+                    add_code_block('\n'.join(code_block_content))
+                    code_block_content = []
+                    in_code_block = False
+                else:
+                    # Start of code block
+                    in_code_block = True
+                i += 1
+                continue
+
+            if in_code_block:
+                code_block_content.append(line)
+                i += 1
+                continue
+
+            # Handle headings
+            heading_match = re.match(r'^(#{1,6})\s+(.+)$', line)
+            if heading_match:
+                level = len(heading_match.group(1))
+                text = heading_match.group(2)
+                add_heading(text, level)
+                i += 1
+                continue
+
+            # Handle horizontal rule
+            if re.match(r'^(-{3,}|_{3,}|\*{3,})$', line.strip()):
+                pdf.line(10, pdf.get_y(), pdf.w - 10, pdf.get_y())
+                pdf.ln(5)
+                i += 1
+                continue
+
+            # Handle bullet points
+            bullet_match = re.match(r'^(\s*)[-*+]\s+(.+)$', line)
+            if bullet_match:
+                indent = len(bullet_match.group(1)) // 2
+                text = bullet_match.group(2)
+                pdf.set_font('Helvetica', '', 11)
+                prefix = '  ' * indent + '• '
+                add_paragraph(prefix + text)
+                i += 1
+                continue
+
+            # Handle numbered lists
+            num_match = re.match(r'^(\s*)(\d+)\.\s+(.+)$', line)
+            if num_match:
+                indent = len(num_match.group(1)) // 2
+                num = num_match.group(2)
+                text = num_match.group(3)
+                pdf.set_font('Helvetica', '', 11)
+                prefix = '  ' * indent + f'{num}. '
+                add_paragraph(prefix + text)
+                i += 1
+                continue
+
+            # Handle inline images in markdown (skip external URLs)
+            img_match = re.match(r'!\[([^\]]*)\]\(([^)]+)\)', line)
+            if img_match and not img_match.group(2).startswith('http'):
+                # Local image reference - try to find it
+                img_ref = img_match.group(2)
+                img_caption = img_match.group(1)
+                if os.path.exists(img_ref):
+                    add_image(img_ref, img_caption)
+                i += 1
+                continue
+
+            # Handle regular paragraphs
+            if line.strip():
+                # Remove markdown formatting for bold/italic
+                text = re.sub(r'\*\*(.+?)\*\*', r'\1', line)  # Bold
+                text = re.sub(r'\*(.+?)\*', r'\1', text)  # Italic
+                text = re.sub(r'`(.+?)`', r'\1', text)  # Inline code
+                text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)  # Links
+                add_paragraph(text)
+
+            i += 1
+
+        # Add images section
+        if image_files:
+            pdf.add_page()
+            add_heading("Generated Images", 2)
+            pdf.ln(5)
+
+            for img_path in image_files:
+                if os.path.exists(img_path):
+                    # Use filename as caption
+                    filename = os.path.basename(img_path)
+                    caption = filename.replace('_', ' ').replace('-', ' ')
+                    # Remove extension for cleaner caption
+                    caption = os.path.splitext(caption)[0]
+                    add_image(img_path, caption)
+
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        pdf_filename = f"report_{timestamp}.pdf"
+        pdf_path = os.path.join(session_path, pdf_filename)
+
+        # Save the PDF
+        pdf.output(pdf_path)
+        print(f"Generated PDF report: {pdf_path}")
+        return pdf_path
+
+    except Exception as e:
+        print(f"Error generating PDF report: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def create_session_zip(session_path, save_to_chat_zips=True, turn_number=None, turn_start_time=None):
@@ -4473,12 +4806,24 @@ async def stop_task(session_id: str, user_id: str):
         if session_user_id and session_user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-    success = queue_manager.stop_session(session_id)
-    if success:
+    result = queue_manager.stop_session(session_id)
+    if result.get("success"):
+        was_queued = result.get("was_queued", False)
+        was_running = result.get("was_running", False)
+
+        if was_queued:
+            message = f"Task {session_id} was removed from queue (was not yet processing)"
+        elif was_running:
+            message = f"Task {session_id} has been stopped (was actively processing)"
+        else:
+            message = f"Task {session_id} has been cancelled"
+
         return {
-            "message": f"Task {session_id} has been cancelled",
+            "message": message,
             "session_id": session_id,
-            "status": "cancelled"
+            "status": "cancelled",
+            "was_queued": was_queued,
+            "was_running": was_running
         }
     else:
         raise HTTPException(status_code=404, detail="Session not found")
