@@ -200,6 +200,7 @@ class QueueStatus(BaseModel):
     position: int
     estimated_wait_time: int  # in seconds
     total_users_in_queue: int
+    chats_ahead: int  # number of chats waiting before this one
 
 class SessionInfo(BaseModel):
     session_id: str
@@ -412,13 +413,19 @@ class QueueManager:
         """Get current queue position for a session"""
         with self.processing_lock:
             if session_id == self.current_processing_session:
-                return QueueStatus(position=0, estimated_wait_time=0, total_users_in_queue=self.request_queue.qsize())
-            
+                # Currently processing - no one ahead in the queue
+                return QueueStatus(
+                    position=0,
+                    estimated_wait_time=0,
+                    total_users_in_queue=self.request_queue.qsize(),
+                    chats_ahead=0
+                )
+
             # Find position in queue
             temp_queue = []
             position = 0
             found = False
-            
+
             while not self.request_queue.empty():
                 req = self.request_queue.get()
                 temp_queue.append(req)
@@ -426,20 +433,27 @@ class QueueManager:
                 if req.session_id == session_id:
                     found = True
                     break
-            
+
             # Put items back in queue
             for req in reversed(temp_queue):
                 self.request_queue.put(req)
-            
+
             if found:
-                # Estimate 2 minutes per request
-                estimated_wait = position * 120
+                # chats_ahead = position - 1 (position is 1-indexed, so subtract 1)
+                # Plus 1 if there's a currently processing session (it's ahead of everyone in queue)
+                chats_ahead = position - 1
+                if self.current_processing_session:
+                    chats_ahead += 1
+
+                # Estimate 2 minutes per request ahead
+                estimated_wait = (chats_ahead + 1) * 120  # +1 for the current processing session if any
                 return QueueStatus(
-                    position=position, 
+                    position=position,
                     estimated_wait_time=estimated_wait,
-                    total_users_in_queue=self.request_queue.qsize()
+                    total_users_in_queue=self.request_queue.qsize(),
+                    chats_ahead=chats_ahead
                 )
-            
+
             return None
     
     def get_session_progress(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -3795,6 +3809,7 @@ async def get_status(session_id: str, user_id: str, turn_number: Optional[int] =
             response["queue_position"] = queue_status.position
             response["estimated_wait_time"] = queue_status.estimated_wait_time
             response["total_users_in_queue"] = queue_status.total_users_in_queue
+            response["chats_ahead"] = queue_status.chats_ahead
 
         # Add error information if present
         if status_data.get("error"):
