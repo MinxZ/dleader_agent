@@ -1,123 +1,123 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Commands
 
-### Development Environment Setup
 ```bash
-# Activate the dleader_agent environment
+# Environment
 conda activate dleader_agent_e1
-
-# Install/upgrade dleader_agent package
 pip install dleader_agent --upgrade
-# Or from source for latest updates
-pip install git+https://github.com/MinxZ/dleader_agent.git@main
+
+# Run server
+python agent_fastapi_server_multiturn.py --host 0.0.0.0 --port 8001
+
+# Code quality
+ruff check . && ruff format .
 ```
 
-### Running Tests
+## API Endpoints (localhost:8001)
+
+**Note:** All endpoints except `/health` require `user_id` parameter.
+
+**Important:** When using curl with multiline messages, use single quotes for the message value.
+
+### Start Chat
 ```bash
-# Run all tests
-pytest
+# Simple query
+curl -X POST 'http://localhost:8001/chat-queue' \
+  -F 'message=Your query' -F 'user_id=DLeader' -F 'language=en'
 
-# Run specific test categories
-pytest -m unit        # Unit tests only
-pytest -m integration # Integration tests only
+# With template matching disabled
+curl -X POST 'http://localhost:8001/chat-queue' \
+  -F 'message=Your query' -F 'user_id=DLeader' -F 'language=en' -F 'use_template=false'
 
-# Run with verbose output
-pytest -v --tb=short
+# Note: For queries with special characters like newlines, encode them properly:
+# - Use literal \n (backslash-n) in the message string
+# - Avoid HTML tags like <br> in queries as they may interfere with processing
 ```
 
-### Code Quality
+### Check Status
 ```bash
-# Run ruff for linting and formatting
-ruff check .        # Check for linting issues
-ruff format .       # Format code
-
-# Ruff is configured in pyproject.toml with specific rules
-# Line length: 120 characters
-# Ignores: F401 (unused imports), E402 (module imports not at top)
+curl 'http://localhost:8001/status/{session_id}?user_id=DLeader'
 ```
 
-### Running the Application
-
-#### FastAPI Server (Multi-user with queue support)
+### Get Snapshots (Thinking Process)
 ```bash
-# Basic server start
-python agent_fastapi_server.py
-
-# Custom configuration
-python agent_fastapi_server.py --host 0.0.0.0 --port 8001
-
-# Development mode with auto-reload
-python agent_fastapi_server.py --reload
+curl 'http://localhost:8001/snapshots/{session_id}?user_id=DLeader'
+# With execute blocks: &include_execute=true
+# Specific turn: &turn_number=2
 ```
 
-#### Gradio Interfaces
+### Get Results
 ```bash
-# Multi-user interface with full features (port 7860)
-python agent_gradio_fastapi_multiturn.py
-
-# Simplified single-user interface (port 7861)
-python agent_gradio_simple.py
-
-# Japanese language interface
-python agent_interface_jp_gradio.py
+curl 'http://localhost:8001/results/{session_id}?user_id=DLeader'
 ```
 
-## Architecture
+### Continue Session
+```bash
+curl -X POST 'http://localhost:8001/continue-session' \
+  -F 'session_id={session_id}' -F 'message=Follow-up' -F 'user_id=DLeader'
+```
 
-### Core Agent System
-The dleader_agent is a biomedical AI agent built on LangChain and LangGraph:
+### Stop Task
+```bash
+curl -X POST 'http://localhost:8001/stop/{session_id}?user_id=DLeader'
+```
 
-- **A1 Agent** (`dleader_agent/agent/a1.py`): Main agent class that orchestrates biomedical research tasks using LLM reasoning and tool execution. Supports multiple LLM providers (Anthropic, OpenAI, Azure, Gemini, Bedrock, Groq).
+### Share Session
+```bash
+curl -X POST 'http://localhost:8001/share-session' \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id": "{session_id}", "user_id": "DLeader"}'
+```
 
-- **Tool Registry** (`dleader_agent/tool/tool_registry.py`): Dynamic tool loading system that discovers and registers biomedical analysis tools across different domains (genomics, proteomics, drug discovery, etc.).
+### Other Endpoints
+```bash
+# Get shared sessions
+curl 'http://localhost:8001/shared-sessions?user_id=DLeader&limit=10'
 
-- **Environment Management**: The agent manages a data lake (~11GB) containing biomedical databases and resources, automatically downloaded on first use to `./data/dleader_agent_data/`.
+# Get session history
+curl 'http://localhost:8001/multiturn-session/{session_id}?user_id=DLeader'
 
-### Server Architecture
-The FastAPI server provides REST API access with queue management:
+# Get all sessions
+curl 'http://localhost:8001/multiturn-sessions?user_id=DLeader&limit=10'
 
-- **QueueManager**: FIFO queue system processing one request at a time
-- **SessionManager**: Handles file storage in `chat_sessions/` directories
-- **WebSocket Support**: Real-time progress updates for long-running tasks
-- **Multi-language**: Full support for English and Japanese interfaces
+# Get templates
+curl 'http://localhost:8001/templates?user_id=DLeader'
 
-### Tool Modules
-Biomedical tools are organized by domain in `dleader_agent/tool/`:
-- `cancer_biology.py`, `immunology.py`, `genetics.py` - Domain-specific analysis tools
-- `database.py` - Database query and retrieval functions
-- `modeling.py` - ML and statistical modeling tools
-- `preprocessing.py` - Data preprocessing utilities
-- `support_tools.py` - Code execution and helper functions
+# Upload templates
+python test_template_upload.py
 
-Each tool module has a corresponding description file in `tool_description/` for the retriever system.
+# Delete session
+curl -X DELETE 'http://localhost:8001/hard-delete/{session_id}?user_id=DLeader&confirm=true'
 
-## Key Implementation Notes
+# Download ZIP
+curl 'http://localhost:8001/download/{session_id}?user_id=DLeader' -o session.zip
+```
 
-### Session Management
-- Sessions stored in `chat_sessions/` with unique IDs
-- Each session folder contains: reports, thinking process, queries, uploaded files
-- Fixed user `test_user_dleader` for simplified interface
+## Debugging Notes
 
-### API Integration
-- All API calls go through `/chat-queue` endpoint for queue management
-- Status checking via `/check-status` with session ID
-- File uploads handled per session via `/upload` endpoint
+**Important:** Local session files are automatically cleaned up. To check query content/results:
+- Use `/snapshots/{session_id}` endpoint for thinking process
+- Use `/results/{session_id}` endpoint for final results
+- Do NOT rely on local file paths as they may be deleted
 
-### Code Execution Safety
-- Python code runs through `run_python_repl` with timeout controls
-- R code execution via `run_r_code` function
-- Bash scripts executed with `run_bash_script`
-- Default timeout: 600 seconds (configurable)
+## Polling Flow
+1. `POST /chat-queue` → get `session_id`
+2. Poll `GET /status/{session_id}` every 5s
+3. Poll `GET /snapshots/{session_id}` for thinking process
+4. When `is_complete: true` → `GET /results/{session_id}`
 
-### LLM Configuration
-Configure via environment variables in `.env`:
-- `ANTHROPIC_API_KEY` - Required for Claude models
-- `OPENAI_API_KEY` - For OpenAI/Azure models
-- `LLM_SOURCE` - Provider selection
-- `dleader_agent_TIMEOUT_SECONDS` - Execution timeout
+## Multi-Turn Sessions
+- Original: `abc123`
+- Turns: `abc123_turn_2`, `abc123_turn_3`
+- Use `turn_session_id` from `/continue-session` response for status polling
 
-### MCP (Model Context Protocol) Support
-The agent supports MCP servers for external tool integration. Configure with YAML files and add servers via `agent.add_mcp()`.
+## Status Values
+| Status | Description |
+|--------|-------------|
+| `queued` | Waiting in queue |
+| `processing` | Currently running |
+| `completed` | Finished successfully |
+| `error` | Failed with error |
+| `cancelled` | Stopped by user |
+| `interrupted` | Server restart during processing |

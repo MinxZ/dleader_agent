@@ -73,8 +73,27 @@ IMPORTANT GUIDELINES:
         # Invoke the LLM
         if hasattr(llm, "invoke"):
             # For LangChain-style LLMs
-            response = llm.invoke([HumanMessage(content=prompt)])
+            messages = [HumanMessage(content=prompt)]
+            print(f"\n=== RETRIEVER LLM CALL DEBUG ===")
+            print(f"Number of messages: {len(messages)}")
+            print(f"Message 0 type: {type(messages[0])}")
+            print(f"Message 0 content length: {len(messages[0].content) if messages[0].content else 0}")
+            print(f"Message 0 content preview: {messages[0].content[:200] if messages[0].content else 'EMPTY'}")
+            print(f"=== END RETRIEVER DEBUG ===\n")
+            response = llm.invoke(messages)
             response_content = response.content
+            # Handle case where content is a list (e.g., Anthropic Claude returns list of content blocks)
+            if isinstance(response_content, list):
+                # Extract text from content blocks
+                text_parts = []
+                for block in response_content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif isinstance(block, str):
+                        text_parts.append(block)
+                    elif hasattr(block, "text"):
+                        text_parts.append(block.text)
+                response_content = "\n".join(text_parts)
         else:
             # For other LLM interfaces
             response_content = str(llm(prompt))

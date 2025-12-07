@@ -359,6 +359,17 @@ Respond ONLY with valid JSON, no other text."""
 [TEMPLATE MODIFICATION NOTE]
 {modification}"""
 
+        # Add strong reminder about response format and placeholder handling
+        augmented += """
+
+---
+CRITICAL INSTRUCTIONS:
+1. The template above uses [BRACKETED_PLACEHOLDERS] like [NUMBER], [TARGET_GENE], [RNA_TYPE], etc.
+   You MUST replace these with actual values based on the user's query. NEVER copy [BRACKETS] into Python code.
+2. Use <execute>python code here</execute> to run Python code
+3. Use <solution>your final answer</solution> when done
+4. Write valid Python code - no placeholder brackets allowed in code blocks."""
+
         return {
             "original_query": query,
             "augmented_query": augmented,

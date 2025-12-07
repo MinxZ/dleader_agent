@@ -183,6 +183,7 @@ class CloudStorageManager:
         # Define file patterns to upload with categories
         file_patterns = {
             "report_md": "report_*.md",
+            "report_pdf": "report_*.pdf",
             "thinking_process": "thinking_process_*.txt",
             "query_file": "query_*.txt",
             "result_json": "result_*.json",
