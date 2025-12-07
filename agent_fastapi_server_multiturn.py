@@ -22,6 +22,7 @@ import logging
 import multiprocessing
 import os
 import queue
+import re
 import shutil
 import signal
 import sys
@@ -302,7 +303,11 @@ class UserRequest:
                  is_continuation: bool = False, previous_context: str = "", turn_number: int = 1, user_id: str = None,
                  use_template: bool = True, turn_type: str = "execution"):
         self.session_id = session_id
-        self.message = message
+        # Sanitize message: convert HTML <br> tags and newlines to spaces to avoid parsing issues
+        sanitized = re.sub(r'<br\s*/?>', ' ', message, flags=re.IGNORECASE)
+        sanitized = re.sub(r'\n+', ' ', sanitized)  # Replace newlines with spaces
+        sanitized = re.sub(r'\s+', ' ', sanitized).strip()  # Normalize multiple spaces
+        self.message = sanitized
         self.language = language
         self.uploaded_files = uploaded_files or []
         self.created_at = datetime.now()
@@ -394,6 +399,9 @@ class QueueManager:
         # Note: Multi-turn sessions are now loaded from MongoDB on-demand, not from local files
         # self._load_multiturn_sessions()  # REMOVED: No longer loading from local JSON files
 
+        # Mark stale processing sessions as interrupted on startup
+        self._cleanup_stale_processing_sessions()
+
         # Start the queue processor
         self.processor_thread = threading.Thread(target=self._process_queue, daemon=True)
         self.processor_thread.start()
@@ -461,22 +469,16 @@ class QueueManager:
         if session_id in self.active_sessions:
             user_request = self.active_sessions[session_id]
 
-            # Get new progress updates without consuming them from the queue
+            # Consume new progress updates from the queue (don't put back to avoid duplicates)
             new_progress_updates = []
-            temp_updates = []
             while not user_request.progress_queue.empty():
                 try:
                     update = user_request.progress_queue.get_nowait()
                     new_progress_updates.append(update)
-                    temp_updates.append(update)
                 except queue.Empty:
                     break
 
-            # Put the updates back in the queue
-            for update in temp_updates:
-                user_request.progress_queue.put(update)
-
-            # Add new updates to permanent storage
+            # Add new updates to permanent storage (consumed, won't be read again)
             user_request.all_progress_updates.extend(new_progress_updates)
 
             # Keep only the latest snapshot_saved and thinking_update items
@@ -537,8 +539,8 @@ class QueueManager:
         # Find and replace enhanced message with original message in Human Message sections
         import re
 
-        # Pattern to match Human Message sections with enhanced content
-        pattern = r'(================================ Human Message =================================\n\n)(.*?)((?=\n================================== Ai Message|$))'
+        # Pattern to match Human Message sections with enhanced content (supports both 70 and 80 char formats)
+        pattern = r'(=+ Human Message =+\n\n)(.*?)((?=\n=+ Ai Message|$))'
 
         def replace_human_message(match):
             prefix = match.group(1)
@@ -616,18 +618,46 @@ Reasoning: {user_request.template_reasoning}
         """Stop a running or queued session
 
         Returns:
-            dict with 'success' (bool), 'was_queued' (bool), and 'was_running' (bool)
+            dict with 'success' (bool), 'was_queued' (bool), 'was_running' (bool),
+            and 'actual_session_id' (str) - the session ID that was actually stopped
             Returns {'success': False} if session not found
         """
         with self.processing_lock:
-            if session_id not in self.active_sessions:
-                return {"success": False}
+            actual_session_id = session_id
 
-            user_request = self.active_sessions[session_id]
+            if session_id not in self.active_sessions:
+                # Try to find an active turn session for this parent session ID
+                # This handles cases where user provides parent ID but turn_N is active
+                matching_sessions = []
+                for active_id in self.active_sessions:
+                    # Check if active_id starts with session_id (e.g., "abc123_turn_2" starts with "abc123")
+                    if active_id.startswith(session_id + "_turn_") or active_id == session_id:
+                        matching_sessions.append(active_id)
+
+                if matching_sessions:
+                    # Find the most recent turn (highest turn number) or currently processing one
+                    if self.current_processing_session in matching_sessions:
+                        actual_session_id = self.current_processing_session
+                    else:
+                        # Sort by turn number and pick the highest
+                        def get_turn_number(sid):
+                            if "_turn_" in sid:
+                                try:
+                                    return int(sid.split("_turn_")[-1])
+                                except:
+                                    return 0
+                            return 0
+                        matching_sessions.sort(key=get_turn_number, reverse=True)
+                        actual_session_id = matching_sessions[0]
+                    print(f"Stop request for '{session_id}' resolved to active session '{actual_session_id}'")
+                else:
+                    return {"success": False}
+
+            user_request = self.active_sessions[actual_session_id]
 
             # Determine if session is queued (not yet processing) or running
             was_queued = user_request.status == "queued"
-            was_running = self.current_processing_session == session_id
+            was_running = self.current_processing_session == actual_session_id
 
             # Mark as cancelled
             user_request.is_cancelled = True
@@ -648,7 +678,7 @@ Reasoning: {user_request.template_reasoning}
             # Force stop the agent process if running
             if hasattr(user_request, 'agent_process') and user_request.agent_process and user_request.agent_process.is_alive():
                 pid = user_request.agent_process.pid
-                print(f"Terminating process tree for session {session_id} (PID: {pid})")
+                print(f"Terminating process tree for session {actual_session_id} (PID: {pid})")
 
                 try:
                     import psutil
@@ -676,7 +706,7 @@ Reasoning: {user_request.template_reasoning}
 
                     # If still alive, force kill everything
                     if user_request.agent_process.is_alive():
-                        print(f"Force killing process tree for session {session_id}")
+                        print(f"Force killing process tree for session {actual_session_id}")
 
                         # Kill all children
                         for child in children:
@@ -699,25 +729,25 @@ Reasoning: {user_request.template_reasoning}
 
                 # Verify it's dead
                 if not user_request.agent_process.is_alive():
-                    print(f"SUCCESS: Process tree for session {session_id} terminated successfully")
+                    print(f"SUCCESS: Process tree for session {actual_session_id} terminated successfully")
                 else:
-                    print(f"WARNING: Process for session {session_id} may still be running")
+                    print(f"WARNING: Process for session {actual_session_id} may still be running")
 
             # Also check for legacy thread-based execution
             elif hasattr(user_request, 'agent_thread') and user_request.agent_thread and user_request.agent_thread.is_alive():
                 # Legacy thread handling
-                print(f"WARNING: Session {session_id} using thread-based execution (cannot force kill)")
-                stopped = self._wait_and_verify_stop(user_request, session_id, max_wait=3)
+                print(f"WARNING: Session {actual_session_id} using thread-based execution (cannot force kill)")
+                stopped = self._wait_and_verify_stop(user_request, actual_session_id, max_wait=3)
                 if not stopped:
-                    print(f"ERROR: Thread for session {session_id} could not be stopped gracefully!")
+                    print(f"ERROR: Thread for session {actual_session_id} could not be stopped gracefully!")
 
             # For queued sessions, no need for file cleanup or S3 upload (no work was done)
             if was_queued:
-                print(f"Session {session_id} was cancelled while in queue (no processing occurred)")
+                print(f"Session {actual_session_id} was cancelled while in queue (no processing occurred)")
                 # Remove from active sessions immediately for queued cancellations
-                if session_id in self.active_sessions:
-                    del self.active_sessions[session_id]
-                return {"success": True, "was_queued": True, "was_running": False}
+                if actual_session_id in self.active_sessions:
+                    del self.active_sessions[actual_session_id]
+                return {"success": True, "was_queued": True, "was_running": False, "actual_session_id": actual_session_id}
 
             # Move any generated files to session folder to keep workspace clean
             self._move_generated_files_to_session(user_request)
@@ -728,7 +758,7 @@ Reasoning: {user_request.template_reasoning}
             # Ensure S3 upload for cancelled session
             self._trigger_s3_upload_for_session(user_request)
 
-            return {"success": True, "was_queued": False, "was_running": was_running}
+            return {"success": True, "was_queued": False, "was_running": was_running, "actual_session_id": actual_session_id}
 
     def _wait_and_verify_stop(self, user_request: UserRequest, session_id: str, max_wait: int = 10) -> bool:
         """Wait for thread to stop and verify it's really stopped"""
@@ -1101,6 +1131,75 @@ Reasoning: {user_request.template_reasoning}
                     print(f"Note: {corrupted_files} corrupted session files were skipped. Sessions are now managed via cloud storage.")
         except Exception as e:
             print(f"Error scanning session storage: {e}")
+
+    def _cleanup_stale_processing_sessions(self):
+        """Mark sessions with status='processing' as 'interrupted' on server startup.
+
+        This handles cases where the server was stopped while sessions were still processing.
+        Those sessions are no longer actually running, so we mark them as interrupted.
+        """
+        try:
+            from s3_mongodb.func_mongodb import get_mongodb_collection
+
+            # Clean up sessions collection
+            sessions_collection = get_mongodb_collection(
+                os.getenv("SESSION_DB_NAME", "dleader_agent"),
+                "sessions"
+            )
+
+            if sessions_collection is not None:
+                # Find all sessions with status="processing"
+                result = sessions_collection.update_many(
+                    {"status": "processing"},
+                    {"$set": {
+                        "status": "interrupted",
+                        "interrupted_at": datetime.now().isoformat(),
+                        "interrupted_reason": "Server restart - session was processing when server stopped"
+                    }}
+                )
+                if result.modified_count > 0:
+                    print(f"[Startup Cleanup] Marked {result.modified_count} stale processing sessions as 'interrupted' in sessions collection")
+
+            # Clean up multiturn_sessions collection - update turns with status="processing"
+            multiturn_collection = get_mongodb_collection(
+                os.getenv("SESSION_DB_NAME", "dleader_agent"),
+                "multiturn_sessions"
+            )
+
+            if multiturn_collection is not None:
+                # Find multiturn sessions that have turns with status="processing"
+                # and update those specific turns
+                stale_sessions = multiturn_collection.find({
+                    "turns": {"$elemMatch": {"status": "processing"}}
+                })
+
+                updated_count = 0
+                for session in stale_sessions:
+                    session_id = session.get("_id")
+                    turns = session.get("turns", [])
+                    updated = False
+
+                    for turn in turns:
+                        if turn.get("status") == "processing":
+                            turn["status"] = "interrupted"
+                            turn["interrupted_at"] = datetime.now().isoformat()
+                            turn["interrupted_reason"] = "Server restart"
+                            updated = True
+
+                    if updated:
+                        multiturn_collection.update_one(
+                            {"_id": session_id},
+                            {"$set": {"turns": turns}}
+                        )
+                        updated_count += 1
+
+                if updated_count > 0:
+                    print(f"[Startup Cleanup] Marked turns as 'interrupted' in {updated_count} multiturn sessions")
+
+        except Exception as e:
+            print(f"[Startup Cleanup] Error cleaning up stale processing sessions: {e}")
+            import traceback
+            traceback.print_exc()
 
     # REMOVED: No longer loading multi-turn sessions from local JSON files
     # Multi-turn sessions are now stored in MongoDB only and loaded on-demand
@@ -2019,7 +2118,9 @@ Reasoning: {user_request.template_reasoning}
                         "type": "status",
                         "message": "Generating PDF report..."
                     })
-                    pdf_path = generate_report_pdf(session_path, report_content_for_pdf, images_for_pdf)
+                    # Get turn number for multi-turn sessions
+                    turn_num = user_request.turn_number if hasattr(user_request, 'turn_number') else None
+                    pdf_path = generate_report_pdf(session_path, report_content_for_pdf, images_for_pdf, turn_number=turn_num)
                     if pdf_path:
                         print(f"Generated PDF report: {pdf_path}")
                         # Add PDF path to json_result files
@@ -2246,6 +2347,14 @@ Reasoning: {user_request.template_reasoning}
                     'result_json': json_path
                 }
 
+                # Add images for this turn (use the filtered image_files list)
+                if 'image_files' in locals() and image_files:
+                    files_dict['images'] = image_files
+
+                # Add PDF report if it was generated
+                if pdf_path:
+                    files_dict['report_pdf'] = pdf_path
+
                 # Also keep turn_zip for backwards compatibility
                 if turn_zip_file_path:
                     files_dict['turn_zip'] = turn_zip_file_path
@@ -2383,9 +2492,13 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
     import sys
     import threading
     import time
-    from contextlib import redirect_stdout
 
     import psutil
+    from dotenv import load_dotenv
+
+    # Load environment variables in subprocess (important for API keys)
+    if os.path.exists(".env"):
+        load_dotenv(".env", override=True)
 
     # Record start time for file tracking
     process_start_time = time.time()
@@ -2396,6 +2509,29 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
     # Shared buffer for output capture
     output_buffer = io.StringIO()
     output_lock = threading.Lock()
+
+    # TeeIO class to capture output while still allowing writes to original stdout
+    class TeeIO:
+        """Write to both a buffer and the original stdout"""
+        def __init__(self, buffer, original_stdout):
+            self.buffer = buffer
+            self.original_stdout = original_stdout
+            self.lock = threading.Lock()
+
+        def write(self, data):
+            with self.lock:
+                self.buffer.write(data)
+                if self.original_stdout:
+                    self.original_stdout.write(data)
+                    self.original_stdout.flush()
+
+        def flush(self):
+            with self.lock:
+                if self.original_stdout:
+                    self.original_stdout.flush()
+
+        def getvalue(self):
+            return self.buffer.getvalue()
 
     def cleanup_subprocesses():
         """Kill all child processes when parent terminates"""
@@ -2461,176 +2597,56 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
     snapshot_thread = threading.Thread(target=send_periodic_snapshots, daemon=True)
     snapshot_thread.start()
 
+    # Use TeeIO to capture output without blocking - redirect stdout to both buffer and original
+    original_stdout = sys.stdout
+    tee_output = TeeIO(output_buffer, original_stdout)
+    sys.stdout = tee_output
+
     try:
-        with redirect_stdout(output_buffer):
-            # Send status update
+        # Send status update
+        result_queue.put({
+            "type": "status",
+            "content": "Agent starting in separate process with snapshot tracking..."
+        })
+
+        # Check if this is a planning turn
+        if turn_type == "planning":
+            # PLANNING MODE - No tools, just LLM reasoning
             result_queue.put({
                 "type": "status",
-                "content": "Agent starting in separate process with snapshot tracking..."
+                "content": "Planning mode: Agent will ask clarifying questions without executing tools..."
             })
 
-            # Check if this is a planning turn
-            if turn_type == "planning":
-                # PLANNING MODE - No tools, just LLM reasoning
-                result_queue.put({
-                    "type": "status",
-                    "content": "Planning mode: Agent will ask clarifying questions without executing tools..."
-                })
+            # Use direct LLM call without tools
+            from langchain_anthropic import ChatAnthropic
 
-                # Use direct LLM call without tools
-                from langchain_anthropic import ChatAnthropic
+            llm = ChatAnthropic(
+                model=agent_config.get("model", "claude-sonnet-4-5-20250929"),
+                temperature=agent_config.get("temperature", 0.7)
+            )
 
-                llm = ChatAnthropic(
-                    model=agent_config.get("model", "claude-sonnet-4-5-20250929"),
-                    temperature=agent_config.get("temperature", 0.7)
-                )
+            # Build prompt with system and user message
+            system_prompt = agent_config.get("system_prompt", "You are a helpful assistant.")
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": enhanced_message}
+            ]
 
-                # Build prompt with system and user message
-                system_prompt = agent_config.get("system_prompt", "You are a helpful assistant.")
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": enhanced_message}
-                ]
-
-                # Call LLM
-                result_queue.put({
-                    "type": "status",
-                    "content": "Generating planning response..."
-                })
-
-                response = llm.invoke(messages)
-                result_content = response.content
-
-                # Check if agent signals readiness for execution
-                ready_for_execution = "[READY_FOR_EXECUTION]" in result_content
-
-                # Remove the signal from content (keep it clean for display)
-                if ready_for_execution:
-                    result_content = result_content.replace("[READY_FOR_EXECUTION]", "").strip()
-
-                # Signal completion
-                agent_complete.set()
-
-                # Get final output
-                with output_lock:
-                    final_output = output_buffer.getvalue()
-
-                # Send final result with readiness flag
-                result_queue.put({
-                    "type": "result",
-                    "content": result_content,
-                    "output": final_output,
-                    "ready_for_execution": ready_for_execution,  # NEW FLAG
-                    "turn_type": "planning",
-                    "template_info": {"matched": False}  # No template matching in planning mode
-                })
-
-                # Send final snapshot
-                result_queue.put({
-                    "type": "final_snapshot",
-                    "content": final_output,
-                    "result": result_content,
-                    "ready_for_execution": ready_for_execution,
-                    "timestamp": time.time(),
-                    "template_info": {"matched": False}
-                })
-
-                # Skip the rest of execution logic
-                return
-
-            # EXECUTION MODE - Full agent with tools
-            # Create agent
-            from agent_fastapi_server_multiturn import create_agent
-            agent = create_agent()
-
-            # Send status
+            # Call LLM
             result_queue.put({
                 "type": "status",
-                "content": "Agent initialized, processing message..."
+                "content": "Generating planning response..."
             })
 
-            # === TEMPLATE MATCHING & QUERY AUGMENTATION ===
-            # Try to match the query to a workflow template (if enabled)
-            base_message = enhanced_message
-            template_info = {
-                "matched": False,
-                "title": None,
-                "confidence": None,
-                "reasoning": None,
-                "modification": None
-            }
+            response = llm.invoke(messages)
+            result_content = response.content
 
-            # use_template parameter is passed to this function
-            # Check if template matching is enabled
-            if use_template:
-                try:
-                    result_queue.put({
-                        "type": "status",
-                        "content": "Checking for relevant workflow templates..."
-                    })
+            # Check if agent signals readiness for execution
+            ready_for_execution = "[READY_FOR_EXECUTION]" in result_content
 
-                    from agent_fastapi_server_multiturn import get_template_retriever
-                    retriever = get_template_retriever()
-
-                    if retriever:
-                        # Match query to templates
-                        match_result = retriever.match_template(base_message)
-
-                        if match_result.get("matched"):
-                            template_title = match_result.get("template", {}).get("title", "Unknown")
-                            confidence = match_result.get("confidence", "unknown")
-
-                            # Store template info for later
-                            template_info["matched"] = True
-                            template_info["title"] = template_title
-                            template_info["confidence"] = confidence
-                            template_info["reasoning"] = match_result.get("reasoning", "")
-                            template_info["modification"] = match_result.get("modification")
-
-                            result_queue.put({
-                                "type": "template_matched",
-                                "content": f"Matched to template: {template_title} (confidence: {confidence})",
-                                "template_title": template_title,
-                                "confidence": confidence,
-                                "reasoning": match_result.get("reasoning", "")
-                            })
-
-                            # Augment the query with template prompt
-                            augmentation_result = retriever.augment_query_with_template(base_message, match_result)
-                            enhanced_message = augmentation_result["augmented_query"]
-
-                            print(f"✓ Template matched: {template_title} (confidence: {confidence})")
-                            if augmentation_result.get("modification_applied"):
-                                print(f"  Modification: {augmentation_result['modification_applied']}")
-                        else:
-                            print(f"✗ No template matched: {match_result.get('reasoning', 'Unknown reason')}")
-
-                except Exception as e:
-                    print(f"Warning: Template matching failed: {e}")
-                    # Continue without template matching
-            else:
-                print("Template matching is not using")
-                result_queue.put({
-                    "type": "status",
-                    "content": "Template matching is not using, proceeding with direct query..."
-                })
-
-            # === END TEMPLATE MATCHING ===
-
-            # Add explicit file information to the message if not already included
-            if session_path and os.path.exists(session_path):
-                files_in_session = []
-                for filename in os.listdir(session_path):
-                    file_path = os.path.join(session_path, filename)
-                    if os.path.isfile(file_path) and not filename.startswith('.'):
-                        files_in_session.append(f"{filename} (Path: {file_path})")
-
-                if files_in_session and "Available files" not in enhanced_message:
-                    file_info = "\n\nAvailable files in your working directory:\n" + "\n".join([f"- {f}" for f in files_in_session])
-                    enhanced_message = enhanced_message + file_info
-
-            # Run agent (this blocks until complete)
-            _, result = agent.go(enhanced_message)
+            # Remove the signal from content (keep it clean for display)
+            if ready_for_execution:
+                result_content = result_content.replace("[READY_FOR_EXECUTION]", "").strip()
 
             # Signal completion
             agent_complete.set()
@@ -2639,22 +2655,167 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
             with output_lock:
                 final_output = output_buffer.getvalue()
 
-            # Send final result with complete output and template info
+            # Send final result with readiness flag
             result_queue.put({
                 "type": "result",
-                "content": result,
+                "content": result_content,
                 "output": final_output,
-                "template_info": template_info
+                "ready_for_execution": ready_for_execution,  # NEW FLAG
+                "turn_type": "planning",
+                "template_info": {"matched": False}  # No template matching in planning mode
             })
 
             # Send final snapshot
             result_queue.put({
                 "type": "final_snapshot",
                 "content": final_output,
-                "result": result,
+                "result": result_content,
+                "ready_for_execution": ready_for_execution,
                 "timestamp": time.time(),
-                "template_info": template_info
+                "template_info": {"matched": False}
             })
+
+            # Skip the rest of execution logic
+            return
+
+        # EXECUTION MODE - Full agent with tools
+        # Create agent
+        from agent_fastapi_server_multiturn import create_agent
+        agent = create_agent()
+
+        # Debug: Check LLM initialization
+        print(f"\n=== AGENT LLM DEBUG ===")
+        print(f"Agent LLM type: {type(agent.llm)}")
+        print(f"Agent LLM model: {getattr(agent.llm, 'model', 'unknown')}")
+        print(f"Agent LLM max_tokens: {getattr(agent.llm, 'max_tokens', 'unknown')}")
+        print(f"Agent LLM stop_sequences: {getattr(agent.llm, 'stop_sequences', 'unknown')}")
+        # Test LLM directly
+        from langchain_core.messages import HumanMessage
+        test_response = agent.llm.invoke([HumanMessage(content="Say hello in one word")])
+        print(f"Test response type: {type(test_response.content)}")
+        print(f"Test response content: {repr(test_response.content[:100]) if test_response.content else 'EMPTY'}")
+        print(f"=== END AGENT LLM DEBUG ===\n")
+
+        # Send status
+        result_queue.put({
+            "type": "status",
+            "content": "Agent initialized, processing message..."
+        })
+
+        # === TEMPLATE MATCHING & QUERY AUGMENTATION ===
+        # Try to match the query to a workflow template (if enabled)
+        base_message = enhanced_message
+        template_info = {
+            "matched": False,
+            "title": None,
+            "confidence": None,
+            "reasoning": None,
+            "modification": None
+        }
+
+        # use_template parameter is passed to this function
+        # Check if template matching is enabled
+        if use_template:
+            try:
+                result_queue.put({
+                    "type": "status",
+                    "content": "Checking for relevant workflow templates..."
+                })
+
+                from agent_fastapi_server_multiturn import get_template_retriever
+                retriever = get_template_retriever()
+
+                if retriever:
+                    # Match query to templates
+                    match_result = retriever.match_template(base_message)
+
+                    if match_result.get("matched"):
+                        template_title = match_result.get("template", {}).get("title", "Unknown")
+                        confidence = match_result.get("confidence", "unknown")
+
+                        # Store template info for later
+                        template_info["matched"] = True
+                        template_info["title"] = template_title
+                        template_info["confidence"] = confidence
+                        template_info["reasoning"] = match_result.get("reasoning", "")
+                        template_info["modification"] = match_result.get("modification")
+
+                        result_queue.put({
+                            "type": "template_matched",
+                            "content": f"Matched to template: {template_title} (confidence: {confidence})",
+                            "template_title": template_title,
+                            "confidence": confidence,
+                            "reasoning": match_result.get("reasoning", "")
+                        })
+
+                        # Augment the query with template prompt
+                        augmentation_result = retriever.augment_query_with_template(base_message, match_result)
+                        enhanced_message = augmentation_result["augmented_query"]
+
+                        print(f"✓ Template matched: {template_title} (confidence: {confidence})")
+                        if augmentation_result.get("modification_applied"):
+                            print(f"  Modification: {augmentation_result['modification_applied']}")
+                    else:
+                        print(f"✗ No template matched: {match_result.get('reasoning', 'Unknown reason')}")
+
+            except Exception as e:
+                print(f"Warning: Template matching failed: {e}")
+                # Continue without template matching
+        else:
+            print("Template matching is not using")
+            result_queue.put({
+                "type": "status",
+                "content": "Template matching is not using, proceeding with direct query..."
+            })
+
+        # === END TEMPLATE MATCHING ===
+
+        # Add explicit file information to the message if not already included
+        if session_path and os.path.exists(session_path):
+            files_in_session = []
+            for filename in os.listdir(session_path):
+                file_path = os.path.join(session_path, filename)
+                if os.path.isfile(file_path) and not filename.startswith('.'):
+                    files_in_session.append(f"{filename} (Path: {file_path})")
+
+            if files_in_session and "Available files" not in enhanced_message:
+                file_info = "\n\nAvailable files in your working directory:\n" + "\n".join([f"- {f}" for f in files_in_session])
+                enhanced_message = enhanced_message + file_info
+
+        # Debug: Check enhanced_message before sending to agent
+        print(f"\n=== ENHANCED MESSAGE DEBUG ===")
+        print(f"Type: {type(enhanced_message)}")
+        print(f"Length: {len(enhanced_message) if enhanced_message else 0}")
+        print(f"Is empty: {not enhanced_message or len(enhanced_message.strip()) == 0}")
+        print(f"First 500 chars: {enhanced_message[:500] if enhanced_message else 'EMPTY'}")
+        print(f"=== END ENHANCED MESSAGE DEBUG ===\n")
+
+        # Run agent (this blocks until complete)
+        _, result = agent.go(enhanced_message)
+
+        # Signal completion
+        agent_complete.set()
+
+        # Get final output
+        with output_lock:
+            final_output = output_buffer.getvalue()
+
+        # Send final result with complete output and template info
+        result_queue.put({
+            "type": "result",
+            "content": result,
+            "output": final_output,
+            "template_info": template_info
+        })
+
+        # Send final snapshot
+        result_queue.put({
+            "type": "final_snapshot",
+            "content": final_output,
+            "result": result,
+            "timestamp": time.time(),
+            "template_info": template_info
+        })
 
     except Exception as e:
         import traceback
@@ -2670,6 +2831,9 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
             "output": error_output
         })
     finally:
+        # Restore original stdout
+        sys.stdout = original_stdout
+
         # Move generated files to session folder before exiting process
         try:
             print(f"Process: Starting file collection for session path: {session_path}")
@@ -2884,13 +3048,104 @@ def move_files_to_session(file_paths, session_path):
     return moved_files
 
 
-def generate_report_pdf(session_path: str, report_content: str, image_files: list) -> Optional[str]:
-    """Generate a PDF from the final report with embedded images.
+def generate_report_pdf(session_path: str, report_content: str, image_files: list, turn_number: int = None) -> Optional[str]:
+    """Generate a PDF from the final report with embedded images using pypandoc.
 
     Args:
         session_path: Path to the session directory where PDF will be saved
         report_content: The markdown content of the final report
         image_files: List of image file paths to include in the PDF
+        turn_number: Optional turn number for multi-turn sessions
+
+    Returns:
+        Path to the generated PDF file, or None if generation fails
+    """
+    try:
+        import pypandoc
+        import re
+
+        # Generate filename with timestamp and optional turn number
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        if turn_number is not None:
+            pdf_filename = f"report_{timestamp}_turn_{turn_number}.pdf"
+        else:
+            pdf_filename = f"report_{timestamp}.pdf"
+        pdf_path = os.path.join(session_path, pdf_filename)
+
+        # Clean up the markdown content
+        cleaned_content = report_content
+
+        # Remove download links section (not needed in PDF)
+        cleaned_content = re.sub(r'## 📥 Downloads.*?(?=##|\Z)', '', cleaned_content, flags=re.DOTALL)
+        cleaned_content = re.sub(r'## Downloads.*?(?=##|\Z)', '', cleaned_content, flags=re.DOTALL)
+
+        # Remove emojis that may not render well
+        cleaned_content = re.sub(r'[\U0001F300-\U0001F9FF\U00002600-\U000026FF\U00002700-\U000027BF]', '', cleaned_content)
+
+        # Replace special characters that may not be in all fonts
+        cleaned_content = cleaned_content.replace('≥', '>=').replace('≤', '<=').replace('±', '+/-')
+
+        # Fix markdown list formatting for proper PDF rendering
+        # Ensure blank line before bullet lists (required for pandoc to render as proper list)
+        # Pattern: Bold text on a line followed by a bullet list without blank line
+        cleaned_content = re.sub(r'(\*\*[^*]+\*\*)\n(- )', r'\1\n\n\2', cleaned_content)
+        # Also ensure blank line after headings followed by lists
+        cleaned_content = re.sub(r'(^#{1,6}\s+.+)\n(- )', r'\1\n\n\2', cleaned_content, flags=re.MULTILINE)
+        # Ensure blank line before any list that follows a non-list line
+        cleaned_content = re.sub(r'([^\n-])\n(- \*\*)', r'\1\n\n\2', cleaned_content)
+
+        # Add images section at the end if there are images
+        if image_files:
+            cleaned_content += "\n\n## Figures\n\n"
+            for img_path in image_files:
+                if os.path.exists(img_path):
+                    filename = os.path.basename(img_path)
+                    caption = os.path.splitext(filename)[0].replace('_', ' ').replace('-', ' ')
+                    # Use absolute path for images
+                    abs_path = os.path.abspath(img_path)
+                    cleaned_content += f"![{caption}]({abs_path})\n\n"
+
+        # Add header with title
+        header = "---\ntitle: KumiChem Agent Report\n---\n\n"
+        final_content = header + cleaned_content
+
+        # Convert markdown to PDF using pypandoc
+        pypandoc.convert_text(
+            final_content,
+            'pdf',
+            format='md',
+            outputfile=pdf_path,
+            extra_args=[
+                '--pdf-engine=xelatex',
+                '-V', 'geometry:margin=1in',
+                '-V', 'fontsize=11pt',
+                '-V', 'documentclass=article',
+                '-V', 'mainfont=Noto Sans',
+                '-V', 'monofont=DejaVu Sans Mono',
+                '-V', 'CJKmainfont=Noto Sans CJK SC',
+                '--highlight-style=tango'
+            ]
+        )
+
+        print(f"Generated PDF report: {pdf_path}")
+        return pdf_path
+
+    except Exception as e:
+        print(f"Error generating PDF report with pypandoc: {e}")
+        import traceback
+        traceback.print_exc()
+        # Fallback to fpdf if pypandoc fails
+        return generate_report_pdf_fpdf(session_path, report_content, image_files, turn_number)
+
+
+def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files: list, turn_number: int = None) -> Optional[str]:
+    """Fallback PDF generation using fpdf if pypandoc fails.
+
+    Args:
+        session_path: Path to the session directory where PDF will be saved
+        report_content: The markdown content of the final report
+        image_files: List of image file paths to include in the PDF
+        turn_number: Optional turn number for multi-turn sessions
 
     Returns:
         Path to the generated PDF file, or None if generation fails
@@ -2899,19 +3154,17 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
         from fpdf import FPDF
         from PIL import Image
         import re
-        import html
 
         # Create PDF with UTF-8 support
         class UTF8PDF(FPDF):
             def __init__(self):
                 super().__init__()
-                # Use built-in fonts with latin-1 encoding fallback
                 self.set_auto_page_break(auto=True, margin=15)
 
             def header(self):
                 self.set_font('Helvetica', 'B', 10)
                 self.set_text_color(128, 128, 128)
-                self.cell(0, 10, 'DLeader Agent Report', align='C')
+                self.cell(0, 10, 'KumiChem Agent Report', align='C')
                 self.ln(10)
 
             def footer(self):
@@ -2923,109 +3176,67 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
         pdf = UTF8PDF()
         pdf.add_page()
 
-        # Helper function to clean text for PDF (handle non-latin characters)
         def clean_text(text):
-            # Replace common problematic characters
             replacements = {
-                '\u2018': "'", '\u2019': "'",  # Smart quotes
+                '\u2018': "'", '\u2019': "'",
                 '\u201c': '"', '\u201d': '"',
                 '\u2013': '-', '\u2014': '--',
                 '\u2026': '...',
-                '\u00a0': ' ',  # Non-breaking space
-                '\u2022': '*',  # Bullet
-                '\u2713': '[x]',  # Checkmark
-                '\u2717': '[ ]',  # X mark
+                '\u00a0': ' ',
+                '\u2022': '*',
+                '\u2713': '[x]',
+                '\u2717': '[ ]',
             }
             for old, new in replacements.items():
                 text = text.replace(old, new)
-            # Encode to latin-1, replacing unknown chars
             return text.encode('latin-1', errors='replace').decode('latin-1')
 
-        # Helper function to add text with word wrapping
-        def add_paragraph(text, font='Helvetica', size=11, style=''):
-            pdf.set_font(font, style, size)
-            pdf.set_text_color(0, 0, 0)
-            # Clean the text for PDF compatibility
-            cleaned = clean_text(text)
-            pdf.multi_cell(0, 6, cleaned)
-            pdf.ln(2)
-
-        # Helper function to add heading
         def add_heading(text, level=1):
             sizes = {1: 18, 2: 16, 3: 14, 4: 12}
             size = sizes.get(level, 12)
             pdf.set_font('Helvetica', 'B', size)
             pdf.set_text_color(0, 0, 0)
-            cleaned = clean_text(text)
-            pdf.multi_cell(0, 8, cleaned)
+            pdf.multi_cell(0, 8, clean_text(text))
             pdf.ln(3)
 
-        # Helper function to add code block
         def add_code_block(code):
             pdf.set_font('Courier', '', 9)
             pdf.set_fill_color(245, 245, 245)
             pdf.set_text_color(0, 0, 0)
-            cleaned = clean_text(code)
-            # Split into lines and add each line
-            for line in cleaned.split('\n'):
-                # Truncate very long lines
+            for line in clean_text(code).split('\n'):
                 if len(line) > 100:
                     line = line[:97] + '...'
                 pdf.cell(0, 5, line, fill=True)
                 pdf.ln()
             pdf.ln(3)
 
-        # Helper function to add an image
         def add_image(image_path, caption=None):
             if not os.path.exists(image_path):
                 return
-
             try:
-                # Get image dimensions
                 with Image.open(image_path) as img:
                     img_width, img_height = img.size
-
-                # Calculate scaling to fit page width (max 180mm for A4)
-                max_width = 180
-                max_height = 200  # Leave room for caption and margins
-
-                # Calculate aspect ratio
+                max_width, max_height = 180, 200
                 aspect = img_height / img_width
-                if img_width > max_width:
-                    width = max_width
-                    height = width * aspect
-                else:
-                    width = img_width * 0.264583  # Convert pixels to mm (assuming 96 DPI)
-                    height = img_height * 0.264583
-
-                # Scale down if too tall
+                width = min(max_width, img_width * 0.264583)
+                height = width * aspect
                 if height > max_height:
                     height = max_height
                     width = height / aspect
-
-                # Check if we need a new page
                 if pdf.get_y() + height + 20 > pdf.h - 20:
                     pdf.add_page()
-
-                # Center the image
                 x = (pdf.w - width) / 2
-
-                # Add the image
                 pdf.image(image_path, x=x, y=pdf.get_y(), w=width)
                 pdf.ln(height + 5)
-
-                # Add caption if provided
                 if caption:
                     pdf.set_font('Helvetica', 'I', 9)
                     pdf.set_text_color(80, 80, 80)
-                    cleaned_caption = clean_text(caption)
-                    pdf.multi_cell(0, 5, cleaned_caption, align='C')
+                    pdf.multi_cell(0, 5, clean_text(caption), align='C')
                     pdf.ln(5)
-
             except Exception as e:
                 print(f"Error adding image {image_path} to PDF: {e}")
 
-        # Parse markdown content and render to PDF
+        # Parse markdown content
         lines = report_content.split('\n')
         in_code_block = False
         code_block_content = []
@@ -3034,23 +3245,18 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
         while i < len(lines):
             line = lines[i]
 
-            # Skip download links section
             if '## 📥 Downloads' in line or '## Downloads' in line:
-                # Skip until next section or end
                 i += 1
                 while i < len(lines) and not lines[i].startswith('#'):
                     i += 1
                 continue
 
-            # Handle code blocks
             if line.strip().startswith('```'):
                 if in_code_block:
-                    # End of code block
                     add_code_block('\n'.join(code_block_content))
                     code_block_content = []
                     in_code_block = False
                 else:
-                    # Start of code block
                     in_code_block = True
                 i += 1
                 continue
@@ -3060,94 +3266,85 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
                 i += 1
                 continue
 
-            # Handle headings
             heading_match = re.match(r'^(#{1,6})\s+(.+)$', line)
             if heading_match:
                 level = len(heading_match.group(1))
                 text = heading_match.group(2)
+                text = re.sub(r'[\U0001F300-\U0001F9FF\U00002600-\U000026FF\U00002700-\U000027BF]', '', text).strip()
+                text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+                text = re.sub(r'\*([^*]+)\*', r'\1', text)
                 add_heading(text, level)
                 i += 1
                 continue
 
-            # Handle horizontal rule
             if re.match(r'^(-{3,}|_{3,}|\*{3,})$', line.strip()):
                 pdf.line(10, pdf.get_y(), pdf.w - 10, pdf.get_y())
                 pdf.ln(5)
                 i += 1
                 continue
 
-            # Handle bullet points
             bullet_match = re.match(r'^(\s*)[-*+]\s+(.+)$', line)
             if bullet_match:
                 indent = len(bullet_match.group(1)) // 2
                 text = bullet_match.group(2)
+                text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+                text = re.sub(r'\*([^*]+)\*', r'\1', text)
+                text = re.sub(r'`([^`]+)`', r'\1', text)
                 pdf.set_font('Helvetica', '', 11)
-                prefix = '  ' * indent + '• '
-                add_paragraph(prefix + text)
+                pdf.multi_cell(0, 6, f'{"  " * indent}- {clean_text(text)}')
+                pdf.ln(1)
                 i += 1
                 continue
 
-            # Handle numbered lists
             num_match = re.match(r'^(\s*)(\d+)\.\s+(.+)$', line)
             if num_match:
                 indent = len(num_match.group(1)) // 2
                 num = num_match.group(2)
                 text = num_match.group(3)
+                text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+                text = re.sub(r'\*([^*]+)\*', r'\1', text)
                 pdf.set_font('Helvetica', '', 11)
-                prefix = '  ' * indent + f'{num}. '
-                add_paragraph(prefix + text)
+                pdf.multi_cell(0, 6, f'{"  " * indent}{num}. {clean_text(text)}')
+                pdf.ln(1)
                 i += 1
                 continue
 
-            # Handle inline images in markdown (skip external URLs)
-            img_match = re.match(r'!\[([^\]]*)\]\(([^)]+)\)', line)
-            if img_match and not img_match.group(2).startswith('http'):
-                # Local image reference - try to find it
-                img_ref = img_match.group(2)
-                img_caption = img_match.group(1)
-                if os.path.exists(img_ref):
-                    add_image(img_ref, img_caption)
-                i += 1
-                continue
-
-            # Handle regular paragraphs
             if line.strip():
-                # Remove markdown formatting for bold/italic
-                text = re.sub(r'\*\*(.+?)\*\*', r'\1', line)  # Bold
-                text = re.sub(r'\*(.+?)\*', r'\1', text)  # Italic
-                text = re.sub(r'`(.+?)`', r'\1', text)  # Inline code
-                text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)  # Links
-                add_paragraph(text)
+                text = line
+                text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+                text = re.sub(r'\*([^*]+)\*', r'\1', text)
+                text = re.sub(r'`([^`]+)`', r'\1', text)
+                text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+                pdf.set_font('Helvetica', '', 11)
+                pdf.set_text_color(0, 0, 0)
+                pdf.multi_cell(0, 6, clean_text(text))
+                pdf.ln(2)
 
             i += 1
 
-        # Add images section
         if image_files:
             pdf.add_page()
-            add_heading("Generated Images", 2)
+            add_heading("Figures", 2)
             pdf.ln(5)
-
             for img_path in image_files:
                 if os.path.exists(img_path):
-                    # Use filename as caption
                     filename = os.path.basename(img_path)
-                    caption = filename.replace('_', ' ').replace('-', ' ')
-                    # Remove extension for cleaner caption
-                    caption = os.path.splitext(caption)[0]
+                    caption = os.path.splitext(filename)[0].replace('_', ' ').replace('-', ' ')
                     add_image(img_path, caption)
 
-        # Generate filename with timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        pdf_filename = f"report_{timestamp}.pdf"
+        if turn_number is not None:
+            pdf_filename = f"report_{timestamp}_turn_{turn_number}.pdf"
+        else:
+            pdf_filename = f"report_{timestamp}.pdf"
         pdf_path = os.path.join(session_path, pdf_filename)
 
-        # Save the PDF
         pdf.output(pdf_path)
-        print(f"Generated PDF report: {pdf_path}")
+        print(f"Generated PDF report (fpdf fallback): {pdf_path}")
         return pdf_path
 
     except Exception as e:
-        print(f"Error generating PDF report: {e}")
+        print(f"Error generating PDF report with fpdf: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -4126,7 +4323,7 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
     images = files_data.get("images", [])
     if images:
         # Start building the images section
-        images_section = "\n\n---\n\n## 📊 Generated Images\n\n"
+        images_section = "\n\n---\n\n## Figures\n\n"
 
         # Process each image
         image_count = 0
@@ -4134,11 +4331,11 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
             # Handle both dict and string formats
             if isinstance(image_item, dict):
                 filename = image_item.get("filename", "image")
-                url = image_item.get("url")
+                url = image_item.get("url") or image_item.get("download_url")
                 s3_key = image_item.get("s3_key")
 
                 if url:
-                    # Use the presigned URL (works with S3 URLs even without .png/.jpg extension)
+                    # Use the presigned URL or download_url
                     image_count += 1
                     # Extract a cleaner name from filename or s3_key
                     display_name = filename.replace("_", " ").replace("-", " ").title()
@@ -4188,19 +4385,16 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
                 })
                 break  # Only add one zip download link
 
-    # Add other downloadable files (report_md only, exclude result_json)
-    for key in ["report_md"]:
-        file_info = files_data.get(key)
-        if file_info and isinstance(file_info, dict):
-            url = file_info.get("url") or file_info.get("download_url")
-            if url:
-                name = "Final Report (Markdown)"
-                icon = "📄"
-                download_links.append({
-                    "name": name,
-                    "url": url,
-                    "icon": icon
-                })
+    # Add PDF download link if available
+    pdf_info = files_data.get("report_pdf")
+    if pdf_info and isinstance(pdf_info, dict):
+        url = pdf_info.get("url") or pdf_info.get("download_url")
+        if url:
+            download_links.append({
+                "name": "Final Report (PDF)",
+                "url": url,
+                "icon": "📄"
+            })
 
     # Build download links section
     if download_links:
@@ -4212,7 +4406,7 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
     return final_report + added_content
 
 
-def generate_file_urls(files_data, session_id: str = None):
+def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
     """
     Helper function to convert file paths/S3 keys to accessible URLs
 
@@ -4222,6 +4416,7 @@ def generate_file_urls(files_data, session_id: str = None):
     Args:
         files_data: Dictionary or list of file information (can be paths, dicts, or mixed)
         session_id: Optional session ID for generating download URLs
+        user_id: Optional user ID for download URL authentication
 
     Returns:
         Enhanced files_data with 'url' fields added (always S3 URLs)
@@ -4244,11 +4439,19 @@ def generate_file_urls(files_data, session_id: str = None):
         if isinstance(file_item, str):
             filename = file_item.split("/")[-1]
             file_path = file_item
+            file_ext = filename.split('.')[-1].lower() if '.' in filename else ''
 
             # Upload to S3 if file exists locally
             if os.path.exists(file_path) and session_id:
                 try:
-                    s3_key = f"sessions/{session_id}/files/{filename}"
+                    # Determine the correct S3 folder based on file type
+                    if file_ext in ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp']:
+                        s3_folder = 'images'
+                    elif file_ext == 'pdf':
+                        s3_folder = 'report_pdf' if filename.startswith('report_') else 'files'
+                    else:
+                        s3_folder = 'files'
+                    s3_key = f"sessions/{session_id}/{s3_folder}/{filename}"
 
                     # Check if file already exists in S3 to avoid re-uploading
                     try:
@@ -4288,13 +4491,54 @@ def generate_file_urls(files_data, session_id: str = None):
                     return {
                         "path": file_path,
                         "filename": filename,
-                        "download_url": f"/download-file/{session_id}/{filename}" if session_id else None
+                        "download_url": f"/download-file/{session_id}/{filename}?user_id={user_id}" if session_id and user_id else (f"/download-file/{session_id}/{filename}" if session_id else None)
                     }
+
+            # File doesn't exist locally - try to find it in S3
+            if session_id:
+                # Determine S3 folder based on file type
+                if file_ext in ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp']:
+                    s3_folder = 'images'
+                elif file_ext == 'pdf':
+                    s3_folder = 'report_pdf' if filename.startswith('report_') else 'files'
+                else:
+                    s3_folder = 'files'
+
+                # Build list of S3 keys to try (turn-specific first, then base session)
+                s3_keys_to_try = [f"sessions/{session_id}/{s3_folder}/{filename}"]
+
+                # If session_id has _turn_N suffix, also try the base session path
+                if '_turn_' in session_id:
+                    base_session_id = session_id.split('_turn_')[0]
+                    s3_keys_to_try.append(f"sessions/{base_session_id}/{s3_folder}/{filename}")
+
+                for s3_key in s3_keys_to_try:
+                    try:
+                        # Check if file exists in S3
+                        head_object_count += 1
+                        cloud_storage_manager.s3_client.head_object(
+                            Bucket=cloud_storage_manager.bucket_name,
+                            Key=s3_key
+                        )
+                        # File exists in S3, generate presigned URL
+                        url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
+                        return {
+                            "path": file_path,
+                            "filename": filename,
+                            "s3_key": s3_key,
+                            "url": url,
+                            "expires_at": (datetime.now() + timedelta(hours=2)).isoformat()
+                        }
+                    except cloud_storage_manager.s3_client.exceptions.ClientError:
+                        # File doesn't exist at this S3 key, try next
+                        continue
+                    except Exception as e:
+                        print(f"Warning: Error checking S3 for {filename} at {s3_key}: {e}")
 
             return {
                 "path": file_path,
                 "filename": filename,
-                "download_url": f"/download-file/{session_id}/{filename}" if session_id else None
+                "download_url": f"/download-file/{session_id}/{filename}?user_id={user_id}" if session_id and user_id else (f"/download-file/{session_id}/{filename}" if session_id else None)
             }
 
         if not isinstance(file_item, dict):
@@ -4356,56 +4600,70 @@ def generate_file_urls(files_data, session_id: str = None):
                         result["expires_at"] = (datetime.now() + timedelta(hours=2)).isoformat()
                     except Exception as process_error:
                         # S3 operation failed, fall back to local download
-                        result["download_url"] = f"/download-file/{session_id}/{filename}"
+                        result["download_url"] = f"/download-file/{session_id}/{filename}?user_id={user_id}" if user_id else f"/download-file/{session_id}/{filename}"
                         print(f"Warning: Failed to process {filename} with S3: {process_error}")
                 except Exception as e:
                     print(f"Warning: Error processing {filename} for S3: {e}")
                     # Fall back to local download URL
-                    result["download_url"] = f"/download-file/{session_id}/{filename}"
+                    result["download_url"] = f"/download-file/{session_id}/{filename}?user_id={user_id}" if user_id else f"/download-file/{session_id}/{filename}"
             else:
                 # File doesn't exist locally, check if it exists in S3
-                try:
-                    # Determine S3 key based on filename pattern
-                    # Files are organized in S3 by type: report_md/, result_json/, thinking_process/, query_file/, etc.
-                    file_ext = filename.split('.')[-1].lower()
+                # Determine S3 folder based on filename pattern
+                # Files are organized in S3 by type: report_md/, result_json/, thinking_process/, query_file/, etc.
+                file_ext = filename.split('.')[-1].lower()
 
-                    # Try to infer folder from filename prefix
-                    if filename.startswith('report_'):
-                        folder = 'report_md'
-                    elif filename.startswith('result_'):
-                        folder = 'result_json'
-                    elif filename.startswith('thinking_'):
-                        folder = 'thinking_process'
-                    elif filename.startswith('query_'):
-                        folder = 'query_file'
-                    elif file_ext in ['png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf']:
-                        folder = 'images'
-                    elif filename.endswith('.zip'):
-                        folder = 'files'
-                    else:
-                        folder = 'files'
+                # Try to infer folder from filename prefix and extension
+                if filename.startswith('report_') and file_ext == 'pdf':
+                    folder = 'report_pdf'
+                elif filename.startswith('report_') and file_ext == 'md':
+                    folder = 'report_md'
+                elif filename.startswith('result_'):
+                    folder = 'result_json'
+                elif filename.startswith('thinking_'):
+                    folder = 'thinking_process'
+                elif filename.startswith('query_'):
+                    folder = 'query_file'
+                elif file_ext in ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp']:
+                    folder = 'images'
+                elif filename.endswith('.zip'):
+                    folder = 'files'
+                else:
+                    folder = 'files'
 
-                    s3_key = f"sessions/{session_id}/{folder}/{filename}"
+                # Build list of S3 keys to try (turn-specific first, then base session)
+                s3_keys_to_try = [f"sessions/{session_id}/{folder}/{filename}"]
 
-                    # Check if file exists in S3
-                    head_object_count += 1
-                    cloud_storage_manager.s3_client.head_object(
-                        Bucket=cloud_storage_manager.bucket_name,
-                        Key=s3_key
-                    )
-                    # File exists in S3, generate presigned URL
-                    url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
-                    result["s3_key"] = s3_key
-                    result["url"] = url
-                    result["expires_at"] = (datetime.now() + timedelta(hours=2)).isoformat()
-                    result["filename"] = filename
-                except cloud_storage_manager.s3_client.exceptions.ClientError:
+                # If session_id has _turn_N suffix, also try the base session path
+                if '_turn_' in session_id:
+                    base_session_id = session_id.split('_turn_')[0]
+                    s3_keys_to_try.append(f"sessions/{base_session_id}/{folder}/{filename}")
+
+                found_in_s3 = False
+                for s3_key in s3_keys_to_try:
+                    try:
+                        # Check if file exists in S3
+                        head_object_count += 1
+                        cloud_storage_manager.s3_client.head_object(
+                            Bucket=cloud_storage_manager.bucket_name,
+                            Key=s3_key
+                        )
+                        # File exists in S3, generate presigned URL
+                        url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
+                        result["s3_key"] = s3_key
+                        result["url"] = url
+                        result["expires_at"] = (datetime.now() + timedelta(hours=2)).isoformat()
+                        result["filename"] = filename
+                        found_in_s3 = True
+                        break
+                    except cloud_storage_manager.s3_client.exceptions.ClientError:
+                        # File doesn't exist at this S3 key, try next
+                        continue
+                    except Exception as e:
+                        print(f"Warning: Error checking S3 for {filename} at {s3_key}: {e}")
+
+                if not found_in_s3:
                     # File doesn't exist in S3 either, fall back to download URL
-                    result["download_url"] = f"/download-file/{session_id}/{filename}"
-                    result["filename"] = filename
-                except Exception as e:
-                    print(f"Warning: Error checking S3 for {filename}: {e}")
-                    result["download_url"] = f"/download-file/{session_id}/{filename}"
+                    result["download_url"] = f"/download-file/{session_id}/{filename}?user_id={user_id}" if user_id else f"/download-file/{session_id}/{filename}"
                     result["filename"] = filename
 
         return result
@@ -4604,7 +4862,7 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                 step6_start = time.time()
                 if turn_files:
                     turn_session_id = f"{session_id}_turn_{turn_number}" if turn_number > 1 else session_id
-                    turn_files = generate_file_urls(turn_files, turn_session_id)
+                    turn_files = generate_file_urls(turn_files, turn_session_id, user_id=user_id)
 
                     # For existing data: if turn_zip exists, use it as session_zip (for backwards compatibility)
                     if isinstance(turn_files, dict):
@@ -4679,7 +4937,7 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
             # Generate URLs for S3 files
             step6_start = time.time()
             s3_files = cloud_session.get("s3_files", {})
-            s3_files_with_urls = generate_file_urls(s3_files, session_id)
+            s3_files_with_urls = generate_file_urls(s3_files, session_id, user_id=user_id)
             print(f"[PERF /results] Step 6 (generate_file_urls): {(time.time() - step6_start) * 1000:.2f} ms")
 
             # Append images to final report
@@ -4770,9 +5028,9 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
 
     # Generate URLs for any files in the result
     if "files" in json_result:
-        json_result["files"] = generate_file_urls(json_result["files"], session_id)
+        json_result["files"] = generate_file_urls(json_result["files"], session_id, user_id=user_id)
     if "s3_files" in json_result:
-        json_result["s3_files"] = generate_file_urls(json_result["s3_files"], session_id)
+        json_result["s3_files"] = generate_file_urls(json_result["s3_files"], session_id, user_id=user_id)
 
     # Append images to final report
     if "content" in json_result and isinstance(json_result["content"], dict):
@@ -4825,21 +5083,28 @@ async def stop_task(session_id: str, user_id: str):
     if result.get("success"):
         was_queued = result.get("was_queued", False)
         was_running = result.get("was_running", False)
+        actual_session_id = result.get("actual_session_id", session_id)
 
         if was_queued:
-            message = f"Task {session_id} was removed from queue (was not yet processing)"
+            message = f"Task {actual_session_id} was removed from queue (was not yet processing)"
         elif was_running:
-            message = f"Task {session_id} has been stopped (was actively processing)"
+            message = f"Task {actual_session_id} has been stopped (was actively processing)"
         else:
-            message = f"Task {session_id} has been cancelled"
+            message = f"Task {actual_session_id} has been cancelled"
 
-        return {
+        response = {
             "message": message,
-            "session_id": session_id,
+            "session_id": actual_session_id,
             "status": "cancelled",
             "was_queued": was_queued,
             "was_running": was_running
         }
+
+        # Include the requested session ID if it was different (i.e., parent session was used)
+        if actual_session_id != session_id:
+            response["requested_session_id"] = session_id
+
+        return response
     else:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -4855,17 +5120,34 @@ def filter_execute_blocks(text: str, include_execute: bool = False) -> str:
 
     Args:
         text: The text to filter
-        include_execute: If True, return text as-is. If False, remove execute blocks and hide verbose listings.
+        include_execute: If True, return text as-is. If False, truncate execute blocks to first 5 lines.
 
     Returns:
-        Filtered text with execute blocks removed and directory listings summarized
+        Filtered text with execute blocks truncated (if not include_execute) and directory listings summarized
     """
-    if include_execute or not text:
+    if not text:
+        return text
+
+    if include_execute:
         return text
 
     import re
-    # Remove <execute>...</execute> blocks (including multiline)
-    filtered_text = re.sub(r'<execute>.*?</execute>', '', text, flags=re.DOTALL)
+
+    def truncate_execute_block(match):
+        """Truncate execute block content to first 5 lines, with '......' for the rest"""
+        full_content = match.group(1)
+        lines = full_content.split('\n')
+
+        # If 5 lines or fewer, keep the full content
+        if len(lines) <= 5:
+            return f'<execute>{full_content}</execute>'
+
+        # Keep first 5 lines and add '......' to indicate more content
+        truncated_lines = lines[:5]
+        return '<execute>' + '\n'.join(truncated_lines) + '\n......\n</execute>'
+
+    # Truncate <execute>...</execute> blocks to first 5 lines (including multiline)
+    filtered_text = re.sub(r'<execute>(.*?)</execute>', truncate_execute_block, text, flags=re.DOTALL)
 
     # Hide verbose directory listings - match "Current directory files:" followed by file list
     # Pattern: "Current directory files:\n  - file1\n  - file2\n..."
@@ -5886,7 +6168,7 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
                     turn_num = turn.get("turn_number", 1)
                     turn_session_id = f"{session_id}_turn_{turn_num}" if turn_num > 1 else session_id
 
-                    turn["files"] = generate_file_urls(turn["files"], turn_session_id)
+                    turn["files"] = generate_file_urls(turn["files"], turn_session_id, user_id=user_id)
 
                     # For existing data: if turn_zip exists, use it as session_zip (for backwards compatibility)
                     if isinstance(turn["files"], dict):
@@ -6194,8 +6476,15 @@ async def unshare_session(session_id: str, user_id: str):
         raise HTTPException(status_code=500, detail=f"Error unsharing session: {str(e)}")
 
 @app.get("/shared-sessions")
-async def get_shared_sessions(limit: int = 50, offset: int = 0):
+async def get_shared_sessions(user_id: str, limit: int = 50, offset: int = 0):
     """Get all publicly shared sessions from the community"""
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /shared-sessions: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         if not cloud_storage_manager:
             return {"sessions": [], "total": 0, "limit": limit, "offset": offset}
@@ -6312,8 +6601,15 @@ async def rename_multisession(request: RenameMultiSessionRequest):
         raise HTTPException(status_code=500, detail=f"Error renaming session: {str(e)}")
 
 @app.post("/upload-template")
-async def upload_template(request: TemplateListRequest):
+async def upload_template(request: TemplateListRequest, user_id: str):
     """Upload workflow templates to MongoDB"""
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /upload-template: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         from s3_mongodb.func_mongodb import (get_mongodb_collection,
                                              upsert_wrapper)
@@ -6370,8 +6666,15 @@ async def upload_template(request: TemplateListRequest):
         raise HTTPException(status_code=500, detail=f"Error uploading templates: {str(e)}")
 
 @app.get("/templates")
-async def get_templates():
+async def get_templates(user_id: str):
     """Get all workflow templates from MongoDB"""
+    # Validate user_id
+    if not user_id or user_id.strip() == "":
+        raise HTTPException(status_code=400, detail="user_id is required and cannot be empty")
+    if not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /templates: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
     try:
         from s3_mongodb.func_mongodb import get_mongodb_collection
 

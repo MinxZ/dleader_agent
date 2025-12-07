@@ -15,7 +15,18 @@ import pandas as pd
 import requests
 import tqdm  # Add tqdm for progress bar
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages.base import get_msg_title_repr
+# Custom get_msg_title_repr with 70 char width (instead of langchain's 80)
+def get_msg_title_repr(title: str, bold: bool = False) -> str:
+    """Get a title representation for a message (70 chars total width)."""
+    total_width = 70
+    title_with_spaces = f" {title} "
+    padding_total = total_width - len(title_with_spaces)
+    left_padding = padding_total // 2
+    right_padding = padding_total - left_padding
+    result = "=" * left_padding + title_with_spaces + "=" * right_padding
+    if bold:
+        result = f"\033[1m{result}\033[0m"
+    return result
 from langchain_core.tools import StructuredTool
 from langchain_core.utils.interactive_env import is_interactive_env
 from pydantic import BaseModel, Field, ValidationError
