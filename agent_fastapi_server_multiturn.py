@@ -5440,8 +5440,10 @@ async def get_session_snapshots(
         # For active sessions, get real-time progress data from queue_manager using active_turn_session_id
         if active_turn_session_id:
             active_session_data = queue_manager.get_session_progress(active_turn_session_id)
-            progress_updates = active_session_data.get("progress_updates", [])
-            print(f"[SNAPSHOTS] Got active session data for: {active_turn_session_id}")
+            # Use all_progress_updates which contains accumulated updates including snapshots
+            # Note: "progress_updates" only contains new/unread updates, not the full history
+            progress_updates = active_session_data.get("all_progress_updates", [])
+            print(f"[SNAPSHOTS] Got active session data for: {active_turn_session_id}, all_progress_updates count: {len(progress_updates)}")
         else:
             # Fallback to session_data if not in active_sessions
             progress_updates = session_data.get("progress_updates", [])
@@ -5516,6 +5518,55 @@ async def get_session_snapshots(
 
                 # Read the thinking process text content
                 thinking_process_text = None
+
+                # If turn.files is None or thinking_process not in files, try S3 fallback directly
+                if not thinking_process_file:
+                    print(f"[SNAPSHOTS DEBUG] No thinking_process_file in turn.files, trying S3 fallback directly...")
+                    try:
+                        # Use turn-specific session ID for multi-turn sessions
+                        if turn_number and turn_number > 1:
+                            fallback_session_id = f"{base_session_id}_turn_{turn_number}"
+                        else:
+                            fallback_session_id = base_session_id
+
+                        cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(fallback_session_id)
+                        print(f"[SNAPSHOTS DEBUG] S3 fallback - Cloud session found for {fallback_session_id}: {cloud_session is not None}")
+
+                        if cloud_session and "s3_files" in cloud_session:
+                            s3_files = cloud_session["s3_files"]
+                            print(f"[SNAPSHOTS DEBUG] S3 fallback - s3_files keys: {list(s3_files.keys())}")
+
+                            # Look for thinking process in S3 files
+                            thinking_process_files = s3_files.get("thinking_process")
+                            print(f"[SNAPSHOTS DEBUG] S3 fallback - thinking_process files: {thinking_process_files}")
+
+                            if thinking_process_files:
+                                # Handle both dict (single file) and list (multiple files)
+                                files_to_check = []
+                                if isinstance(thinking_process_files, dict):
+                                    files_to_check = [thinking_process_files]
+                                elif isinstance(thinking_process_files, list):
+                                    files_to_check = thinking_process_files
+
+                                # Try first available file
+                                for file_info in files_to_check:
+                                    if isinstance(file_info, dict) and "s3_key" in file_info:
+                                        print(f"[SNAPSHOTS DEBUG] S3 fallback - Downloading from S3 key: {file_info['s3_key']}")
+                                        try:
+                                            content = cloud_storage_manager.download_file_content(file_info["s3_key"])
+                                            if content:
+                                                thinking_process_text = content.decode('utf-8')
+                                                print(f"[SNAPSHOTS DEBUG] S3 fallback - Downloaded {len(thinking_process_text)} characters from S3")
+                                                break
+                                        except Exception as e:
+                                            print(f"[SNAPSHOTS DEBUG] S3 fallback - Error downloading: {e}")
+                        else:
+                            print(f"[SNAPSHOTS DEBUG] S3 fallback - No s3_files in cloud session")
+                    except Exception as e:
+                        print(f"[SNAPSHOTS DEBUG] S3 fallback error: {e}")
+                        import traceback
+                        traceback.print_exc()
+
                 if thinking_process_file:
                     try:
                         # Handle both string paths (local) and dict (cloud metadata or enhanced metadata)
