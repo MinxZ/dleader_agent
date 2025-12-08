@@ -1210,60 +1210,156 @@ Each library is listed with its description to help you understand its functiona
         def generate(state: AgentState) -> AgentState:
             messages = [SystemMessage(content=self.system_prompt)] + state["messages"]
 
-            # Debug: Check system prompt
-            print(f"\n=== SYSTEM PROMPT DEBUG ===")
-            print(f"System prompt length: {len(self.system_prompt)}")
-            print(f"System prompt first 1000 chars:\n{self.system_prompt[:1000]}")
-            print(f"=== END SYSTEM PROMPT DEBUG ===\n")
+            # DEBUG_LLM_CALLS: Set to True to enable detailed LLM debugging
+            DEBUG_LLM_CALLS = False
+            # RECORD_LLM_CALLS: Set to True to record LLM inputs/outputs to /tmp (separate from verbose debug)
+            RECORD_LLM_CALLS = False
 
-            # Debug: Check all messages before LLM call
-            print(f"\n=== GENERATE MESSAGES DEBUG ===")
-            print(f"Total messages: {len(messages)}")
-            print(f"LLM type: {type(self.llm)}")
-            print(f"LLM model: {getattr(self.llm, 'model', 'unknown')}")
-            for i, msg in enumerate(messages):
-                content = msg.content if hasattr(msg, 'content') else str(msg)
-                # Check if content is a list (multimodal) vs string
-                print(f"  [{i}] {type(msg).__name__}: content_type={type(content).__name__}")
-                if isinstance(content, list):
-                    print(f"       Content is LIST with {len(content)} items:")
-                    for j, item in enumerate(content):
-                        print(f"         [{j}] {type(item).__name__}: {repr(item)[:200]}")
-                else:
-                    content_len = len(content) if content else 0
-                    is_empty = not content or len(str(content).strip()) == 0
-                    print(f"       length={content_len}, empty={is_empty}")
-                    if is_empty:
-                        print(f"       EMPTY MESSAGE DETECTED!")
-                        print(f"       Raw content: {repr(content)}")
-            print(f"=== END GENERATE DEBUG ===\n")
-
-            # Direct test call before the real invoke
-            print("=== DIRECT TEST BEFORE INVOKE ===")
+            # Warmup call to initialize LLM connection (helps avoid refusal issues)
             try:
-                test_msgs = [HumanMessage(content="Say OK")]
-                test_resp = self.llm.invoke(test_msgs)
-                print(f"Direct test response: {repr(test_resp.content)}")
-            except Exception as e:
-                print(f"Direct test failed: {e}")
-            print("=== END DIRECT TEST ===\n")
+                warmup_msgs = [HumanMessage(content="Say OK")]
+                self.llm.invoke(warmup_msgs)
+            except Exception:
+                pass  # Ignore warmup errors
+
+            if DEBUG_LLM_CALLS:
+                # Debug: Check system prompt
+                print(f"\n=== SYSTEM PROMPT DEBUG ===")
+                print(f"System prompt length: {len(self.system_prompt)}")
+                print(f"System prompt first 1000 chars:\n{self.system_prompt[:1000]}")
+                print(f"=== END SYSTEM PROMPT DEBUG ===\n")
+
+                # Debug: Check all messages before LLM call
+                print(f"\n=== GENERATE MESSAGES DEBUG ===")
+                print(f"Total messages: {len(messages)}")
+                print(f"LLM type: {type(self.llm)}")
+                print(f"LLM model: {getattr(self.llm, 'model', 'unknown')}")
+                for i, msg in enumerate(messages):
+                    content = msg.content if hasattr(msg, 'content') else str(msg)
+                    print(f"  [{i}] {type(msg).__name__}: content_type={type(content).__name__}")
+                    if isinstance(content, list):
+                        print(f"       Content is LIST with {len(content)} items:")
+                        for j, item in enumerate(content):
+                            print(f"         [{j}] {type(item).__name__}: {repr(item)[:200]}")
+                    else:
+                        content_len = len(content) if content else 0
+                        is_empty = not content or len(str(content).strip()) == 0
+                        print(f"       length={content_len}, empty={is_empty}")
+                        if is_empty:
+                            print(f"       EMPTY MESSAGE DETECTED!")
+                            print(f"       Raw content: {repr(content)}")
+                print(f"=== END GENERATE DEBUG ===\n")
+
+                # Direct test call before the real invoke
+                print("=== DIRECT TEST BEFORE INVOKE ===")
+                try:
+                    test_msgs = [HumanMessage(content="Say OK")]
+                    test_resp = self.llm.invoke(test_msgs)
+                    print(f"Direct test response: {repr(test_resp.content)}")
+                except Exception as e:
+                    print(f"Direct test failed: {e}")
+                print("=== END DIRECT TEST ===\n")
+
+                # Record LLM call to JSON for debugging
+                import json
+                import time
+                call_id = int(time.time() * 1000)
+                call_record = {
+                    "call_id": call_id,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "model": getattr(self.llm, 'model', 'unknown'),
+                    "messages": []
+                }
+                for msg in messages:
+                    msg_record = {
+                        "role": type(msg).__name__,
+                        "content": msg.content if hasattr(msg, 'content') else str(msg),
+                        "content_type": type(msg.content).__name__ if hasattr(msg, 'content') else "unknown"
+                    }
+                    call_record["messages"].append(msg_record)
+
+                # Save input before call
+                input_file = f"/tmp/llm_call_{call_id}_input.json"
+                with open(input_file, 'w') as f:
+                    json.dump(call_record, f, indent=2, ensure_ascii=False)
+                print(f"\n=== LLM CALL RECORDED: {input_file} ===")
+
+            # Record input to file (without verbose debug) if RECORD_LLM_CALLS is enabled
+            if RECORD_LLM_CALLS and not DEBUG_LLM_CALLS:
+                import json
+                import time
+                call_id = int(time.time() * 1000)
+                call_record = {
+                    "call_id": call_id,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "model": getattr(self.llm, 'model', 'unknown'),
+                    "messages": []
+                }
+                for msg in messages:
+                    msg_record = {
+                        "role": type(msg).__name__,
+                        "content": msg.content if hasattr(msg, 'content') else str(msg),
+                        "content_type": type(msg.content).__name__ if hasattr(msg, 'content') else "unknown"
+                    }
+                    call_record["messages"].append(msg_record)
+                input_file = f"/tmp/llm_call_{call_id}_input.json"
+                with open(input_file, 'w') as f:
+                    json.dump(call_record, f, indent=2, ensure_ascii=False)
 
             response = self.llm.invoke(messages)
 
             # Parse the response - handle both string and list content
             raw_content = response.content
 
-            # Debug: print full response info
-            print(f"\n=== LLM RESPONSE DEBUG ===")
-            print(f"Type of content: {type(raw_content)}")
-            print(f"Raw content: {repr(raw_content)[:500]}")
-            if hasattr(response, 'response_metadata'):
-                metadata = response.response_metadata
-                print(f"Stop reason: {metadata.get('stop_reason', 'N/A')}")
-                print(f"Stop sequence: {metadata.get('stop_sequence', 'N/A')}")
-            if hasattr(response, 'usage_metadata'):
-                print(f"Usage: {response.usage_metadata}")
-            print(f"=== END DEBUG ===\n")
+            # Record output to file (without verbose debug) if RECORD_LLM_CALLS is enabled
+            if RECORD_LLM_CALLS and not DEBUG_LLM_CALLS:
+                output_record = {
+                    "call_id": call_id,
+                    "content": raw_content if isinstance(raw_content, str) else repr(raw_content),
+                    "content_type": type(raw_content).__name__,
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": None
+                }
+                if hasattr(response, 'response_metadata'):
+                    metadata = response.response_metadata
+                    output_record["stop_reason"] = metadata.get('stop_reason')
+                    output_record["stop_sequence"] = metadata.get('stop_sequence')
+                if hasattr(response, 'usage_metadata'):
+                    output_record["usage"] = str(response.usage_metadata)
+                output_file = f"/tmp/llm_call_{call_id}_output.json"
+                with open(output_file, 'w') as f:
+                    json.dump(output_record, f, indent=2, ensure_ascii=False)
+
+            if DEBUG_LLM_CALLS:
+                # Record output
+                output_record = {
+                    "call_id": call_id,
+                    "content": raw_content if isinstance(raw_content, str) else repr(raw_content),
+                    "content_type": type(raw_content).__name__,
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": None
+                }
+                if hasattr(response, 'response_metadata'):
+                    metadata = response.response_metadata
+                    output_record["stop_reason"] = metadata.get('stop_reason')
+                    output_record["stop_sequence"] = metadata.get('stop_sequence')
+                if hasattr(response, 'usage_metadata'):
+                    output_record["usage"] = str(response.usage_metadata)
+
+                output_file = f"/tmp/llm_call_{call_id}_output.json"
+                with open(output_file, 'w') as f:
+                    json.dump(output_record, f, indent=2, ensure_ascii=False)
+                print(f"=== LLM OUTPUT RECORDED: {output_file} ===")
+
+                # Debug: print full response info
+                print(f"\n=== LLM RESPONSE DEBUG ===")
+                print(f"Type of content: {type(raw_content)}")
+                print(f"Raw content: {repr(raw_content)[:500]}")
+                print(f"Stop reason: {output_record['stop_reason']}")
+                print(f"Stop sequence: {output_record['stop_sequence']}")
+                print(f"=== END DEBUG ===\n")
 
             # Handle content that might be a list of content blocks (e.g., from Claude API)
             if isinstance(raw_content, list):
@@ -1283,11 +1379,7 @@ Each library is listed with its description to help you understand its functiona
             # Handle empty response - this indicates an API issue
             # End immediately rather than looping
             if not msg or not msg.strip():
-                print("ERROR: LLM returned empty response! Ending task.")
                 msg = "<solution>ERROR: The LLM returned an empty response. This may be due to an API configuration issue with stop_sequences or message content. Please try simplifying your query or contact support.</solution>"
-
-            # Debug: print parsed message
-            print(f"\n=== PARSED MESSAGE (first 1500 chars) ===\n{msg[:1500]}\n=== END PARSED ===\n")
 
             # Check for incomplete tags and fix them
             if "<execute>" in msg and "</execute>" not in msg:
@@ -1311,7 +1403,7 @@ Each library is listed with its description to help you understand its functiona
             elif think_match:
                 state["next_step"] = "generate"
             else:
-                print("parsing error...")
+                # Parsing error - no valid tags found
                 # Check if we already added an error message to avoid infinite loops
                 # Look for HumanMessage with error correction request (not AIMessage)
                 error_count = sum(
@@ -1320,7 +1412,6 @@ Each library is listed with its description to help you understand its functiona
 
                 if error_count >= 2:
                     # If we've already tried to correct the model twice, just end the conversation
-                    print("Detected repeated parsing errors, ending conversation")
                     state["next_step"] = "end"
                     # Add a final message explaining the termination
                     state["messages"].append(
@@ -1575,12 +1666,6 @@ Each library is listed with its description to help you understand its functiona
             prompt: The user's query
 
         """
-        print(f"\n=== AGENT GO() DEBUG ===")
-        print(f"Prompt type: {type(prompt)}")
-        print(f"Prompt length: {len(prompt) if prompt else 0}")
-        print(f"Prompt first 300 chars: {prompt[:300] if prompt else 'EMPTY'}")
-        print(f"=== END AGENT GO() DEBUG ===\n")
-
         self.critic_count = 0
         self.user_task = prompt
 

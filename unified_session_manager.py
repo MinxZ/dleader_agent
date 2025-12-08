@@ -538,34 +538,22 @@ class UnifiedSessionManager:
 
                 print(f"[PERF] Count query: {query}")
 
-                # For initial page load (offset=0), skip expensive count
-                # We'll estimate the total after fetching the data
-                if offset == 0:
-                    # For first page, just indicate "has more" without exact count
-                    # This is much faster and sufficient for most UX
-                    total_mongodb_sessions = -1  # Will calculate after fetch
-                else:
-                    # For pagination (offset > 0), we need the exact count
-                    # Use index hint to speed up count
-                    try:
-                        total_mongodb_sessions = mongodb_collection.count_documents(
-                            query,
-                            hint="user_id_last_updated"  # Force use of our index
-                        )
-                    except:
-                        # If hint fails, fall back to regular count
-                        total_mongodb_sessions = mongodb_collection.count_documents(query)
+                # Always do the count to return accurate total
+                try:
+                    total_mongodb_sessions = mongodb_collection.count_documents(
+                        query,
+                        hint="user_id_last_updated"  # Force use of our index
+                    )
+                except:
+                    # If hint fails, fall back to regular count
+                    total_mongodb_sessions = mongodb_collection.count_documents(query)
             except Exception as e:
                 print(f"Warning: Could not count MongoDB sessions: {e}")
 
         print(f"[PERF] Step 3 (count MongoDB): {(time.time() - step3_start) * 1000:.2f} ms - Total: {total_mongodb_sessions}")
 
         # 4. Calculate total and determine how many MongoDB sessions to fetch
-        if total_mongodb_sessions == -1:
-            # We skipped count for performance - will estimate after fetch
-            total_count = -1  # Unknown for now
-        else:
-            total_count = len(all_sessions) + total_mongodb_sessions
+        total_count = len(all_sessions) + total_mongodb_sessions
 
         # Sort in-memory sessions by last_updated
         all_sessions.sort(key=lambda x: x.get('last_updated', x.get('created_at', '')), reverse=True)
@@ -648,19 +636,6 @@ class UnifiedSessionManager:
                 print(f"Warning: Could not fetch MongoDB multi-turn sessions: {e}")
 
         print(f"[PERF] Step 5 (fetch MongoDB): {(time.time() - step5_start) * 1000:.2f} ms")
-
-        # Calculate total if we skipped the count
-        if total_count == -1:
-            # We skipped count for performance
-            # Estimate based on fetch results
-            fetched_count = len(paginated_sessions)
-            if offset == 0 and fetched_count < limit:
-                # First page and got less than limit = this is the exact total
-                total_count = in_memory_count + fetched_count
-            else:
-                # Either not first page or got full limit = unknown total, but at least offset + fetched
-                total_count = in_memory_count + offset + fetched_count
-
         print(f"[PERF] TOTAL TIME: {(time.time() - start_time) * 1000:.2f} ms")
 
         return {

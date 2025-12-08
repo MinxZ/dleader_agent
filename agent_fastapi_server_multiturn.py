@@ -2683,18 +2683,21 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
         from agent_fastapi_server_multiturn import create_agent
         agent = create_agent()
 
-        # Debug: Check LLM initialization
-        print(f"\n=== AGENT LLM DEBUG ===")
-        print(f"Agent LLM type: {type(agent.llm)}")
-        print(f"Agent LLM model: {getattr(agent.llm, 'model', 'unknown')}")
-        print(f"Agent LLM max_tokens: {getattr(agent.llm, 'max_tokens', 'unknown')}")
-        print(f"Agent LLM stop_sequences: {getattr(agent.llm, 'stop_sequences', 'unknown')}")
-        # Test LLM directly
-        from langchain_core.messages import HumanMessage
-        test_response = agent.llm.invoke([HumanMessage(content="Say hello in one word")])
-        print(f"Test response type: {type(test_response.content)}")
-        print(f"Test response content: {repr(test_response.content[:100]) if test_response.content else 'EMPTY'}")
-        print(f"=== END AGENT LLM DEBUG ===\n")
+        # Debug: Check LLM initialization (disabled by default)
+        # Set DEBUG_AGENT_LLM = True to enable
+        DEBUG_AGENT_LLM = False
+        if DEBUG_AGENT_LLM:
+            print(f"\n=== AGENT LLM DEBUG ===")
+            print(f"Agent LLM type: {type(agent.llm)}")
+            print(f"Agent LLM model: {getattr(agent.llm, 'model', 'unknown')}")
+            print(f"Agent LLM max_tokens: {getattr(agent.llm, 'max_tokens', 'unknown')}")
+            print(f"Agent LLM stop_sequences: {getattr(agent.llm, 'stop_sequences', 'unknown')}")
+            # Test LLM directly
+            from langchain_core.messages import HumanMessage
+            test_response = agent.llm.invoke([HumanMessage(content="Say hello in one word")])
+            print(f"Test response type: {type(test_response.content)}")
+            print(f"Test response content: {repr(test_response.content[:100]) if test_response.content else 'EMPTY'}")
+            print(f"=== END AGENT LLM DEBUG ===\n")
 
         # Send status
         result_queue.put({
@@ -2782,13 +2785,16 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                 file_info = "\n\nAvailable files in your working directory:\n" + "\n".join([f"- {f}" for f in files_in_session])
                 enhanced_message = enhanced_message + file_info
 
-        # Debug: Check enhanced_message before sending to agent
-        print(f"\n=== ENHANCED MESSAGE DEBUG ===")
-        print(f"Type: {type(enhanced_message)}")
-        print(f"Length: {len(enhanced_message) if enhanced_message else 0}")
-        print(f"Is empty: {not enhanced_message or len(enhanced_message.strip()) == 0}")
-        print(f"First 500 chars: {enhanced_message[:500] if enhanced_message else 'EMPTY'}")
-        print(f"=== END ENHANCED MESSAGE DEBUG ===\n")
+        # Debug: Check enhanced_message before sending to agent (disabled by default)
+        # Set DEBUG_ENHANCED_MESSAGE = True to enable
+        DEBUG_ENHANCED_MESSAGE = False
+        if DEBUG_ENHANCED_MESSAGE:
+            print(f"\n=== ENHANCED MESSAGE DEBUG ===")
+            print(f"Type: {type(enhanced_message)}")
+            print(f"Length: {len(enhanced_message) if enhanced_message else 0}")
+            print(f"Is empty: {not enhanced_message or len(enhanced_message.strip()) == 0}")
+            print(f"First 500 chars: {enhanced_message[:500] if enhanced_message else 'EMPTY'}")
+            print(f"=== END ENHANCED MESSAGE DEBUG ===\n")
 
         # Run agent (this blocks until complete)
         _, result = agent.go(enhanced_message)
@@ -3079,11 +3085,12 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
         cleaned_content = re.sub(r'## 📥 Downloads.*?(?=##|\Z)', '', cleaned_content, flags=re.DOTALL)
         cleaned_content = re.sub(r'## Downloads.*?(?=##|\Z)', '', cleaned_content, flags=re.DOTALL)
 
-        # Remove emojis that may not render well
+        # Remove emojis that may not render well in PDF
         cleaned_content = re.sub(r'[\U0001F300-\U0001F9FF\U00002600-\U000026FF\U00002700-\U000027BF]', '', cleaned_content)
 
-        # Replace special characters that may not be in all fonts
-        cleaned_content = cleaned_content.replace('≥', '>=').replace('≤', '<=').replace('±', '+/-')
+        # Note: Unicode characters like arrows (→←↑↓⇒), Greek letters (αβγδ),
+        # math symbols (≤≥±×÷∞), subscripts (₀₁₂) are preserved and will render
+        # correctly with DejaVu Sans font via xelatex
 
         # Fix markdown list formatting for proper PDF rendering
         # Ensure blank line before bullet lists (required for pandoc to render as proper list)
@@ -3097,10 +3104,33 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
         # Add images section at the end if there are images
         if image_files:
             cleaned_content += "\n\n## Figures\n\n"
-            for img_path in image_files:
+
+            # Sort images by their numeric index if present (e.g., fig1, fig2, fig3)
+            def extract_fig_number(path):
+                filename = os.path.basename(path).lower()
+                # Match patterns like fig1, fig_1, figure1, figure_1
+                match = re.search(r'(?:fig(?:ure)?[_\s]?)(\d+)', filename)
+                if match:
+                    return int(match.group(1))
+                return 999  # Non-numbered figures go at the end
+
+            sorted_images = sorted(image_files, key=extract_fig_number)
+
+            for fig_idx, img_path in enumerate(sorted_images, start=1):
                 if os.path.exists(img_path):
                     filename = os.path.basename(img_path)
-                    caption = os.path.splitext(filename)[0].replace('_', ' ').replace('-', ' ')
+                    # Remove file extension and clean up the name
+                    base_name = os.path.splitext(filename)[0]
+                    # Remove fig/figure prefix with number (e.g., "fig1_", "fig_1_", "figure1_")
+                    clean_name = re.sub(r'^fig(?:ure)?[_\s]?\d+[_\s\-]*', '', base_name, flags=re.IGNORECASE)
+                    # Replace underscores and dashes with spaces, title case
+                    clean_name = clean_name.replace('_', ' ').replace('-', ' ').strip()
+                    if clean_name:
+                        clean_name = clean_name.title()
+                    else:
+                        clean_name = base_name.replace('_', ' ').replace('-', ' ').title()
+                    # Create proper figure caption
+                    caption = f"Figure {fig_idx}: {clean_name}"
                     # Use absolute path for images
                     abs_path = os.path.abspath(img_path)
                     cleaned_content += f"![{caption}]({abs_path})\n\n"
@@ -3109,7 +3139,8 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
         header = "---\ntitle: KumiChem Agent Report\n---\n\n"
         final_content = header + cleaned_content
 
-        # Convert markdown to PDF using pypandoc
+        # Convert markdown to PDF using pypandoc with xelatex
+        # Using DejaVu Sans font for excellent Unicode support (arrows, Greek, math symbols)
         pypandoc.convert_text(
             final_content,
             'pdf',
@@ -3120,10 +3151,10 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
                 '-V', 'geometry:margin=1in',
                 '-V', 'fontsize=11pt',
                 '-V', 'documentclass=article',
-                '-V', 'mainfont=Noto Sans',
+                '-V', 'mainfont=DejaVu Sans',  # Good Unicode coverage (arrows, Greek, math)
+                '-V', 'sansfont=DejaVu Sans',
                 '-V', 'monofont=DejaVu Sans Mono',
-                '-V', 'CJKmainfont=Noto Sans CJK SC',
-                '--highlight-style=tango'
+                '--syntax-highlighting=tango'  # Updated from deprecated --highlight-style
             ]
         )
 
@@ -3152,24 +3183,50 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
     """
     try:
         from fpdf import FPDF
+        from fpdf.enums import XPos, YPos
         from PIL import Image
         import re
 
-        # Create PDF with UTF-8 support
+        # Unicode font paths (DejaVu has excellent Unicode coverage)
+        DEJAVU_REGULAR = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+        DEJAVU_BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+        DEJAVU_ITALIC = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf'
+        DEJAVU_MONO = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
+
+        # Check if DejaVu fonts are available
+        use_unicode_font = os.path.exists(DEJAVU_REGULAR)
+
+        # Create PDF with UTF-8/Unicode support
         class UTF8PDF(FPDF):
             def __init__(self):
                 super().__init__()
                 self.set_auto_page_break(auto=True, margin=15)
+                self._use_unicode = use_unicode_font
+
+                # Add Unicode fonts if available
+                if use_unicode_font:
+                    self.add_font('DejaVu', '', DEJAVU_REGULAR)
+                    if os.path.exists(DEJAVU_BOLD):
+                        self.add_font('DejaVu', 'B', DEJAVU_BOLD)
+                    if os.path.exists(DEJAVU_ITALIC):
+                        self.add_font('DejaVu', 'I', DEJAVU_ITALIC)
+                    if os.path.exists(DEJAVU_MONO):
+                        self.add_font('DejaVuMono', '', DEJAVU_MONO)
 
             def header(self):
-                self.set_font('Helvetica', 'B', 10)
+                if self._use_unicode:
+                    self.set_font('DejaVu', 'B', 10)
+                else:
+                    self.set_font('Helvetica', 'B', 10)
                 self.set_text_color(128, 128, 128)
-                self.cell(0, 10, 'KumiChem Agent Report', align='C')
-                self.ln(10)
+                self.cell(0, 10, 'KumiChem Agent Report', align='C', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
             def footer(self):
                 self.set_y(-15)
-                self.set_font('Helvetica', 'I', 8)
+                if self._use_unicode:
+                    self.set_font('DejaVu', 'I', 8)
+                else:
+                    self.set_font('Helvetica', 'I', 8)
                 self.set_text_color(128, 128, 128)
                 self.cell(0, 10, f'Page {self.page_no()}', align='C')
 
@@ -3178,14 +3235,57 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
 
         def clean_text(text):
             replacements = {
-                '\u2018': "'", '\u2019': "'",
-                '\u201c': '"', '\u201d': '"',
-                '\u2013': '-', '\u2014': '--',
+                # Quotes
+                '\u2018': "'", '\u2019': "'",  # Single quotes: ' '
+                '\u201c': '"', '\u201d': '"',  # Double quotes: " "
+                # Dashes
+                '\u2013': '-', '\u2014': '--',  # En-dash, em-dash
+                # Ellipsis
                 '\u2026': '...',
-                '\u00a0': ' ',
-                '\u2022': '*',
-                '\u2713': '[x]',
-                '\u2717': '[ ]',
+                # Spaces
+                '\u00a0': ' ',  # Non-breaking space
+                # Bullets and checkmarks
+                '\u2022': '*',  # Bullet •
+                '\u2713': '[x]', '\u2714': '[x]',  # Checkmarks ✓ ✔
+                '\u2717': '[ ]', '\u2718': '[ ]',  # X marks ✗ ✘
+                # Arrows (comprehensive)
+                '\u2192': '->', '\u2190': '<-',  # → ←
+                '\u2191': '^', '\u2193': 'v',    # ↑ ↓
+                '\u2194': '<->', '\u2195': '^v',  # ↔ ↕
+                '\u21d2': '=>', '\u21d0': '<=',  # ⇒ ⇐
+                '\u21d4': '<=>', '\u21d1': '^^', '\u21d3': 'vv',  # ⇔ ⇑ ⇓
+                '\u2794': '->', '\u2799': '->',  # ➔ ➙
+                '\u279c': '->', '\u27a1': '->',  # ➜ ➡
+                # Math symbols
+                '\u00b0': ' deg',  # Degree symbol °
+                '\u00b1': '+/-',  # Plus-minus ±
+                '\u2264': '<=', '\u2265': '>=',  # ≤ ≥
+                '\u2260': '!=',  # ≠
+                '\u2248': '~=',  # ≈
+                '\u00d7': 'x', '\u00f7': '/',  # × ÷
+                '\u221e': 'inf',  # ∞
+                '\u2211': 'sum', '\u220f': 'prod',  # ∑ ∏
+                '\u221a': 'sqrt',  # √
+                # Greek letters (common in scientific text)
+                '\u03b1': 'alpha', '\u03b2': 'beta', '\u03b3': 'gamma',
+                '\u03b4': 'delta', '\u03b5': 'epsilon', '\u03b6': 'zeta',
+                '\u03b7': 'eta', '\u03b8': 'theta', '\u03b9': 'iota',
+                '\u03ba': 'kappa', '\u03bb': 'lambda', '\u03bc': 'mu',
+                '\u03bd': 'nu', '\u03be': 'xi', '\u03c0': 'pi',
+                '\u03c1': 'rho', '\u03c3': 'sigma', '\u03c4': 'tau',
+                '\u03c5': 'upsilon', '\u03c6': 'phi', '\u03c7': 'chi',
+                '\u03c8': 'psi', '\u03c9': 'omega',
+                # Uppercase Greek
+                '\u0394': 'Delta', '\u03a3': 'Sigma', '\u03a9': 'Omega',
+                # Subscript/superscript numbers (common in chemistry)
+                '\u2080': '0', '\u2081': '1', '\u2082': '2', '\u2083': '3',
+                '\u2084': '4', '\u2085': '5', '\u2086': '6', '\u2087': '7',
+                '\u2088': '8', '\u2089': '9',
+                '\u00b2': '^2', '\u00b3': '^3',  # ² ³
+                # Prime symbols (for feet/minutes or derivatives)
+                '\u2032': "'", '\u2033': "''",  # ′ ″
+                # Other common symbols
+                '\u2122': '(TM)', '\u00ae': '(R)', '\u00a9': '(C)',  # ™ ® ©
             }
             for old, new in replacements.items():
                 text = text.replace(old, new)
@@ -3326,10 +3426,33 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
             pdf.add_page()
             add_heading("Figures", 2)
             pdf.ln(5)
-            for img_path in image_files:
+
+            # Sort images by their numeric index if present (e.g., fig1, fig2, fig3)
+            def extract_fig_number(path):
+                filename = os.path.basename(path).lower()
+                # Match patterns like fig1, fig_1, figure1, figure_1
+                match = re.search(r'(?:fig(?:ure)?[_\s]?)(\d+)', filename)
+                if match:
+                    return int(match.group(1))
+                return 999  # Non-numbered figures go at the end
+
+            sorted_images = sorted(image_files, key=extract_fig_number)
+
+            for fig_idx, img_path in enumerate(sorted_images, start=1):
                 if os.path.exists(img_path):
                     filename = os.path.basename(img_path)
-                    caption = os.path.splitext(filename)[0].replace('_', ' ').replace('-', ' ')
+                    # Remove file extension and clean up the name
+                    base_name = os.path.splitext(filename)[0]
+                    # Remove fig/figure prefix with number (e.g., "fig1_", "fig_1_", "figure1_")
+                    clean_name = re.sub(r'^fig(?:ure)?[_\s]?\d+[_\s\-]*', '', base_name, flags=re.IGNORECASE)
+                    # Replace underscores and dashes with spaces, title case
+                    clean_name = clean_name.replace('_', ' ').replace('-', ' ').strip()
+                    if clean_name:
+                        clean_name = clean_name.title()
+                    else:
+                        clean_name = base_name.replace('_', ' ').replace('-', ' ').title()
+                    # Create proper figure caption
+                    caption = f"Figure {fig_idx}: {clean_name}"
                     add_image(img_path, caption)
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -4325,31 +4448,66 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
         # Start building the images section
         images_section = "\n\n---\n\n## Figures\n\n"
 
-        # Process each image
-        image_count = 0
-        for image_item in images:
+        # Helper function to extract figure number from filename for sorting
+        def extract_fig_number(image_item):
+            if isinstance(image_item, dict):
+                filename = image_item.get("filename", "image").lower()
+            elif isinstance(image_item, str):
+                # For string URLs, try to extract filename from URL
+                filename = image_item.split("/")[-1].split("?")[0].lower()
+            else:
+                return 999
+            # Match patterns like fig1, fig_1, figure1, figure_1
+            match = re.search(r'(?:fig(?:ure)?[_\s]?)(\d+)', filename)
+            if match:
+                return int(match.group(1))
+            return 999  # Non-numbered figures go at the end
+
+        # Sort images by their figure number
+        sorted_images = sorted(images, key=extract_fig_number)
+
+        # Process each image with proper sequential numbering
+        fig_idx = 0
+        for image_item in sorted_images:
             # Handle both dict and string formats
             if isinstance(image_item, dict):
                 filename = image_item.get("filename", "image")
                 url = image_item.get("url") or image_item.get("download_url")
-                s3_key = image_item.get("s3_key")
 
                 if url:
-                    # Use the presigned URL or download_url
-                    image_count += 1
-                    # Extract a cleaner name from filename or s3_key
-                    display_name = filename.replace("_", " ").replace("-", " ").title()
-                    images_section += f"### {display_name}\n\n"
-                    images_section += f"![{display_name}]({url})\n\n"
+                    fig_idx += 1
+                    # Extract base name and clean it
+                    base_name = os.path.splitext(filename)[0]
+                    # Remove figN_ prefix from display name
+                    clean_name = re.sub(r'^fig(?:ure)?[_\s]?\d+[_\s\-]*', '', base_name, flags=re.IGNORECASE)
+                    clean_name = clean_name.replace('_', ' ').replace('-', ' ').strip()
+                    if clean_name:
+                        clean_name = clean_name.title()
+                    else:
+                        # Fallback to cleaned base name if everything was removed
+                        clean_name = base_name.replace('_', ' ').replace('-', ' ').title()
+                    # Use proper "Figure N:" caption format
+                    caption = f"Figure {fig_idx}: {clean_name}"
+                    images_section += f"### {caption}\n\n"
+                    images_section += f"![{caption}]({url})\n\n"
             elif isinstance(image_item, str):
                 # Handle string URL directly
-                image_count += 1
-                display_name = f"Image {image_count}"
-                images_section += f"### {display_name}\n\n"
-                images_section += f"![{display_name}]({image_item})\n\n"
+                fig_idx += 1
+                # Try to extract filename from URL
+                url_filename = image_item.split("/")[-1].split("?")[0]
+                base_name = os.path.splitext(url_filename)[0]
+                clean_name = re.sub(r'^fig(?:ure)?[_\s]?\d+[_\s\-]*', '', base_name, flags=re.IGNORECASE)
+                clean_name = clean_name.replace('_', ' ').replace('-', ' ').strip()
+                if clean_name:
+                    clean_name = clean_name.title()
+                else:
+                    clean_name = f"Image {fig_idx}"
+                caption = f"Figure {fig_idx}: {clean_name}"
+                images_section += f"### {caption}\n\n"
+                images_section += f"![{caption}]({image_item})\n\n"
 
         # Only append the section if we found images
-        if image_count > 0:
+        if fig_idx > 0:
             added_content += images_section
 
     # Add download links section
