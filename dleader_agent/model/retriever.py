@@ -74,12 +74,6 @@ IMPORTANT GUIDELINES:
         if hasattr(llm, "invoke"):
             # For LangChain-style LLMs
             messages = [HumanMessage(content=prompt)]
-            print(f"\n=== RETRIEVER LLM CALL DEBUG ===")
-            print(f"Number of messages: {len(messages)}")
-            print(f"Message 0 type: {type(messages[0])}")
-            print(f"Message 0 content length: {len(messages[0].content) if messages[0].content else 0}")
-            print(f"Message 0 content preview: {messages[0].content[:200] if messages[0].content else 'EMPTY'}")
-            print(f"=== END RETRIEVER DEBUG ===\n")
             response = llm.invoke(messages)
             response_content = response.content
             # Handle case where content is a list (e.g., Anthropic Claude returns list of content blocks)
