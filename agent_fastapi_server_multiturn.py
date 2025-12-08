@@ -2103,40 +2103,46 @@ Reasoning: {user_request.template_reasoning}
                 # Add JSON file path to the result
                 user_request.json_result["files"]["result_json"] = json_path
 
-                # Generate PDF report with images (inside the same try block where variables are defined)
-                pdf_path = None
-                try:
+            except Exception as e:
+                print(f"Error saving session files: {e}")
+
+            # Generate PDF report with images before creating ZIP
+            pdf_path = None
+            try:
+                # Check if we have the required variables for PDF generation
+                report_content_for_pdf = locals().get('final_report_content')
+                images_for_pdf = locals().get('image_files', [])
+
+                if report_content_for_pdf and session_path:
                     user_request.progress_queue.put({
                         "type": "status",
                         "message": "Generating PDF report..."
                     })
-<<<<<<< HEAD
-                    pdf_path = generate_report_pdf(session_path, final_report_content, image_files)
-=======
                     # Get turn number for multi-turn sessions
                     turn_num = user_request.turn_number if hasattr(user_request, 'turn_number') else None
                     pdf_path = generate_report_pdf(session_path, report_content_for_pdf, images_for_pdf, turn_number=turn_num)
->>>>>>> 5cf163e7f7d8c22b02fae1c4401db5b8626edd14
                     if pdf_path:
                         print(f"Generated PDF report: {pdf_path}")
                         # Add PDF path to json_result files
-                        user_request.json_result["files"]["report_pdf"] = pdf_path
-                        # Re-save JSON with updated PDF path
-                        with open(json_path, 'w', encoding='utf-8') as f:
-                            json.dump(user_request.json_result, f, indent=2, ensure_ascii=False)
+                        if hasattr(user_request, 'json_result') and user_request.json_result:
+                            user_request.json_result["files"]["report_pdf"] = pdf_path
+                            # Re-save JSON with updated PDF path
+                            if "result_json" in user_request.json_result["files"]:
+                                json_path_for_update = user_request.json_result["files"]["result_json"]
+                                with open(json_path_for_update, 'w', encoding='utf-8') as f:
+                                    json.dump(user_request.json_result, f, indent=2, ensure_ascii=False)
                         user_request.progress_queue.put({
                             "type": "status",
                             "message": f"PDF report generated: {os.path.basename(pdf_path)}"
                         })
                     else:
-                        print("PDF generation returned None - check generate_report_pdf function")
-                except Exception as pdf_error:
-                    print(f"Error generating PDF report: {pdf_error}")
-                    import traceback
-                    traceback.print_exc()
-
+                        print("PDF generation returned None")
+                else:
+                    print(f"Skipping PDF generation: report_content={bool(report_content_for_pdf)}, session_path={bool(session_path)}")
             except Exception as e:
-                print(f"Error saving session files: {e}")
+                print(f"Error generating PDF report: {e}")
+                import traceback
+                traceback.print_exc()
 
             # Create ZIP files - both session-wide and per-turn
             zip_file_path = None
@@ -5466,17 +5472,22 @@ async def get_session_snapshots(
         print(f"[SNAPSHOTS DEBUG] Active session - extracted {len(snapshots_list)} snapshots from progress_updates")
         print(f"[SNAPSHOTS DEBUG] Latest thinking content length: {len(latest_thinking_content) if latest_thinking_content else 0}")
 
-        result = {
-            "session_id": session_id,
-            "turn_number": turn_number,
-            "current_turn": current_turn,
-            "total_turns": total_turns,
-            "snapshot_count": len(snapshots_list),
-            "snapshots": snapshots_list,
-            "thinking_process": filter_execute_blocks(latest_thinking_content, include_execute),
-            "storage_location": storage_location
-        }
-        return result
+        # RACE CONDITION FIX: If storage_location is "active" but we have no thinking content,
+        # the session might be in transition (being finalized). Instead of returning empty content,
+        # fall through to the turn_specific/cloud logic to try retrieving from there.
+        if latest_thinking_content:
+            result = {
+                "session_id": session_id,
+                "turn_number": turn_number,
+                "current_turn": current_turn,
+                "total_turns": total_turns,
+                "snapshot_count": len(snapshots_list),
+                "snapshots": snapshots_list,
+                "thinking_process": filter_execute_blocks(latest_thinking_content, include_execute),
+                "storage_location": storage_location
+            }
+            return result
+        # else: fall through to turn_specific/cloud logic below
 
     # For multi-turn sessions with turn structure available, use turn-specific snapshot logic
     if turn_number is not None and (current_turn is not None or total_turns is not None):
