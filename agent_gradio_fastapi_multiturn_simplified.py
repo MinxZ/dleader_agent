@@ -855,11 +855,11 @@ async def load_thinking_process(session_id: str, server_url: str, user_id: str):
 Session: {session_id[:8]}...
 Turn: {current_turn}/{total_turns}
 
-{'='*80}
+{'='*40}
 
 {thinking_process_text}
 
-{'='*80}
+{'='*40}
 
 """
 

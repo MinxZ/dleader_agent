@@ -985,6 +985,7 @@ After that, you have two options:
 You have many chances to interact with the environment to receive the observation. So you can decompose your code into multiple steps.
 Don't overcomplicate the code. Keep it simple and easy to understand.
 When writing the code, please print out the steps and results in a clear and concise manner, like a research log.
+When printing step headers or separators, keep them short (max 40 "=" characters). For example: "========== Step 1: Title =========="
 When calling the existing python functions in the function dictionary, YOU MUST SAVE THE OUTPUT and PRINT OUT the result.
 For example, result = understand_scRNA(XXX) print(result)
 Otherwise the system will not be able to know what has been done.
@@ -1024,7 +1025,7 @@ You may or may not receive feedbacks from human. If so, address the feedbacks by
             prompt_modifier += """
 
 PRIORITY CUSTOM RESOURCES
-===============================
+========================================
 IMPORTANT: The following custom resources have been specifically added for your use.
     PRIORITIZE using these resources as they are directly relevant to your task.
     Always consider these FIRST and in the meantime using default resources.
@@ -1052,7 +1053,7 @@ CUSTOM DATA (PRIORITIZE THESE DATASETS):
 
 """
 
-            prompt_modifier += """===============================
+            prompt_modifier += """========================================
 """
 
         # Add environment resources

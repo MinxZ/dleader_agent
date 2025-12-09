@@ -214,9 +214,9 @@ class QueueManager:
         if not user_request.template_matched:
             return thinking_content
 
-        template_header = f"""{'='*80}
+        template_header = f"""{'='*40}
 WORKFLOW TEMPLATE MATCHED
-{'='*80}
+{'='*40}
 
 Template: {user_request.template_title}
 Confidence: {user_request.template_confidence}
@@ -225,7 +225,7 @@ Reasoning: {user_request.template_reasoning}
         if user_request.template_modification:
             template_header += f"Modification Applied: {user_request.template_modification}\n"
 
-        template_header += f"\n{'='*80}\n\n"
+        template_header += f"\n{'='*40}\n\n"
         return template_header + thinking_content
 
     def create_json_snapshot(self, user_request: UserRequest, accumulated_thinking: str = "", session_path: str = "") -> dict:

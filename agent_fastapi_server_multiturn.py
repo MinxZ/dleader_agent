@@ -556,9 +556,9 @@ class QueueManager:
         if not user_request.template_matched:
             return thinking_content
 
-        template_header = f"""{'='*80}
+        template_header = f"""{'='*40}
 WORKFLOW TEMPLATE MATCHED
-{'='*80}
+{'='*40}
 
 Template: {user_request.template_title}
 Confidence: {user_request.template_confidence}
@@ -567,7 +567,7 @@ Reasoning: {user_request.template_reasoning}
         if user_request.template_modification:
             template_header += f"Modification Applied: {user_request.template_modification}\n"
 
-        template_header += f"\n{'='*80}\n\n"
+        template_header += f"\n{'='*40}\n\n"
         return template_header + thinking_content
 
     def create_json_snapshot(self, user_request: UserRequest, accumulated_thinking: str = "", session_path: str = "") -> dict:
@@ -7087,11 +7087,109 @@ from trash_api import router as trash_router
 
 app.include_router(trash_router)
 
+async def _perform_hard_delete(session_id: str, user_id: str):
+    """
+    Background task to perform actual hard deletion of session data.
+    This runs asynchronously after returning response to client.
+    """
+    try:
+        print(f"[HARD DELETE] Starting background deletion for session: {session_id}")
+
+        # 1. Delete all local files and folders
+        # Delete from session_storage
+        session_file = f"session_storage/{session_id}.json"
+        if os.path.exists(session_file):
+            os.remove(session_file)
+            print(f"[HARD DELETE] Deleted local file: {session_file}")
+
+        # Delete from multiturn_sessions
+        multiturn_file = f"multiturn_sessions/{session_id}.json"
+        if os.path.exists(multiturn_file):
+            os.remove(multiturn_file)
+            print(f"[HARD DELETE] Deleted local file: {multiturn_file}")
+
+        # Remove from in-memory multiturn sessions
+        if session_id in queue_manager.multiturn_sessions:
+            del queue_manager.multiturn_sessions[session_id]
+            print(f"[HARD DELETE] Removed from in-memory multiturn sessions")
+
+        # Remove from active sessions if present
+        if session_id in queue_manager.active_sessions:
+            del queue_manager.active_sessions[session_id]
+            print(f"[HARD DELETE] Removed from active sessions")
+
+        # Delete any turn-specific files
+        import glob
+        turn_files = glob.glob(f"session_storage/{session_id}_turn_*.json")
+        for turn_file in turn_files:
+            if os.path.exists(turn_file):
+                os.remove(turn_file)
+                print(f"[HARD DELETE] Deleted turn file: {turn_file}")
+
+        # Delete zip files
+        zip_files = glob.glob(f"chat_zips/*{session_id[:8]}*.zip")
+        for zip_file in zip_files:
+            if os.path.exists(zip_file):
+                os.remove(zip_file)
+                print(f"[HARD DELETE] Deleted zip file: {zip_file}")
+
+        # Delete session folders
+        session_folders = glob.glob(f"chat_sessions/*{session_id[:8]}*")
+        for folder in session_folders:
+            if os.path.exists(folder):
+                import shutil
+                shutil.rmtree(folder)
+                print(f"[HARD DELETE] Deleted folder: {folder}")
+
+        # 2-4. Delete from S3, MongoDB, and community_sessions in parallel
+        async def delete_from_s3():
+            try:
+                s3_deleted = await cloud_storage_manager.delete_session_from_s3(session_id)
+                print(f"[HARD DELETE] S3 deletion completed: {len(s3_deleted)} files")
+                return ("s3", s3_deleted, None)
+            except Exception as e:
+                print(f"[HARD DELETE] S3 deletion error (continuing): {e}")
+                return ("s3", [], str(e))
+
+        async def delete_from_mongodb():
+            try:
+                mongo_deleted = await cloud_storage_manager.delete_session_from_mongodb(session_id)
+                print(f"[HARD DELETE] MongoDB deletion completed: {mongo_deleted}")
+                return ("mongodb", mongo_deleted, None)
+            except Exception as e:
+                print(f"[HARD DELETE] MongoDB deletion error (continuing): {e}")
+                return ("mongodb", [], str(e))
+
+        async def delete_from_community():
+            try:
+                await cloud_storage_manager.remove_shared_session(session_id)
+                print(f"[HARD DELETE] Community session removal completed")
+                return ("community", ["community_sessions"], None)
+            except Exception as e:
+                print(f"[HARD DELETE] Community session deletion error (continuing): {e}")
+                return ("community", [], str(e))
+
+        # Run all cloud deletions in parallel
+        await asyncio.gather(
+            delete_from_s3(),
+            delete_from_mongodb(),
+            delete_from_community(),
+            return_exceptions=True
+        )
+
+        print(f"[HARD DELETE] Background deletion completed for session: {session_id}")
+
+    except Exception as e:
+        print(f"[HARD DELETE] Error in background deletion for {session_id}: {e}")
+
+
 @app.delete("/hard-delete/{session_id}")
 async def hard_delete_session(session_id: str, user_id: str, confirm: bool = False):
     """
     Hard delete - Immediately and permanently delete a session without moving to trash
     This action cannot be undone!
+
+    Returns immediately and performs actual deletion in the background.
     """
     # Validate user_id
     if not user_id or user_id.strip() == "":
@@ -7122,109 +7220,14 @@ async def hard_delete_session(session_id: str, user_id: str, confirm: bool = Fal
         if session_user_id and session_user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
-        deleted_items = {
-            "local_files": [],
-            "s3_files": [],
-            "mongodb_docs": []
-        }
+        # Start background deletion task (non-blocking)
+        asyncio.create_task(_perform_hard_delete(session_id, user_id))
 
-        # 1. Delete all local files and folders
-        # Delete from session_storage
-        session_file = f"session_storage/{session_id}.json"
-        if os.path.exists(session_file):
-            os.remove(session_file)
-            deleted_items["local_files"].append(session_file)
-
-        # Delete from multiturn_sessions
-        multiturn_file = f"multiturn_sessions/{session_id}.json"
-        if os.path.exists(multiturn_file):
-            os.remove(multiturn_file)
-            deleted_items["local_files"].append(multiturn_file)
-
-        # Remove from in-memory multiturn sessions
-        if session_id in queue_manager.multiturn_sessions:
-            del queue_manager.multiturn_sessions[session_id]
-            deleted_items["local_files"].append(f"In-memory multiturn session")
-
-        # Remove from active sessions if present
-        if session_id in queue_manager.active_sessions:
-            del queue_manager.active_sessions[session_id]
-            deleted_items["local_files"].append(f"Active session")
-
-        # Delete any turn-specific files
-        import glob
-        turn_files = glob.glob(f"session_storage/{session_id}_turn_*.json")
-        for turn_file in turn_files:
-            if os.path.exists(turn_file):
-                os.remove(turn_file)
-                deleted_items["local_files"].append(turn_file)
-
-        # Delete zip files
-        zip_files = glob.glob(f"chat_zips/*{session_id[:8]}*.zip")
-        for zip_file in zip_files:
-            if os.path.exists(zip_file):
-                os.remove(zip_file)
-                deleted_items["local_files"].append(zip_file)
-
-        # Delete session folders
-        session_folders = glob.glob(f"chat_sessions/*{session_id[:8]}*")
-        for folder in session_folders:
-            if os.path.exists(folder):
-                import shutil
-                shutil.rmtree(folder)
-                deleted_items["local_files"].append(folder)
-
-        # 2-4. Delete from S3, MongoDB, and community_sessions in parallel
-        async def delete_from_s3():
-            try:
-                s3_deleted = await cloud_storage_manager.delete_session_from_s3(session_id)
-                return ("s3", s3_deleted, None)
-            except Exception as e:
-                print(f"S3 deletion error (continuing): {e}")
-                return ("s3", [], str(e))
-
-        async def delete_from_mongodb():
-            try:
-                mongo_deleted = await cloud_storage_manager.delete_session_from_mongodb(session_id)
-                return ("mongodb", mongo_deleted, None)
-            except Exception as e:
-                print(f"MongoDB deletion error (continuing): {e}")
-                return ("mongodb", [], str(e))
-
-        async def delete_from_community():
-            try:
-                await cloud_storage_manager.remove_shared_session(session_id)
-                return ("community", ["community_sessions"], None)
-            except Exception as e:
-                print(f"Community session deletion error (continuing): {e}")
-                return ("community", [], str(e))
-
-        # Run all cloud deletions in parallel
-        import asyncio
-        results = await asyncio.gather(
-            delete_from_s3(),
-            delete_from_mongodb(),
-            delete_from_community(),
-            return_exceptions=True
-        )
-
-        # Process results
-        for result in results:
-            if isinstance(result, Exception):
-                print(f"Deletion error: {result}")
-                continue
-
-            deletion_type, deleted_list, error = result
-            if deletion_type == "s3":
-                deleted_items["s3_files"] = deleted_list
-            elif deletion_type in ("mongodb", "community"):
-                deleted_items["mongodb_docs"].extend(deleted_list)
-
+        # Return immediately
         return {
             "status": "success",
-            "message": "Session hard deleted permanently",
+            "message": "Session deletion started (processing in background)",
             "session_id": session_id,
-            "deleted_items": deleted_items,
             "deleted_at": datetime.now().isoformat(),
             "deleted_by": user_id
         }
@@ -7232,8 +7235,8 @@ async def hard_delete_session(session_id: str, user_id: str, confirm: bool = Fal
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error hard deleting session: {e}")
-        raise HTTPException(status_code=500, detail=f"Error hard deleting session: {str(e)}")
+        print(f"Error initiating hard delete for session: {e}")
+        raise HTTPException(status_code=500, detail=f"Error initiating hard delete: {str(e)}")
 
 
 @app.get("/download-urls/{session_id}")
