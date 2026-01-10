@@ -41,6 +41,9 @@ ALLOWED_EMAILS = [
 
     # Nakatani
     'nakatani@sanken.osaka-u.ac.jp',
+    
+    # Murakami
+    'murakami.e.ca5e@m.isct.ac.jp',
 
     # Eitaro Murakami
     'murakami41234',
