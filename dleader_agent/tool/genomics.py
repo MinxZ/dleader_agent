@@ -1710,3 +1710,145 @@ def analyze_genomic_region_overlap(region_sets, output_prefix="overlap_analysis"
     log += f"- Summary statistics saved to: {summary_file}\n"
 
     return log
+
+
+def search_sequence_gggenome(
+    sequence: str,
+    db: str = "hg38",
+    k: int = 2,
+    strand: str = None,
+    nogap: bool = False,
+    summary_only: bool = True,
+) -> str:
+    """Search for a nucleotide sequence in genome databases using GGGenome API.
+
+    GGGenome is a fast and accurate sequence search engine that can find exact matches
+    or matches with mismatches/gaps in various genome databases. Returns the number of
+    potential off-target sites found.
+
+    Parameters
+    ----------
+    sequence : str
+        Nucleotide sequence to search (case insensitive)
+    db : str
+        Genome database to search. Options: hg38 (human), mm10 (mouse),
+        dm3 (fly), ce10 (worm), TAIR10 (Arabidopsis), pombe (yeast), refseq, etc.
+    k : int
+        Maximum number of mismatches/gaps allowed (0-20)
+    strand : str
+        Strand to search: 'plus' (+) or 'minus' (-). If None, searches both strands
+    nogap : bool
+        If True, only allow mismatches (no gaps/insertions/deletions)
+    summary_only : bool
+        If True (default), return only the count summary. If False, return full details.
+
+    Returns
+    -------
+    str
+        Number of off-target hits found (summary) or full match details
+
+    Examples
+    --------
+    >>> search_sequence_gggenome("TTCATTGACAACATT")
+    # Returns: "Off-target hits: 5 (db=hg38, k=2)"
+
+    >>> search_sequence_gggenome("TTCATTGACAACATT", summary_only=False)
+    # Returns full details of all matches
+    """
+    import requests
+
+    # Validate inputs
+    if not sequence or not sequence.strip():
+        return "Error: Sequence cannot be empty"
+
+    # Clean the sequence (remove whitespace)
+    sequence = sequence.strip().upper()
+
+    # Validate sequence contains only valid nucleotides
+    valid_chars = set("ATCGUNRYWSMKHBVD")
+    if not all(c in valid_chars for c in sequence):
+        invalid_chars = set(sequence) - valid_chars
+        return f"Error: Sequence contains invalid characters: {invalid_chars}. Only nucleotide characters are allowed."
+
+    # Validate k value
+    if k < 0 or k > 20:
+        return "Error: k must be between 0 and 20"
+
+    # Build the URL (always use json for parsing)
+    url_parts = ["https://gggenome.dbcls.jp"]
+    url_parts.append(db)
+    url_parts.append(str(k))
+
+    if strand:
+        if strand.lower() in ["plus", "+"]:
+            url_parts.append("+")
+        elif strand.lower() in ["minus", "-"]:
+            url_parts.append("-")
+        else:
+            return f"Error: Invalid strand '{strand}'. Use 'plus' (+) or 'minus' (-)"
+
+    if nogap:
+        url_parts.append("nogap")
+
+    url_parts.append(f"{sequence}.json")
+    url = "/".join(url_parts)
+
+    try:
+        response = requests.get(url, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+
+        # Check for API errors
+        if data.get("error") and data["error"] != "none":
+            return f"Error: {data['error']} (sequence: {sequence})"
+
+        # Count results
+        hits = data.get("results", [])
+        total_hits = len(hits)
+
+        # Count by mismatch level
+        exact_matches = sum(1 for h in hits if h.get("mis", 0) == 0 and h.get("del", 0) == 0 and h.get("ins", 0) == 0)
+        one_mismatch = sum(1 for h in hits if (h.get("mis", 0) + h.get("del", 0) + h.get("ins", 0)) == 1)
+        two_mismatch = sum(1 for h in hits if (h.get("mis", 0) + h.get("del", 0) + h.get("ins", 0)) == 2)
+
+        if summary_only:
+            # Return concise summary
+            result = f"Off-target hits: {total_hits} (db={db}, k={k})"
+            if total_hits > 0:
+                result += f" [exact={exact_matches}, 1-diff={one_mismatch}, 2-diff={two_mismatch}]"
+            return result
+        else:
+            # Return full details
+            result = "## GGGenome Search Results\n\n"
+            result += f"**Query:** {sequence}\n"
+            result += f"**Database:** {db}\n"
+            result += f"**Max mismatches/gaps:** {k}\n"
+            if strand:
+                result += f"**Strand:** {strand}\n"
+            if nogap:
+                result += "**No gaps:** Yes (mismatches only)\n"
+            result += f"\n**Total hits:** {total_hits}\n"
+            result += f"  - Exact matches: {exact_matches}\n"
+            result += f"  - 1 mismatch/gap: {one_mismatch}\n"
+            result += f"  - 2 mismatches/gaps: {two_mismatch}\n\n"
+
+            if total_hits > 0:
+                result += "### Top Matches:\n\n"
+                for i, hit in enumerate(hits[:10], 1):  # Limit to first 10 hits
+                    diff = hit.get("mis", 0) + hit.get("del", 0) + hit.get("ins", 0)
+                    result += f"{i}. {hit.get('name', 'N/A')}:{hit.get('position', 'N/A')} "
+                    result += f"({hit.get('strand', '?')}) diff={diff}\n"
+
+                if total_hits > 10:
+                    result += f"\n... and {total_hits - 10} more hits\n"
+
+            return result
+
+    except requests.exceptions.Timeout:
+        return f"Error: Request timed out (sequence: {sequence[:20]}...)"
+    except requests.exceptions.HTTPError as e:
+        return f"Error: HTTP {e.response.status_code} (sequence: {sequence[:20]}...)"
+    except requests.exceptions.RequestException as e:
+        return f"Error: Connection failed - {str(e)}"
+    except Exception as e:
+        return f"Error: {str(e)}"

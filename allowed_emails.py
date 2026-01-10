@@ -7,7 +7,8 @@ Only users in this list will be granted access to the API endpoints.
 
 # Email allow list - only users with these emails can access the API
 ALLOWED_EMAILS = [
-    # Tom
+    'hanlin.li@oligolink.com',
+        # Tom
     'minxz162@gmail.com',
     'z08040992048@gmail.com',
 
