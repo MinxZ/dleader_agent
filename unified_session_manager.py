@@ -477,6 +477,9 @@ class UnifiedSessionManager:
                 "first_query": session.first_query,
                 "latest_query": session.latest_query,
                 "user_id": session_user_id,
+                # Timing metadata
+                "last_turn_started_at": getattr(session, 'last_turn_started_at', None),
+                "last_turn_finished_at": getattr(session, 'last_turn_finished_at', None),
                 # Sharing metadata
                 "is_shared": getattr(session, 'is_shared', False),
                 "shared_at": getattr(session, 'shared_at', None),
@@ -606,6 +609,8 @@ class UnifiedSessionManager:
                             "session_status": 1,
                             "first_query": 1,
                             "latest_query": 1,
+                            "last_turn_started_at": 1,
+                            "last_turn_finished_at": 1,
                             "is_shared": 1,
                             "shared_at": 1
                         }
@@ -627,6 +632,8 @@ class UnifiedSessionManager:
                         "session_status": session.get("session_status", "active"),
                         "first_query": session.get("first_query", ""),
                         "latest_query": session.get("latest_query", ""),
+                        "last_turn_started_at": session.get("last_turn_started_at"),
+                        "last_turn_finished_at": session.get("last_turn_finished_at"),
                         "is_shared": session.get("is_shared", False),
                         "shared_at": session.get("shared_at"),
                         "_storage_location": "mongodb"
@@ -674,6 +681,8 @@ class UnifiedSessionManager:
                 "first_query": session.first_query,
                 "latest_query": session.latest_query,
                 "user_id": getattr(session, 'user_id', None),
+                "last_turn_started_at": getattr(session, 'last_turn_started_at', None),
+                "last_turn_finished_at": getattr(session, 'last_turn_finished_at', None),
                 "is_shared": getattr(session, 'is_shared', False),
                 "shared_at": getattr(session, 'shared_at', None),
                 "_storage_location": "memory",

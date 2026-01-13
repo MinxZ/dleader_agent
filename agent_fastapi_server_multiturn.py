@@ -235,6 +235,10 @@ class MultiTurnSession(BaseModel):
     accumulated_context: str = ""
     session_status: str = "active"  # active, completed, error
 
+    # Timing metadata for last turn
+    last_turn_started_at: Optional[str] = None  # When last turn started processing (empty if in queue)
+    last_turn_finished_at: Optional[str] = None  # When last turn finished/stopped (empty if not complete)
+
     # Sharing metadata
     is_shared: bool = False
     shared_at: Optional[str] = None
@@ -674,6 +678,12 @@ Reasoning: {user_request.template_reasoning}
                 "was_running": was_running,
                 "timestamp": datetime.now().isoformat()
             })
+
+            # Update multiturn session's last_turn_finished_at
+            multiturn_session_id = getattr(user_request, 'original_session_id', None) or session_id.split('_turn_')[0]
+            if multiturn_session_id in self.multiturn_sessions:
+                self.multiturn_sessions[multiturn_session_id].last_turn_finished_at = datetime.now().isoformat()
+                self._save_multiturn_session(self.multiturn_sessions[multiturn_session_id])
 
             # Force stop the agent process if running
             if hasattr(user_request, 'agent_process') and user_request.agent_process and user_request.agent_process.is_alive():
@@ -1466,6 +1476,7 @@ Reasoning: {user_request.template_reasoning}
                 session.accumulated_context = f"--- Turn {turn_number} Report ---\n{final_report}"
 
         session.last_updated = datetime.now().isoformat()
+        session.last_turn_finished_at = datetime.now().isoformat()
         self._save_multiturn_session(session)
 
     def _process_queue(self):
@@ -1553,6 +1564,13 @@ Reasoning: {user_request.template_reasoning}
             user_request.status = "processing"
             user_request.task_start_time = datetime.now()  # Record when task actually starts
             user_request.progress_queue.put({"type": "status", "message": "Starting agent initialization..."})
+
+            # Update multiturn session's last_turn_started_at
+            multiturn_session_id = getattr(user_request, 'original_session_id', None) or user_request.session_id
+            if multiturn_session_id in self.multiturn_sessions:
+                self.multiturn_sessions[multiturn_session_id].last_turn_started_at = user_request.task_start_time.isoformat()
+                self.multiturn_sessions[multiturn_session_id].last_turn_finished_at = None  # Reset finished time
+                self._save_multiturn_session(self.multiturn_sessions[multiturn_session_id])
 
             # For multi-turn sessions, use shared session folder
             if hasattr(user_request, 'original_session_id') and user_request.original_session_id:

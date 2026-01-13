@@ -94,6 +94,10 @@ class MultiTurnSession(BaseModel):
     accumulated_context: str = ""
     session_status: str = "active"  # active, completed, error
 
+    # Timing metadata for last turn
+    last_turn_started_at: Optional[str] = None  # When last turn started processing (empty if in queue)
+    last_turn_finished_at: Optional[str] = None  # When last turn finished/stopped (empty if not complete)
+
     # Sharing metadata
     is_shared: bool = False
     shared_at: Optional[str] = None
