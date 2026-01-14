@@ -380,8 +380,8 @@ description = [
         ],
     },
     {
-        "description": "Predict the secondary structure of an RNA molecule using ViennaRNA.",
-        "name": "predict_rna_secondary_structure",
+        "description": "Predict RNA secondary structure using ViennaRNA thermodynamic algorithm. Uses minimum free energy (MFE) calculations - a classical algorithm-based approach.",
+        "name": "predict_rna_structure_viennarna",
         "optional_parameters": [
             {
                 "default": "rna_structure",
@@ -400,11 +400,11 @@ description = [
         ],
     },
     {
-        "description": "Predict secondary structures for multiple RNA sequences in batch using the RNA structure prediction API. More efficient than predicting one sequence at a time.",
-        "name": "predict_rna_secondary_structure_batch",
+        "description": "Predict RNA secondary structure using RNA-FM deep learning model. Uses a trained AI model that captures patterns from large RNA structure databases. Supports multiple sequences.",
+        "name": "predict_rna_structure_rnafm",
         "optional_parameters": [
             {
-                "default": "rna_structures_batch.txt",
+                "default": "rna_structures_rnafm.txt",
                 "description": "Output file path to save results",
                 "name": "output_file",
                 "type": "str",

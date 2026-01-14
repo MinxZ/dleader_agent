@@ -1352,8 +1352,12 @@ Simulation results have been saved to: {output_file}
     return log
 
 
-def predict_rna_secondary_structure(rna_sequence, output_prefix="rna_structure"):
-    """Predict the secondary structure of an RNA molecule using ViennaRNA.
+def predict_rna_structure_viennarna(rna_sequence, output_prefix="rna_structure"):
+    """Predict RNA secondary structure using ViennaRNA thermodynamic algorithm.
+
+    Uses the ViennaRNA package which predicts RNA secondary structure based on
+    minimum free energy (MFE) thermodynamic calculations. This is a classical
+    algorithm-based approach.
 
     Parameters
     ----------
@@ -1428,11 +1432,14 @@ See {structure_file} and {viz_file} for detailed structure information.
     return log
 
 
-def predict_rna_secondary_structure_batch(sequences: list, output_file: str = "rna_structures_batch.txt") -> str:
-    """Predict secondary structures for multiple RNA sequences using the RNA structure prediction API.
+def predict_rna_structure_rnafm(sequences: list, output_file: str = "rna_structures_rnafm.txt") -> str:
+    """Predict RNA secondary structure using RNA-FM deep learning model.
 
-    This function calls an external API to predict secondary structures for multiple
-    RNA sequences in a single request, which is more efficient than predicting one at a time.
+    Uses the RNA-FM (RNA Foundation Model) which is a trained AI model for RNA
+    structure prediction. This approach uses deep learning rather than thermodynamic
+    calculations, and can capture patterns learned from large RNA structure databases.
+
+    Supports predicting multiple sequences in a single API call.
 
     Parameters
     ----------
@@ -1441,7 +1448,7 @@ def predict_rna_secondary_structure_batch(sequences: list, output_file: str = "r
         [{"id": "seq1", "sequence": "GCGCGCGCGC"}, {"id": "seq2", "sequence": "AAAAUUUU"}]
         Or a list of strings (sequences only, IDs will be auto-generated)
     output_file : str, optional
-        Output file path to save results (default: "rna_structures_batch.txt")
+        Output file path to save results (default: "rna_structures_rnafm.txt")
 
     Returns
     -------
@@ -1450,7 +1457,7 @@ def predict_rna_secondary_structure_batch(sequences: list, output_file: str = "r
 
     Examples
     --------
-    >>> predict_rna_secondary_structure_batch([
+    >>> predict_rna_structure_rnafm([
     ...     {"id": "seq1", "sequence": "GCGCGCGCGC"},
     ...     {"id": "seq2", "sequence": "AAAAUUUUGGGGCCCC"}
     ... ])
