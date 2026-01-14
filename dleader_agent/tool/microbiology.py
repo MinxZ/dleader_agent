@@ -1428,6 +1428,111 @@ See {structure_file} and {viz_file} for detailed structure information.
     return log
 
 
+def predict_rna_secondary_structure_batch(sequences: list, output_file: str = "rna_structures_batch.txt") -> str:
+    """Predict secondary structures for multiple RNA sequences using the RNA structure prediction API.
+
+    This function calls an external API to predict secondary structures for multiple
+    RNA sequences in a single request, which is more efficient than predicting one at a time.
+
+    Parameters
+    ----------
+    sequences : list
+        List of dictionaries with 'id' and 'sequence' keys, e.g.:
+        [{"id": "seq1", "sequence": "GCGCGCGCGC"}, {"id": "seq2", "sequence": "AAAAUUUU"}]
+        Or a list of strings (sequences only, IDs will be auto-generated)
+    output_file : str, optional
+        Output file path to save results (default: "rna_structures_batch.txt")
+
+    Returns
+    -------
+    str
+        A summary of the predictions with dot-bracket structures
+
+    Examples
+    --------
+    >>> predict_rna_secondary_structure_batch([
+    ...     {"id": "seq1", "sequence": "GCGCGCGCGC"},
+    ...     {"id": "seq2", "sequence": "AAAAUUUUGGGGCCCC"}
+    ... ])
+    """
+    import requests
+
+    API_URL = "https://u2rvqq5bwl.execute-api.ap-northeast-1.amazonaws.com/predict"
+
+    # Normalize input: convert list of strings to list of dicts
+    normalized_sequences = []
+    for i, seq in enumerate(sequences):
+        if isinstance(seq, str):
+            normalized_sequences.append({"id": f"seq_{i+1}", "sequence": seq.upper().strip()})
+        elif isinstance(seq, dict):
+            seq_id = seq.get("id", f"seq_{i+1}")
+            sequence = seq.get("sequence", "").upper().strip()
+            normalized_sequences.append({"id": seq_id, "sequence": sequence})
+        else:
+            return f"ERROR: Invalid sequence format at index {i}. Expected string or dict with 'id' and 'sequence' keys."
+
+    # Validate sequences
+    valid_nucleotides = set("AUGC")
+    for seq_dict in normalized_sequences:
+        sequence = seq_dict["sequence"]
+        if not sequence:
+            return f"ERROR: Empty sequence for id '{seq_dict['id']}'"
+        if not all(nucleotide in valid_nucleotides for nucleotide in sequence):
+            return f"ERROR: Invalid RNA sequence for id '{seq_dict['id']}'. Only A, U, G, C nucleotides are allowed."
+
+    # Call the API
+    try:
+        response = requests.post(
+            API_URL,
+            json={"sequences": normalized_sequences},
+            headers={"Content-Type": "application/json"},
+            timeout=60
+        )
+        response.raise_for_status()
+        result = response.json()
+    except requests.exceptions.Timeout:
+        return "ERROR: API request timed out. Try with fewer sequences."
+    except requests.exceptions.RequestException as e:
+        return f"ERROR: API request failed: {str(e)}"
+
+    predictions = result.get("predictions", [])
+    if not predictions:
+        return "ERROR: No predictions returned from API"
+
+    # Save results to file
+    with open(output_file, "w") as f:
+        f.write("RNA Secondary Structure Batch Prediction Results\n")
+        f.write("=" * 50 + "\n\n")
+        for i, pred in enumerate(predictions):
+            seq_id = normalized_sequences[i]["id"] if i < len(normalized_sequences) else f"seq_{i+1}"
+            sequence = pred.get("sequence", "")
+            dot_bracket = pred.get("dot_bracket", "")
+            f.write(f"ID: {seq_id}\n")
+            f.write(f"Sequence:  {sequence}\n")
+            f.write(f"Structure: {dot_bracket}\n")
+            f.write(f"Length: {len(sequence)} nt\n")
+            f.write(f"Base pairs: {dot_bracket.count('(')}\n")
+            f.write("-" * 50 + "\n\n")
+
+    # Create summary
+    summary_lines = [
+        f"RNA Secondary Structure Batch Prediction Complete",
+        f"=" * 50,
+        f"Total sequences: {len(predictions)}",
+        f"Results saved to: {output_file}",
+        "",
+        "Predictions:",
+    ]
+
+    for i, pred in enumerate(predictions):
+        seq_id = normalized_sequences[i]["id"] if i < len(normalized_sequences) else f"seq_{i+1}"
+        sequence = pred.get("sequence", "")
+        dot_bracket = pred.get("dot_bracket", "")
+        summary_lines.append(f"  {seq_id}: {dot_bracket} ({dot_bracket.count('(')} base pairs)")
+
+    return "\n".join(summary_lines)
+
+
 def simulate_microbial_population_dynamics(
     initial_populations,
     growth_rates,

@@ -400,6 +400,26 @@ description = [
         ],
     },
     {
+        "description": "Predict secondary structures for multiple RNA sequences in batch using the RNA structure prediction API. More efficient than predicting one sequence at a time.",
+        "name": "predict_rna_secondary_structure_batch",
+        "optional_parameters": [
+            {
+                "default": "rna_structures_batch.txt",
+                "description": "Output file path to save results",
+                "name": "output_file",
+                "type": "str",
+            }
+        ],
+        "required_parameters": [
+            {
+                "default": None,
+                "description": "List of sequences - either list of strings or list of dicts with 'id' and 'sequence' keys, e.g. [{'id': 'seq1', 'sequence': 'GCGCGCGCGC'}, {'id': 'seq2', 'sequence': 'AAAAUUUU'}]",
+                "name": "sequences",
+                "type": "list",
+            }
+        ],
+    },
+    {
         "description": "Performs stochastic simulation of microbial population dynamics using the Gillespie algorithm.",
         "name": "simulate_microbial_population_dynamics",
         "optional_parameters": [
