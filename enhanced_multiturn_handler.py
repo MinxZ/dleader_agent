@@ -110,6 +110,28 @@ class EnhancedMultiTurnHandler:
                 )
             enhanced_message_parts.append("")
 
+        # Add thinking process file paths for reference
+        thinking_process_files = []
+        for turn in multiturn_session.turns:
+            if turn.status == "completed" and turn.files:
+                tp_info = turn.files.get('thinking_process')
+                if tp_info:
+                    if isinstance(tp_info, dict):
+                        tp_path = tp_info.get('path') or tp_info.get('filename')
+                    elif isinstance(tp_info, str):
+                        tp_path = tp_info
+                    else:
+                        tp_path = None
+                    if tp_path:
+                        thinking_process_files.append(f"Turn {turn.turn_number}: {tp_path}")
+
+        if thinking_process_files:
+            enhanced_message_parts.append("=== Previous Thinking Process Files ===")
+            enhanced_message_parts.append("If you need to review detailed analysis from previous turns, you can use grep/Bash to search these files:")
+            for tp_file in thinking_process_files:
+                enhanced_message_parts.append(f"- {tp_file}")
+            enhanced_message_parts.append("")
+
         # Add current request
         enhanced_message_parts.append("=== Current Request ===")
         enhanced_message_parts.append(current_message)

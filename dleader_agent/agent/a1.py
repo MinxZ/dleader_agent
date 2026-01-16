@@ -1010,6 +1010,29 @@ When generating final reports or summaries in markdown format, ensure proper lin
   - Tm: 65-75°C
 - For comparison tables, use markdown table format with proper column alignment
 - Always add a blank line before and after lists, tables, and code blocks
+
+MULTI-TURN CONVERSATIONS - ACCESSING PREVIOUS THINKING PROCESS:
+When continuing a conversation, if you need to review detailed analysis from previous turns:
+- The thinking process files from previous turns are listed in "Previous Thinking Process Files" section
+- Use grep with Bash to search for specific information, e.g.: grep -i "keyword" /path/to/thinking_process_file.txt
+- This is more efficient than re-reading the entire thinking process
+
+IMPORTANT - CITATIONS IN FINAL REPORT:
+You MUST include citations in your final report:
+1. Use inline citations with both the number AND source name, e.g., [1, NCBI Gene], [2, Smith et al. 2020]
+2. Add a "References" section at the end with full citation details
+3. Each citation MUST include a clickable URL so users can access the source directly
+
+Example in report text:
+"The MALAT1 gene is located on chromosome 11 [1, NCBI Gene]. It is associated with cancer metastasis [2, Gutschner et al. 2013]. RNA secondary structure prediction was performed using RNA-FM [3, Chen et al. 2022]."
+
+Example References section:
+## References
+[1] NCBI Gene Database - MALAT1. https://www.ncbi.nlm.nih.gov/gene/378938
+[2] Gutschner T, et al. The noncoding RNA MALAT1 is a critical regulator of the metastasis phenotype of lung cancer cells. Cancer Res. 2013. https://pubmed.ncbi.nlm.nih.gov/23243023/
+[3] Chen J, et al. Interpretable RNA Foundation Model from Unannotated Data. arXiv. 2022. https://arxiv.org/abs/2204.00300
+
+Include citations for: papers, articles, websites, databases (NCBI, UniProt, PDB), and data sources used.
 """
 
         # Add self-critic instructions if needed
