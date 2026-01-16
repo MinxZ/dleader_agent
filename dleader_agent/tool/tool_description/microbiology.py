@@ -400,7 +400,7 @@ description = [
         ],
     },
     {
-        "description": "Predict RNA secondary structure using RNA-FM deep learning model. Uses a trained AI model that captures patterns from large RNA structure databases. Supports multiple sequences.",
+        "description": "Predict RNA secondary structure using RNA-FM deep learning model. Uses a trained AI model that captures patterns from large RNA structure databases. Supports multiple sequences (max 1022 nt each). Uses async API: submits task, polls for results.",
         "name": "predict_rna_structure_rnafm",
         "optional_parameters": [
             {
@@ -408,12 +408,24 @@ description = [
                 "description": "Output file path to save results",
                 "name": "output_file",
                 "type": "str",
+            },
+            {
+                "default": 10.0,
+                "description": "Interval in seconds between status checks when polling",
+                "name": "poll_interval",
+                "type": "float",
+            },
+            {
+                "default": 600,
+                "description": "Maximum time in seconds to wait for results (default 10 min, longer sequences need more time)",
+                "name": "timeout",
+                "type": "int",
             }
         ],
         "required_parameters": [
             {
                 "default": None,
-                "description": "List of sequences - either list of strings or list of dicts with 'id' and 'sequence' keys, e.g. [{'id': 'seq1', 'sequence': 'GCGCGCGCGC'}, {'id': 'seq2', 'sequence': 'AAAAUUUU'}]",
+                "description": "List of sequences - either list of strings or list of dicts with 'id' and 'sequence' keys, e.g. [{'id': 'seq1', 'sequence': 'GCGCGCGCGC'}, {'id': 'seq2', 'sequence': 'AAAAUUUU'}]. Max length: 1022 nt per sequence.",
                 "name": "sequences",
                 "type": "list",
             }

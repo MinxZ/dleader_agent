@@ -1432,14 +1432,20 @@ See {structure_file} and {viz_file} for detailed structure information.
     return log
 
 
-def predict_rna_structure_rnafm(sequences: list, output_file: str = "rna_structures_rnafm.txt") -> str:
+def predict_rna_structure_rnafm(
+    sequences: list,
+    output_file: str = "rna_structures_rnafm.txt",
+    poll_interval: float = 10.0,
+    timeout: int = 600
+) -> str:
     """Predict RNA secondary structure using RNA-FM deep learning model.
 
     Uses the RNA-FM (RNA Foundation Model) which is a trained AI model for RNA
     structure prediction. This approach uses deep learning rather than thermodynamic
     calculations, and can capture patterns learned from large RNA structure databases.
 
-    Supports predicting multiple sequences in a single API call.
+    Supports predicting multiple sequences in a single API call (max 1022 nt each).
+    Long sequences may take several minutes to process.
 
     Parameters
     ----------
@@ -1447,8 +1453,13 @@ def predict_rna_structure_rnafm(sequences: list, output_file: str = "rna_structu
         List of dictionaries with 'id' and 'sequence' keys, e.g.:
         [{"id": "seq1", "sequence": "GCGCGCGCGC"}, {"id": "seq2", "sequence": "AAAAUUUU"}]
         Or a list of strings (sequences only, IDs will be auto-generated)
+        Maximum sequence length: 1022 nucleotides
     output_file : str, optional
         Output file path to save results (default: "rna_structures_rnafm.txt")
+    poll_interval : float, optional
+        Interval in seconds between status checks (default: 10.0)
+    timeout : int, optional
+        Maximum time in seconds to wait for results (default: 600, ~10 minutes)
 
     Returns
     -------
@@ -1462,9 +1473,10 @@ def predict_rna_structure_rnafm(sequences: list, output_file: str = "rna_structu
     ...     {"id": "seq2", "sequence": "AAAAUUUUGGGGCCCC"}
     ... ])
     """
+    import time
     import requests
 
-    API_URL = "https://u2rvqq5bwl.execute-api.ap-northeast-1.amazonaws.com/predict"
+    BASE_URL = "https://u2rvqq5bwl.execute-api.ap-northeast-1.amazonaws.com"
 
     # Normalize input: convert list of strings to list of dicts
     normalized_sequences = []
@@ -1479,36 +1491,72 @@ def predict_rna_structure_rnafm(sequences: list, output_file: str = "rna_structu
             return f"ERROR: Invalid sequence format at index {i}. Expected string or dict with 'id' and 'sequence' keys."
 
     # Validate sequences
-    valid_nucleotides = set("AUGC")
+    valid_nucleotides = set("AUGCT")  # Allow T, will be converted to U by API
     for seq_dict in normalized_sequences:
         sequence = seq_dict["sequence"]
         if not sequence:
             return f"ERROR: Empty sequence for id '{seq_dict['id']}'"
+        if len(sequence) > 1022:
+            return f"ERROR: Sequence '{seq_dict['id']}' is too long ({len(sequence)} bases). Maximum length is 1022."
         if not all(nucleotide in valid_nucleotides for nucleotide in sequence):
-            return f"ERROR: Invalid RNA sequence for id '{seq_dict['id']}'. Only A, U, G, C nucleotides are allowed."
+            return f"ERROR: Invalid RNA sequence for id '{seq_dict['id']}'. Only A, U, G, C (and T) nucleotides are allowed."
 
-    # Call the API
+    # Step 1: Submit prediction task
     try:
         response = requests.post(
-            API_URL,
+            f"{BASE_URL}/predict",
             json={"sequences": normalized_sequences},
             headers={"Content-Type": "application/json"},
-            timeout=60
+            timeout=30
         )
         response.raise_for_status()
-        result = response.json()
+        submit_result = response.json()
     except requests.exceptions.Timeout:
-        return "ERROR: API request timed out. Try with fewer sequences."
+        return "ERROR: API request timed out while submitting task."
     except requests.exceptions.RequestException as e:
         return f"ERROR: API request failed: {str(e)}"
 
-    predictions = result.get("predictions", [])
-    if not predictions:
-        return "ERROR: No predictions returned from API"
+    task_id = submit_result.get("task_id")
+    if not task_id:
+        return f"ERROR: No task_id returned from API. Response: {submit_result}"
+
+    # Step 2: Poll for results
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            response = requests.get(f"{BASE_URL}/tasks/{task_id}", timeout=30)
+            response.raise_for_status()
+            task_result = response.json()
+        except requests.exceptions.Timeout:
+            # Request timed out but task may still be running, continue polling
+            time.sleep(poll_interval)
+            continue
+        except requests.exceptions.RequestException as e:
+            # Other errors - retry a few times before failing
+            time.sleep(poll_interval)
+            continue
+
+        status = task_result.get("status")
+
+        if status == "completed":
+            result = task_result.get("result", {})
+            predictions = result.get("predictions", [])
+            if not predictions:
+                return "ERROR: No predictions in completed task result"
+            break
+        elif status == "failed":
+            error_msg = task_result.get("error", "Unknown error")
+            return f"ERROR: Prediction failed: {error_msg}"
+        elif status in ("pending", "running"):
+            time.sleep(poll_interval)
+        else:
+            return f"ERROR: Unknown task status: {status}"
+    else:
+        return f"ERROR: Task timed out after {timeout} seconds. Task ID: {task_id}"
 
     # Save results to file
     with open(output_file, "w") as f:
-        f.write("RNA Secondary Structure Batch Prediction Results\n")
+        f.write("RNA Secondary Structure Prediction Results (RNA-FM)\n")
         f.write("=" * 50 + "\n\n")
         for i, pred in enumerate(predictions):
             seq_id = normalized_sequences[i]["id"] if i < len(normalized_sequences) else f"seq_{i+1}"
@@ -1523,8 +1571,8 @@ def predict_rna_structure_rnafm(sequences: list, output_file: str = "rna_structu
 
     # Create summary
     summary_lines = [
-        f"RNA Secondary Structure Batch Prediction Complete",
-        f"=" * 50,
+        "RNA Secondary Structure Prediction Complete (RNA-FM)",
+        "=" * 50,
         f"Total sequences: {len(predictions)}",
         f"Results saved to: {output_file}",
         "",
@@ -1533,7 +1581,6 @@ def predict_rna_structure_rnafm(sequences: list, output_file: str = "rna_structu
 
     for i, pred in enumerate(predictions):
         seq_id = normalized_sequences[i]["id"] if i < len(normalized_sequences) else f"seq_{i+1}"
-        sequence = pred.get("sequence", "")
         dot_bracket = pred.get("dot_bracket", "")
         summary_lines.append(f"  {seq_id}: {dot_bracket} ({dot_bracket.count('(')} base pairs)")
 
