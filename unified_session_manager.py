@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Union
 from cloud_storage_manager import cloud_storage_manager
 
+
 class UnifiedSessionManager:
     """
     Manages sessions across local and cloud storage with intelligent routing
@@ -42,9 +43,9 @@ class UnifiedSessionManager:
         try:
             from s3_mongodb.func_mongodb import get_mongodb_collection
             import os
+
             self._mongodb_collection_cache = get_mongodb_collection(
-                os.getenv("SESSION_DB_NAME", "dleader_agent"),
-                "multiturn_sessions"
+                os.getenv("SESSION_DB_NAME", "dleader_agent"), "multiturn_sessions"
             )
             print(f"[MongoDB] Connection established and cached")
             return self._mongodb_collection_cache
@@ -99,9 +100,9 @@ class UnifiedSessionManager:
 
         # Sort by creation date (newest first)
         def get_sort_key(session):
-            timestamp = session.get('timestamp') or session.get('created_at') or ''
+            timestamp = session.get("timestamp") or session.get("created_at") or ""
             # Handle datetime objects
-            if hasattr(timestamp, 'isoformat'):
+            if hasattr(timestamp, "isoformat"):
                 timestamp = timestamp.isoformat()
             return timestamp
 
@@ -139,9 +140,9 @@ class UnifiedSessionManager:
         try:
             from s3_mongodb.func_mongodb import get_mongodb_collection
             import os
+
             multiturn_collection = get_mongodb_collection(
-                os.getenv("SESSION_DB_NAME", "dleader_agent"),
-                "multiturn_sessions"
+                os.getenv("SESSION_DB_NAME", "dleader_agent"), "multiturn_sessions"
             )
             if multiturn_collection is not None:
                 # Try both session_id field and _id field
@@ -201,7 +202,7 @@ class UnifiedSessionManager:
             "progress_updates": session_data.get("all_progress_updates", []),
             "json_result": session_data.get("json_result", {}),
             "periodic_snapshots": session_data.get("periodic_snapshots", []),
-            "user_id": session_data.get("user_id")  # Include user_id for security checks
+            "user_id": session_data.get("user_id"),  # Include user_id for security checks
         }
 
     async def get_session_files(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -220,24 +221,27 @@ class UnifiedSessionManager:
                 "session_id": session_id,
                 "storage_type": "cloud",
                 "s3_files": session_data.get("s3_files", {}),
-                "download_method": "s3_keys"
+                "download_method": "s3_keys",
             }
         elif storage_location == "local":
             # Local sessions: return local file paths (for zip download)
             # First check if a zip file already exists
             import glob
+
             existing_zips = glob.glob(f"chat_zips/*{session_id[:8]}*.zip")
             if existing_zips:
                 # For multi-turn sessions, use the most recent zip
                 # Sort by modification time to get the latest zip (contains most turns)
                 existing_zips.sort(key=lambda x: os.path.getmtime(x), reverse=True)
                 zip_path = existing_zips[0]  # Use the most recent zip
-                print(f"Selected zip for session {session_id[:8]}: {os.path.basename(zip_path)} (most recent of {len(existing_zips)} files)")
+                print(
+                    f"Selected zip for session {session_id[:8]}: {os.path.basename(zip_path)} (most recent of {len(existing_zips)} files)"
+                )
                 return {
                     "session_id": session_id,
                     "storage_type": "local",
                     "zip_path": zip_path,
-                    "download_method": "local_zip"
+                    "download_method": "local_zip",
                 }
 
             # No existing zip, try to find session folder
@@ -249,7 +253,7 @@ class UnifiedSessionManager:
                 patterns = [
                     f"chat_sessions/*{session_id[:8]}*",
                     f"chat_sessions/multiturn_*{session_id[:8]}*",
-                    f"chat_sessions/session_*{session_id[:8]}*"
+                    f"chat_sessions/session_*{session_id[:8]}*",
                 ]
                 for pattern in patterns:
                     matches = glob.glob(pattern)
@@ -261,12 +265,13 @@ class UnifiedSessionManager:
                 # Try to create zip if it doesn't exist
                 try:
                     from agent_fastapi_server_multiturn import create_session_zip
+
                     zip_path = create_session_zip(session_path, save_to_chat_zips=True)
                     return {
                         "session_id": session_id,
                         "storage_type": "local",
                         "zip_path": zip_path,
-                        "download_method": "local_zip"
+                        "download_method": "local_zip",
                     }
                 except Exception as e:
                     print(f"Error creating zip for local session {session_id}: {e}")
@@ -274,13 +279,14 @@ class UnifiedSessionManager:
                         "session_id": session_id,
                         "storage_type": "local",
                         "download_method": "none",
-                        "message": "Error creating download file"
+                        "message": "Error creating download file",
                     }
         else:
             # Check if session is actually completed
             if session_data.get("is_complete", False):
                 # First check if a zip file already exists
                 import glob
+
                 existing_zips = glob.glob(f"chat_zips/*{session_id[:8]}*.zip")
                 if existing_zips:
                     # Use the existing zip file
@@ -289,7 +295,7 @@ class UnifiedSessionManager:
                         "session_id": session_id,
                         "storage_type": "active_completed",
                         "zip_path": zip_path,
-                        "download_method": "local_zip"
+                        "download_method": "local_zip",
                     }
 
                 # No existing zip, try to create one from session folder
@@ -309,12 +315,13 @@ class UnifiedSessionManager:
                 if session_path and os.path.exists(session_path):
                     try:
                         from agent_fastapi_server_multiturn import create_session_zip
+
                         zip_path = create_session_zip(session_path, save_to_chat_zips=True)
                         return {
                             "session_id": session_id,
                             "storage_type": "active_completed",
                             "zip_path": zip_path,
-                            "download_method": "local_zip"
+                            "download_method": "local_zip",
                         }
                     except Exception as e:
                         print(f"Error creating zip for completed active session {session_id}: {e}")
@@ -324,7 +331,7 @@ class UnifiedSessionManager:
                 "session_id": session_id,
                 "storage_type": "active",
                 "message": "Session is still active, files not ready for download",
-                "download_method": "none"
+                "download_method": "none",
             }
 
         return None
@@ -335,7 +342,7 @@ class UnifiedSessionManager:
 
         for session_id, user_request in self.queue_manager.active_sessions.items():
             # Filter by user_id if provided
-            if user_id and getattr(user_request, 'user_id', None) != user_id:
+            if user_id and getattr(user_request, "user_id", None) != user_id:
                 continue
 
             session_data = self._convert_active_session_to_unified(user_request)
@@ -354,7 +361,7 @@ class UnifiedSessionManager:
                 # Skip if session is also active (shouldn't happen but be safe)
                 if session.get("session_id") not in self.queue_manager.active_sessions:
                     # Filter by user_id if provided
-                    if user_id and session.get('user_id') != user_id:
+                    if user_id and session.get("user_id") != user_id:
                         continue
                     stored_sessions.append(session)
         except:
@@ -362,15 +369,15 @@ class UnifiedSessionManager:
             session_storage_dir = "session_storage"
             if os.path.exists(session_storage_dir):
                 for filename in os.listdir(session_storage_dir):
-                    if filename.endswith('.json'):
+                    if filename.endswith(".json"):
                         try:
-                            session_id = filename.replace('.json', '')
+                            session_id = filename.replace(".json", "")
                             if session_id not in self.queue_manager.active_sessions:
                                 session_path = os.path.join(session_storage_dir, filename)
-                                with open(session_path, 'r') as f:
+                                with open(session_path, "r") as f:
                                     session_data = json.load(f)
                                     # Filter by user_id if provided
-                                    if user_id and session_data.get('user_id') != user_id:
+                                    if user_id and session_data.get("user_id") != user_id:
                                         continue
                                     stored_sessions.append(session_data)
                         except Exception as e:
@@ -386,7 +393,7 @@ class UnifiedSessionManager:
             status = "completed" if not user_request.error else "error"
         elif user_request.is_cancelled:
             status = "cancelled"
-        elif hasattr(user_request, 'is_processing') and user_request.is_processing:
+        elif hasattr(user_request, "is_processing") and user_request.is_processing:
             status = "processing"
         else:
             status = "queued"
@@ -402,11 +409,11 @@ class UnifiedSessionManager:
             "language": user_request.language,
             "timestamp": user_request.created_at.isoformat(),
             "created_at": user_request.created_at.isoformat(),
-            "user_id": getattr(user_request, 'user_id', None),
+            "user_id": getattr(user_request, "user_id", None),
             "_storage_location": "active",
-            "progress_updates": getattr(user_request, 'all_progress_updates', []),
-            "json_result": getattr(user_request, 'json_result', {}),
-            "periodic_snapshots": getattr(user_request, 'periodic_snapshots', [])
+            "progress_updates": getattr(user_request, "all_progress_updates", []),
+            "json_result": getattr(user_request, "json_result", {}),
+            "periodic_snapshots": getattr(user_request, "periodic_snapshots", []),
         }
 
     def _convert_cloud_to_unified_format(self, cloud_session: Dict) -> Dict[str, Any]:
@@ -428,15 +435,11 @@ class UnifiedSessionManager:
             "progress_summary": cloud_session.get("progress_summary", {}),
             "result_summary": cloud_session.get("result_summary", {}),
             "s3_files": cloud_session.get("s3_files", {}),
-            "uploaded_to_cloud_at": cloud_session.get("uploaded_to_cloud_at")
+            "uploaded_to_cloud_at": cloud_session.get("uploaded_to_cloud_at"),
         }
 
     async def get_multiturn_sessions(
-        self,
-        include_cloud: bool = True,
-        user_id: str = None,
-        limit: int = 10,
-        offset: int = 0
+        self, include_cloud: bool = True, user_id: str = None, limit: int = 10, offset: int = 0
     ) -> Dict[str, Any]:
         """Get multi-turn sessions from MongoDB with pagination
 
@@ -450,6 +453,7 @@ class UnifiedSessionManager:
             Dict containing sessions list and total count
         """
         import time
+
         start_time = time.time()
 
         all_sessions = []
@@ -461,34 +465,64 @@ class UnifiedSessionManager:
         step1_start = time.time()
         for session_id, session in self.queue_manager.multiturn_sessions.items():
             # Filter by user_id if provided
-            session_user_id = getattr(session, 'user_id', None)
+            session_user_id = getattr(session, "user_id", None)
             if user_id and session_user_id != user_id:
                 continue
 
             in_memory_session_ids.add(session_id)
+
+            # Determine current_status by checking active UserRequests
+            # Check for any active turn in this session
+            current_status = None
+            current_turn = getattr(session, "current_turn", None)
+            if current_turn:
+                # Check for turn-specific session ID first
+                turn_session_id = f"{session_id}_turn_{current_turn}"
+                if turn_session_id in self.queue_manager.active_sessions:
+                    user_request = self.queue_manager.active_sessions[turn_session_id]
+                    current_status = user_request.status
+                elif session_id in self.queue_manager.active_sessions:
+                    user_request = self.queue_manager.active_sessions[session_id]
+                    current_status = user_request.status
+
+            # Fallback to session_status if no active UserRequest found
+            if not current_status:
+                # Map session_status to current_status
+                if session.session_status == "active":
+                    current_status = "completed"  # Active but not processing means idle
+                elif session.session_status == "completed":
+                    current_status = "completed"
+                elif session.session_status == "error":
+                    current_status = "error"
+                else:
+                    current_status = session.session_status
+
             session_data = {
                 "session_id": session_id,
-                "session_name": getattr(session, 'session_name', ""),
+                "session_name": getattr(session, "session_name", ""),
                 "created_at": session.created_at,
                 "last_updated": session.last_updated,
                 "total_turns": session.total_turns,
                 "language": session.language,
                 "session_status": session.session_status,
+                "current_status": current_status,  # Rich status (queued, processing, completed, cancelled, error)
                 "first_query": session.first_query,
                 "latest_query": session.latest_query,
                 "user_id": session_user_id,
                 # Timing metadata
-                "last_turn_started_at": getattr(session, 'last_turn_started_at', None),
-                "last_turn_finished_at": getattr(session, 'last_turn_finished_at', None),
+                "last_turn_started_at": getattr(session, "last_turn_started_at", None),
+                "last_turn_finished_at": getattr(session, "last_turn_finished_at", None),
                 # Sharing metadata
-                "is_shared": getattr(session, 'is_shared', False),
-                "shared_at": getattr(session, 'shared_at', None),
-                "_storage_location": "memory"  # Will update if also in MongoDB
+                "is_shared": getattr(session, "is_shared", False),
+                "shared_at": getattr(session, "shared_at", None),
+                "_storage_location": "memory",  # Will update if also in MongoDB
             }
             all_sessions.append(session_data)
             session_ids_seen.add(session_id)
 
-        print(f"[PERF] Step 1 (in-memory): {(time.time() - step1_start) * 1000:.2f} ms - Found {len(all_sessions)} sessions")
+        print(
+            f"[PERF] Step 1 (in-memory): {(time.time() - step1_start) * 1000:.2f} ms - Found {len(all_sessions)} sessions"
+        )
 
         # Get MongoDB collection from cache (fast!) or establish connection (slow, but only first time)
         step_mongo_connect = time.time()
@@ -496,7 +530,7 @@ class UnifiedSessionManager:
         was_cached = False
         if include_cloud:
             # Check if connection is already cached before getting it
-            was_cached = (self._mongodb_collection_cache is not None)
+            was_cached = self._mongodb_collection_cache is not None
             mongodb_collection = self._get_cached_mongodb_collection()
         connection_time = (time.time() - step_mongo_connect) * 1000
         if mongodb_collection is not None:
@@ -510,12 +544,14 @@ class UnifiedSessionManager:
         if mongodb_collection is not None and in_memory_session_ids:
             try:
                 # Only check for the specific in-memory session IDs (much faster)
-                mongodb_in_memory_sessions = set([
-                    doc["session_id"] for doc in mongodb_collection.find(
-                        {"session_id": {"$in": list(in_memory_session_ids)}},
-                        {"session_id": 1}
-                    )
-                ])
+                mongodb_in_memory_sessions = set(
+                    [
+                        doc["session_id"]
+                        for doc in mongodb_collection.find(
+                            {"session_id": {"$in": list(in_memory_session_ids)}}, {"session_id": 1}
+                        )
+                    ]
+                )
                 # Update storage location for sessions that are both in memory and MongoDB
                 for session_data in all_sessions:
                     if session_data["session_id"] in mongodb_in_memory_sessions:
@@ -545,7 +581,7 @@ class UnifiedSessionManager:
                 try:
                     total_mongodb_sessions = mongodb_collection.count_documents(
                         query,
-                        hint="user_id_last_updated"  # Force use of our index
+                        hint="user_id_last_updated",  # Force use of our index
                     )
                 except:
                     # If hint fails, fall back to regular count
@@ -553,13 +589,15 @@ class UnifiedSessionManager:
             except Exception as e:
                 print(f"Warning: Could not count MongoDB sessions: {e}")
 
-        print(f"[PERF] Step 3 (count MongoDB): {(time.time() - step3_start) * 1000:.2f} ms - Total: {total_mongodb_sessions}")
+        print(
+            f"[PERF] Step 3 (count MongoDB): {(time.time() - step3_start) * 1000:.2f} ms - Total: {total_mongodb_sessions}"
+        )
 
         # 4. Calculate total and determine how many MongoDB sessions to fetch
         total_count = len(all_sessions) + total_mongodb_sessions
 
         # Sort in-memory sessions by last_updated
-        all_sessions.sort(key=lambda x: x.get('last_updated', x.get('created_at', '')), reverse=True)
+        all_sessions.sort(key=lambda x: x.get("last_updated", x.get("created_at", "")), reverse=True)
 
         # Determine if we need MongoDB sessions for this page
         in_memory_count = len(all_sessions)
@@ -569,7 +607,7 @@ class UnifiedSessionManager:
 
         if offset < in_memory_count:
             # Page starts within in-memory sessions
-            paginated_sessions = all_sessions[offset:offset + limit]
+            paginated_sessions = all_sessions[offset : offset + limit]
             remaining_slots = limit - len(paginated_sessions)
             if remaining_slots > 0:
                 # Need to fill remaining slots from MongoDB
@@ -612,8 +650,8 @@ class UnifiedSessionManager:
                             "last_turn_started_at": 1,
                             "last_turn_finished_at": 1,
                             "is_shared": 1,
-                            "shared_at": 1
-                        }
+                            "shared_at": 1,
+                        },
                     )
                     .sort("last_updated", -1)  # Sort by last_updated descending
                     .skip(mongodb_offset)
@@ -621,6 +659,16 @@ class UnifiedSessionManager:
                 )
 
                 for session in mongodb_sessions:
+                    # Determine current_status from session_status for MongoDB sessions
+                    session_status = session.get("session_status", "active")
+                    if session_status == "error":
+                        current_status = "error"
+                    elif session_status == "cancelled":
+                        current_status = "cancelled"
+                    else:
+                        # For MongoDB sessions, they're archived so completed
+                        current_status = "completed"
+
                     session_metadata = {
                         "session_id": session.get("session_id"),
                         "session_name": session.get("session_name", ""),
@@ -629,14 +677,15 @@ class UnifiedSessionManager:
                         "created_at": session.get("created_at"),
                         "last_updated": session.get("last_updated"),
                         "language": session.get("language", "en"),
-                        "session_status": session.get("session_status", "active"),
+                        "session_status": session_status,
+                        "current_status": current_status,  # Rich status (completed, error, cancelled)
                         "first_query": session.get("first_query", ""),
                         "latest_query": session.get("latest_query", ""),
                         "last_turn_started_at": session.get("last_turn_started_at"),
                         "last_turn_finished_at": session.get("last_turn_finished_at"),
                         "is_shared": session.get("is_shared", False),
                         "shared_at": session.get("shared_at"),
-                        "_storage_location": "mongodb"
+                        "_storage_location": "mongodb",
                     }
                     paginated_sessions.append(session_metadata)
             except Exception as e:
@@ -645,14 +694,11 @@ class UnifiedSessionManager:
         print(f"[PERF] Step 5 (fetch MongoDB): {(time.time() - step5_start) * 1000:.2f} ms")
         print(f"[PERF] TOTAL TIME: {(time.time() - start_time) * 1000:.2f} ms")
 
-        return {
-            "sessions": paginated_sessions,
-            "total": total_count,
-            "limit": limit,
-            "offset": offset
-        }
+        return {"sessions": paginated_sessions, "total": total_count, "limit": limit, "offset": offset}
 
-    async def get_multiturn_session_by_id(self, session_id: str, include_turns: bool = True) -> Optional[Dict[str, Any]]:
+    async def get_multiturn_session_by_id(
+        self, session_id: str, include_turns: bool = True
+    ) -> Optional[Dict[str, Any]]:
         """Get a specific multi-turn session by ID from any storage location
 
         Args:
@@ -671,7 +717,7 @@ class UnifiedSessionManager:
             session = self.queue_manager.multiturn_sessions[session_id]
             result = {
                 "session_id": session_id,
-                "session_name": getattr(session, 'session_name', ""),
+                "session_name": getattr(session, "session_name", ""),
                 "created_at": session.created_at,
                 "last_updated": session.last_updated,
                 "total_turns": session.total_turns,
@@ -680,17 +726,17 @@ class UnifiedSessionManager:
                 "session_status": session.session_status,
                 "first_query": session.first_query,
                 "latest_query": session.latest_query,
-                "user_id": getattr(session, 'user_id', None),
-                "last_turn_started_at": getattr(session, 'last_turn_started_at', None),
-                "last_turn_finished_at": getattr(session, 'last_turn_finished_at', None),
-                "is_shared": getattr(session, 'is_shared', False),
-                "shared_at": getattr(session, 'shared_at', None),
+                "user_id": getattr(session, "user_id", None),
+                "last_turn_started_at": getattr(session, "last_turn_started_at", None),
+                "last_turn_finished_at": getattr(session, "last_turn_finished_at", None),
+                "is_shared": getattr(session, "is_shared", False),
+                "shared_at": getattr(session, "shared_at", None),
                 "_storage_location": "memory",
-                "_session_object": session  # Include the actual object for updates
+                "_session_object": session,  # Include the actual object for updates
             }
 
             # Extract turns if requested
-            if include_turns and hasattr(session, 'turns'):
+            if include_turns and hasattr(session, "turns"):
                 result["turns"] = []
                 for turn in session.turns:
                     turn_dict = {
@@ -700,8 +746,8 @@ class UnifiedSessionManager:
                         "final_report": turn.final_report,
                         "timestamp": turn.timestamp,
                         "status": turn.status,
-                        "files": turn.files if hasattr(turn, 'files') else {},
-                        "response_content": turn.response_content if hasattr(turn, 'response_content') else None
+                        "files": turn.files if hasattr(turn, "files") else {},
+                        "response_content": turn.response_content if hasattr(turn, "response_content") else None,
                     }
                     result["turns"].append(turn_dict)
 
@@ -710,19 +756,31 @@ class UnifiedSessionManager:
                 for t in result["turns"]:
                     turn_num = t.get("turn_number")
                     files = t.get("files", {}) or {}
-                    tp_file = files.get("thinking_process", {}).get("filename", "NONE") if isinstance(files.get("thinking_process"), dict) else "NONE"
-                    report_file = files.get("final_report", {}).get("filename", "NONE") if isinstance(files.get("final_report"), dict) else "NONE"
+                    tp_file = (
+                        files.get("thinking_process", {}).get("filename", "NONE")
+                        if isinstance(files.get("thinking_process"), dict)
+                        else "NONE"
+                    )
+                    report_file = (
+                        files.get("final_report", {}).get("filename", "NONE")
+                        if isinstance(files.get("final_report"), dict)
+                        else "NONE"
+                    )
                     print(f"[DEBUG LOAD FROM MEMORY]   Turn {turn_num}: TP={tp_file}, Report={report_file}")
 
             return result
-        print(f"[PERF get_multiturn_session_by_id] Step 1 (in-memory check): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
+        print(
+            f"[PERF get_multiturn_session_by_id] Step 1 (in-memory check): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND"
+        )
 
         # 2. Check MongoDB (primary storage) - use cached connection
         step_start = time.time()
         try:
             get_conn_start = time.time()
             mongodb_collection = self._get_cached_mongodb_collection()
-            print(f"[PERF get_multiturn_session_by_id] Step 2a (get MongoDB connection): {(time.time() - get_conn_start) * 1000:.2f} ms")
+            print(
+                f"[PERF get_multiturn_session_by_id] Step 2a (get MongoDB connection): {(time.time() - get_conn_start) * 1000:.2f} ms"
+            )
 
             if mongodb_collection is not None:
                 query_start = time.time()
@@ -743,14 +801,18 @@ class UnifiedSessionManager:
                         "first_query": 1,
                         "latest_query": 1,
                         "is_shared": 1,
-                        "shared_at": 1
+                        "shared_at": 1,
                         # Note: 'turns' is automatically excluded when not listed
                     }
                     session_data = mongodb_collection.find_one({"session_id": session_id}, projection)
-                    print(f"[PERF get_multiturn_session_by_id] Step 2b (MongoDB find_one query WITH PROJECTION): {(time.time() - query_start) * 1000:.2f} ms")
+                    print(
+                        f"[PERF get_multiturn_session_by_id] Step 2b (MongoDB find_one query WITH PROJECTION): {(time.time() - query_start) * 1000:.2f} ms"
+                    )
                 else:
                     session_data = mongodb_collection.find_one({"session_id": session_id})
-                    print(f"[PERF get_multiturn_session_by_id] Step 2b (MongoDB find_one query FULL): {(time.time() - query_start) * 1000:.2f} ms")
+                    print(
+                        f"[PERF get_multiturn_session_by_id] Step 2b (MongoDB find_one query FULL): {(time.time() - query_start) * 1000:.2f} ms"
+                    )
 
                 if session_data:
                     session_data["_storage_location"] = "mongodb"
@@ -761,35 +823,59 @@ class UnifiedSessionManager:
                         for t in session_data["turns"]:
                             turn_num = t.get("turn_number")
                             files = t.get("files", {}) or {}
-                            tp_file = files.get("thinking_process", {}).get("filename", "NONE") if isinstance(files.get("thinking_process"), dict) else "NONE"
-                            report_file = files.get("final_report", {}).get("filename", "NONE") if isinstance(files.get("final_report"), dict) else "NONE"
+                            tp_file = (
+                                files.get("thinking_process", {}).get("filename", "NONE")
+                                if isinstance(files.get("thinking_process"), dict)
+                                else "NONE"
+                            )
+                            report_file = (
+                                files.get("final_report", {}).get("filename", "NONE")
+                                if isinstance(files.get("final_report"), dict)
+                                else "NONE"
+                            )
                             print(f"[DEBUG LOAD FROM MONGODB]   Turn {turn_num}: TP={tp_file}, Report={report_file}")
 
-                    print(f"[PERF get_multiturn_session_by_id] Step 2 (MongoDB total): {(time.time() - step_start) * 1000:.2f} ms - FOUND")
-                    print(f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms")
+                    print(
+                        f"[PERF get_multiturn_session_by_id] Step 2 (MongoDB total): {(time.time() - step_start) * 1000:.2f} ms - FOUND"
+                    )
+                    print(
+                        f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms"
+                    )
                     return session_data
                 else:
-                    print(f"[PERF get_multiturn_session_by_id] Step 2 (MongoDB total): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
+                    print(
+                        f"[PERF get_multiturn_session_by_id] Step 2 (MongoDB total): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND"
+                    )
         except Exception as e:
             print(f"Error loading multiturn session from MongoDB: {e}")
-        print(f"[PERF get_multiturn_session_by_id] Step 2 (MongoDB): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
+        print(
+            f"[PERF get_multiturn_session_by_id] Step 2 (MongoDB): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND"
+        )
 
         # 3. Fallback to local storage (may be stale, but better than nothing)
         step_start = time.time()
         multiturn_file = os.path.join(self.queue_manager.multiturn_storage_dir, f"{session_id}.json")
         if os.path.exists(multiturn_file):
             try:
-                with open(multiturn_file, 'r', encoding='utf-8') as f:
+                with open(multiturn_file, "r", encoding="utf-8") as f:
                     session_data = json.load(f)
                     session_data["_storage_location"] = "local"
-                    print(f"[PERF get_multiturn_session_by_id] Step 3 (local storage fallback): {(time.time() - step_start) * 1000:.2f} ms - FOUND")
-                    print(f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms")
+                    print(
+                        f"[PERF get_multiturn_session_by_id] Step 3 (local storage fallback): {(time.time() - step_start) * 1000:.2f} ms - FOUND"
+                    )
+                    print(
+                        f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms"
+                    )
                     return session_data
             except Exception as e:
                 print(f"Error loading multiturn session from local storage: {e}")
-        print(f"[PERF get_multiturn_session_by_id] Step 3 (local storage fallback): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND")
+        print(
+            f"[PERF get_multiturn_session_by_id] Step 3 (local storage fallback): {(time.time() - step_start) * 1000:.2f} ms - NOT FOUND"
+        )
 
-        print(f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms - SESSION NOT FOUND ANYWHERE")
+        print(
+            f"[PERF get_multiturn_session_by_id] TOTAL FUNCTION TIME: {(time.time() - func_start) * 1000:.2f} ms - SESSION NOT FOUND ANYWHERE"
+        )
         return None
 
     async def update_multiturn_session(self, session_id: str, updates: Dict[str, Any], user_id: str = None) -> bool:
@@ -836,10 +922,10 @@ class UnifiedSessionManager:
                 try:
                     # Use asyncio.to_thread to run blocking I/O in thread pool
                     def _update_file():
-                        with open(multiturn_file, 'r', encoding='utf-8') as f:
+                        with open(multiturn_file, "r", encoding="utf-8") as f:
                             session_data = json.load(f)
                         session_data.update(updates)
-                        with open(multiturn_file, 'w', encoding='utf-8') as f:
+                        with open(multiturn_file, "w", encoding="utf-8") as f:
                             json.dump(session_data, f, indent=2, ensure_ascii=False)
 
                     await asyncio.to_thread(_update_file)
@@ -856,14 +942,10 @@ class UnifiedSessionManager:
                 # Use asyncio.to_thread for MongoDB operation
                 def _update_mongo():
                     collection = get_mongodb_collection(
-                        os.getenv("SESSION_DB_NAME", "dleader_agent"),
-                        "multiturn_sessions"
+                        os.getenv("SESSION_DB_NAME", "dleader_agent"), "multiturn_sessions"
                     )
                     if collection is not None:
-                        result = collection.update_one(
-                            {"session_id": session_id},
-                            {"$set": updates}
-                        )
+                        result = collection.update_one({"session_id": session_id}, {"$set": updates})
                         return result.modified_count > 0 or result.matched_count > 0
                     return False
 
@@ -875,12 +957,7 @@ class UnifiedSessionManager:
                 return False
 
         # Execute all updates in parallel
-        results = await asyncio.gather(
-            update_memory(),
-            update_local_file(),
-            update_mongodb(),
-            return_exceptions=True
-        )
+        results = await asyncio.gather(update_memory(), update_local_file(), update_mongodb(), return_exceptions=True)
 
         # Check if MongoDB update succeeded (it's the last result)
         mongodb_result = results[2] if len(results) > 2 and not isinstance(results[2], Exception) else False
@@ -893,6 +970,7 @@ class UnifiedSessionManager:
 
 # Global instance to be used by FastAPI endpoints
 unified_session_manager = None
+
 
 def get_unified_session_manager(queue_manager):
     """Get or create unified session manager instance"""

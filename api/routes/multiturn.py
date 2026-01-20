@@ -97,7 +97,9 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
                         try:
                             cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(session_id)
                             if cloud_session:
-                                print(f"Local files missing for session {session_id}, fetched S3 files from cloud storage")
+                                print(
+                                    f"Local files missing for session {session_id}, fetched S3 files from cloud storage"
+                                )
                         except Exception as e:
                             print(f"Warning: Could not retrieve S3 files from cloud for session {session_id}: {e}")
                             cloud_session = {}  # Set to empty dict to avoid retrying
@@ -121,17 +123,13 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
     except Exception as e:
         print(f"Error getting multiturn session: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error retrieving session: {str(e)}")
 
 
-
 @router.get("/multiturn-sessions")
-async def get_all_multiturn_sessions(
-    user_id: Optional[str] = None,
-    limit: int = 10,
-    offset: int = 0
-):
+async def get_all_multiturn_sessions(user_id: Optional[str] = None, limit: int = 10, offset: int = 0):
     """Get multi-turn sessions with pagination
 
     Args:
@@ -161,7 +159,7 @@ async def get_all_multiturn_sessions(
                 "limit": limit,
                 "offset": offset,
                 "error": "user_id is required",
-                "message": "Please provide a valid user_id"
+                "message": "Please provide a valid user_id",
             }
 
         # Get unified session manager
@@ -169,20 +167,32 @@ async def get_all_multiturn_sessions(
 
         # Get multi-turn sessions with pagination
         result = await unified_manager.get_multiturn_sessions(
-            include_cloud=True,
-            user_id=user_id,
-            limit=limit,
-            offset=offset
+            include_cloud=True, user_id=user_id, limit=limit, offset=offset
         )
 
         return result
     except Exception as e:
         print(f"Error getting multi-turn sessions: {e}")
         import traceback
+
         traceback.print_exc()
         # Fallback to local-only sessions with pagination
         sessions = []
         for session_id, session in queue_manager.multiturn_sessions.items():
+            # Determine current_status by checking active UserRequests
+            current_status = None
+            current_turn = getattr(session, "current_turn", None)
+            if current_turn:
+                turn_session_id = f"{session_id}_turn_{current_turn}"
+                if turn_session_id in queue_manager.active_sessions:
+                    user_request = queue_manager.active_sessions[turn_session_id]
+                    current_status = user_request.status
+                elif session_id in queue_manager.active_sessions:
+                    user_request = queue_manager.active_sessions[session_id]
+                    current_status = user_request.status
+            if not current_status:
+                current_status = "completed" if session.session_status != "error" else "error"
+
             session_summary = {
                 "session_id": session_id,
                 "created_at": session.created_at,
@@ -190,24 +200,19 @@ async def get_all_multiturn_sessions(
                 "total_turns": session.total_turns,
                 "language": session.language,
                 "session_status": session.session_status,
+                "current_status": current_status,  # Rich status (queued, processing, completed, error, cancelled)
                 "first_query": session.turns[0].query if session.turns else "No queries",
                 "latest_query": session.turns[-1].query if session.turns else "No queries",
-                "_storage_location": "local"
+                "_storage_location": "local",
             }
             sessions.append(session_summary)
 
         # Sort and paginate fallback sessions
-        sessions.sort(key=lambda x: x.get('last_updated', x.get('created_at', '')), reverse=True)
+        sessions.sort(key=lambda x: x.get("last_updated", x.get("created_at", "")), reverse=True)
         total = len(sessions)
-        paginated = sessions[offset:offset + limit]
+        paginated = sessions[offset : offset + limit]
 
-        return {
-            "sessions": paginated,
-            "total": total,
-            "limit": limit,
-            "offset": offset
-        }
-
+        return {"sessions": paginated, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/turn-report/{session_id}/{turn_number}")
@@ -232,11 +237,10 @@ async def get_turn_report(session_id: str, turn_number: int, user_id: str):
                 "response_content": turn.response_content,
                 "files": turn.files,
                 "timestamp": turn.timestamp,
-                "status": turn.status
+                "status": turn.status,
             }
 
     raise HTTPException(status_code=404, detail=f"Turn {turn_number} not found in session")
-
 
 
 @router.get("/session-context/{session_id}")
@@ -253,17 +257,18 @@ async def get_session_context(session_id: str, user_id: str):
     return {
         "session_id": session_id,
         "accumulated_context": multiturn_session.accumulated_context,
-        "total_turns": multiturn_session.total_turns
+        "total_turns": multiturn_session.total_turns,
     }
 
-# ============= SESSION SHARING ENDPOINTS =============
 
+# ============= SESSION SHARING ENDPOINTS =============
 
 
 @router.post("/rename-multisession")
 async def rename_multisession(request: RenameMultiSessionRequest):
     """Rename a multi-turn session using Unified Session Manager"""
     import time
+
     start_total = time.time()
 
     try:
@@ -297,9 +302,7 @@ async def rename_multisession(request: RenameMultiSessionRequest):
             updates = {"session_name": new_name}
             start_update = time.time()
             success = await unified_manager.update_multiturn_session(
-                session_id=session_id,
-                updates=updates,
-                user_id=user_id
+                session_id=session_id, updates=updates, user_id=user_id
             )
             update_time = (time.time() - start_update) * 1000
             print(f"⏱️  [RENAME] Update session: {update_time:.2f} ms")
@@ -315,10 +318,7 @@ async def rename_multisession(request: RenameMultiSessionRequest):
                 "session_id": session_id,
                 "new_name": new_name,
                 "message": "Session renamed successfully",
-                "timing": {
-                    "total_ms": round(total_time, 2),
-                    "update_ms": round(update_time, 2)
-                }
+                "timing": {"total_ms": round(total_time, 2), "update_ms": round(update_time, 2)},
             }
 
         except PermissionError as e:
@@ -329,9 +329,6 @@ async def rename_multisession(request: RenameMultiSessionRequest):
     except Exception as e:
         print(f"Error renaming session: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error renaming session: {str(e)}")
-
-
-
-

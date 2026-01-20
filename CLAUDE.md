@@ -1,5 +1,12 @@
 # CLAUDE.md
 
+## Important: API Documentation
+
+**When modifying any API endpoint**, always update the API documentation:
+- **File:** `~/react_interface_demo/COMPLETE_API_DOCUMENTATION.md`
+- Update response schemas, add new fields, document new endpoints
+- Add entry to "Recent Updates" section at top of file
+
 ## Commands
 
 ```bash
