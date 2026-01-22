@@ -748,6 +748,7 @@ class UnifiedSessionManager:
                         "status": turn.status,
                         "files": turn.files if hasattr(turn, "files") else {},
                         "response_content": turn.response_content if hasattr(turn, "response_content") else None,
+                        "structured_data": turn.structured_data if hasattr(turn, "structured_data") else None,
                     }
                     result["turns"].append(turn_dict)
 

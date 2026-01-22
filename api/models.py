@@ -15,12 +15,14 @@ JST = timezone(timedelta(hours=9))
 
 class Language(str, Enum):
     """Supported languages"""
+
     EN = "en"
     JP = "jp"
 
 
 class TurnType(str, Enum):
     """Types of conversation turns"""
+
     PLANNING = "planning"  # Clarification/planning phase - no tool execution
     EXECUTION = "execution"  # Full agent execution with tools
 
@@ -33,6 +35,7 @@ def now_jst():
 # Request/Response Models
 class ChatRequest(BaseModel):
     """Chat request model"""
+
     message: str
     language: Language = Language.EN
     session_id: Optional[str] = None
@@ -41,6 +44,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     """Chat response model"""
+
     session_id: str
     status: str
     thinking_content: Optional[str] = None
@@ -52,6 +56,7 @@ class ChatResponse(BaseModel):
 
 class QueueStatus(BaseModel):
     """Queue status model"""
+
     position: int
     estimated_wait_time: int  # in seconds
     total_users_in_queue: int
@@ -59,6 +64,7 @@ class QueueStatus(BaseModel):
 
 class SessionInfo(BaseModel):
     """Session information model"""
+
     session_id: str
     status: str
     created_at: str
@@ -69,6 +75,7 @@ class SessionInfo(BaseModel):
 # Multi-Turn Data Structures
 class ConversationTurn(BaseModel):
     """Represents a single turn in a multi-turn conversation"""
+
     turn_number: int
     turn_type: str = "execution"  # "planning" or "execution" (TurnType enum)
     query: str
@@ -78,10 +85,12 @@ class ConversationTurn(BaseModel):
     timestamp: str
     status: str = "processing"
     ready_for_execution: Optional[bool] = None  # Only relevant for planning turns
+    structured_data: Optional[Dict[str, Any]] = None  # For RNA structures, etc.
 
 
 class MultiTurnSession(BaseModel):
     """Multi-turn conversation session"""
+
     session_id: str
     session_name: str = ""
     created_at: str
@@ -115,6 +124,7 @@ class MultiTurnSession(BaseModel):
 
 class ContinueRequest(BaseModel):
     """Request to continue a multi-turn session"""
+
     session_id: str
     message: str
     language: Language = Language.EN
@@ -123,6 +133,7 @@ class ContinueRequest(BaseModel):
 
 class RenameMultiSessionRequest(BaseModel):
     """Request to rename a multi-turn session"""
+
     session_id: str
     new_name: str
     user_id: str
@@ -131,6 +142,7 @@ class RenameMultiSessionRequest(BaseModel):
 # Template Models
 class Template(BaseModel):
     """Template model for workflow templates"""
+
     title: str
     running_time: str
     tools: int
@@ -140,11 +152,13 @@ class Template(BaseModel):
 
 class TemplateListRequest(BaseModel):
     """Request with list of templates"""
+
     templates: List[Template]
 
 
 class TemplateResponse(BaseModel):
     """Response for template operations"""
+
     success: bool
     message: str
     total_templates: Optional[int] = None
@@ -153,12 +167,14 @@ class TemplateResponse(BaseModel):
 # Sharing Models
 class ShareSessionRequest(BaseModel):
     """Request to share a session"""
+
     session_id: str
     user_id: Optional[str] = None
 
 
 class SharedSessionInfo(BaseModel):
     """Information about a shared session"""
+
     session_id: str
     title: str
     description: Optional[str] = None
@@ -176,9 +192,18 @@ class SharedSessionInfo(BaseModel):
 class UserRequest:
     """Represents a user request in the queue system"""
 
-    def __init__(self, session_id: str, message: str, language: Language, uploaded_files: List[str] = None,
-                 is_continuation: bool = False, previous_context: str = "", turn_number: int = 1, user_id: str = None,
-                 turn_type: str = "execution"):
+    def __init__(
+        self,
+        session_id: str,
+        message: str,
+        language: Language,
+        uploaded_files: List[str] = None,
+        is_continuation: bool = False,
+        previous_context: str = "",
+        turn_number: int = 1,
+        user_id: str = None,
+        turn_type: str = "execution",
+    ):
         self.session_id = session_id
         self.message = message
         self.language = language

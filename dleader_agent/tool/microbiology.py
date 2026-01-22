@@ -1413,6 +1413,26 @@ def predict_rna_structure_viennarna(rna_sequence, output_prefix="rna_structure")
         for left, right in sorted(pairs):
             f.write(f"Base pair: {rna_sequence[left]}({left + 1})-{rna_sequence[right]}({right + 1})\n")
 
+    # Save structured JSON for frontend visualization
+    import json
+
+    json_output = {
+        "rna_structures": [
+            {
+                "id": output_prefix,
+                "sequence": rna_sequence,
+                "structure": structure,
+                "length": len(rna_sequence),
+                "base_pairs": structure.count("("),
+                "mfe": mfe,
+                "method": "viennarna",
+            }
+        ]
+    }
+    json_file = f"{output_prefix}_rna_structure.json"
+    with open(json_file, "w") as f:
+        json.dump(json_output, f, indent=2)
+
     # Create research log
     log = f"""
 RNA Secondary Structure Prediction Log:
@@ -1427,16 +1447,17 @@ Summary:
 The RNA sequence forms a secondary structure with a minimum free energy of {mfe} kcal/mol.
 The structure contains {structure.count("(")} base pairs forming stems and loops.
 See {structure_file} and {viz_file} for detailed structure information.
+
+__RNA_STRUCTURE_JSON_START__
+{json.dumps(json_output)}
+__RNA_STRUCTURE_JSON_END__
 """
 
     return log
 
 
 def predict_rna_structure_rnafm(
-    sequences: list,
-    output_file: str = "rna_structures_rnafm.txt",
-    poll_interval: float = 10.0,
-    timeout: int = 600
+    sequences: list, output_file: str = "rna_structures_rnafm.txt", poll_interval: float = 10.0, timeout: int = 600
 ) -> str:
     """Predict RNA secondary structure using RNA-FM deep learning model.
 
@@ -1468,10 +1489,9 @@ def predict_rna_structure_rnafm(
 
     Examples
     --------
-    >>> predict_rna_structure_rnafm([
-    ...     {"id": "seq1", "sequence": "GCGCGCGCGC"},
-    ...     {"id": "seq2", "sequence": "AAAAUUUUGGGGCCCC"}
-    ... ])
+    >>> predict_rna_structure_rnafm(
+    ...     [{"id": "seq1", "sequence": "GCGCGCGCGC"}, {"id": "seq2", "sequence": "AAAAUUUUGGGGCCCC"}]
+    ... )
     """
     import time
     import requests
@@ -1482,13 +1502,15 @@ def predict_rna_structure_rnafm(
     normalized_sequences = []
     for i, seq in enumerate(sequences):
         if isinstance(seq, str):
-            normalized_sequences.append({"id": f"seq_{i+1}", "sequence": seq.upper().strip()})
+            normalized_sequences.append({"id": f"seq_{i + 1}", "sequence": seq.upper().strip()})
         elif isinstance(seq, dict):
-            seq_id = seq.get("id", f"seq_{i+1}")
+            seq_id = seq.get("id", f"seq_{i + 1}")
             sequence = seq.get("sequence", "").upper().strip()
             normalized_sequences.append({"id": seq_id, "sequence": sequence})
         else:
-            return f"ERROR: Invalid sequence format at index {i}. Expected string or dict with 'id' and 'sequence' keys."
+            return (
+                f"ERROR: Invalid sequence format at index {i}. Expected string or dict with 'id' and 'sequence' keys."
+            )
 
     # Validate sequences
     valid_nucleotides = set("AUGCT")  # Allow T, will be converted to U by API
@@ -1507,7 +1529,7 @@ def predict_rna_structure_rnafm(
             f"{BASE_URL}/predict",
             json={"sequences": normalized_sequences},
             headers={"Content-Type": "application/json"},
-            timeout=30
+            timeout=30,
         )
         response.raise_for_status()
         submit_result = response.json()
@@ -1559,7 +1581,7 @@ def predict_rna_structure_rnafm(
         f.write("RNA Secondary Structure Prediction Results (RNA-FM)\n")
         f.write("=" * 50 + "\n\n")
         for i, pred in enumerate(predictions):
-            seq_id = normalized_sequences[i]["id"] if i < len(normalized_sequences) else f"seq_{i+1}"
+            seq_id = normalized_sequences[i]["id"] if i < len(normalized_sequences) else f"seq_{i + 1}"
             sequence = pred.get("sequence", "")
             dot_bracket = pred.get("dot_bracket", "")
             f.write(f"ID: {seq_id}\n")
@@ -1568,6 +1590,26 @@ def predict_rna_structure_rnafm(
             f.write(f"Length: {len(sequence)} nt\n")
             f.write(f"Base pairs: {dot_bracket.count('(')}\n")
             f.write("-" * 50 + "\n\n")
+
+    # Save structured JSON for frontend visualization
+    import json
+
+    json_output = {
+        "rna_structures": [
+            {
+                "id": normalized_sequences[i]["id"] if i < len(normalized_sequences) else f"seq_{i + 1}",
+                "sequence": pred.get("sequence", ""),
+                "structure": pred.get("dot_bracket", ""),
+                "length": len(pred.get("sequence", "")),
+                "base_pairs": pred.get("dot_bracket", "").count("("),
+                "method": "rnafm",
+            }
+            for i, pred in enumerate(predictions)
+        ]
+    }
+    json_file = output_file.replace(".txt", ".json")
+    with open(json_file, "w") as f:
+        json.dump(json_output, f, indent=2)
 
     # Create summary
     summary_lines = [
@@ -1580,9 +1622,17 @@ def predict_rna_structure_rnafm(
     ]
 
     for i, pred in enumerate(predictions):
-        seq_id = normalized_sequences[i]["id"] if i < len(normalized_sequences) else f"seq_{i+1}"
+        seq_id = normalized_sequences[i]["id"] if i < len(normalized_sequences) else f"seq_{i + 1}"
         dot_bracket = pred.get("dot_bracket", "")
         summary_lines.append(f"  {seq_id}: {dot_bracket} ({dot_bracket.count('(')} base pairs)")
+
+    # Include JSON data in output for structured capture
+    # This allows the server to extract RNA structure data directly from tool output
+    json_data_str = json.dumps(json_output)
+    summary_lines.append("")
+    summary_lines.append("__RNA_STRUCTURE_JSON_START__")
+    summary_lines.append(json_data_str)
+    summary_lines.append("__RNA_STRUCTURE_JSON_END__")
 
     return "\n".join(summary_lines)
 

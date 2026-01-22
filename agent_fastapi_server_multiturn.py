@@ -40,8 +40,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import uvicorn
-from fastapi import (FastAPI, File, Form, HTTPException, Request, UploadFile,
-                     WebSocket, WebSocketDisconnect)
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -53,14 +52,19 @@ sys.path.insert(0, os.getcwd())
 # Import cloud storage manager
 from cloud_storage_manager import cloud_storage_manager
 from dleader_agent.agent.a1 import A1
+
 # Import enhanced multi-turn handler
 from enhanced_multiturn_handler import EnhancedMultiTurnHandler
+
 # Import template retriever for workflow template matching
 from template_retriever import TemplateRetriever
+
 # Import unified session manager
 from unified_session_manager import get_unified_session_manager
+
 # Import TurnType enum from models
 from api.models import TurnType
+
 # Import allowed users list
 from allowed_emails import is_user_allowed, ALLOWED_EMAILS
 
@@ -75,9 +79,11 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024  # Convert to bytes
 # Language and timezone configurations
 JST = timezone(timedelta(hours=9))
 
+
 class Language(str, Enum):
     EN = "en"
     JP = "jp"
+
 
 def now_jst():
     """Get current time in JST (UTC+9)"""
@@ -153,10 +159,9 @@ Respond with ONLY "YES" or "NO"."""
             max_tokens=10,
             temperature=0,
             system=system_prompt,
-            messages=[{
-                "role": "user",
-                "content": f"Query: {query}\n\nDoes this query require workflow template matching?"
-            }]
+            messages=[
+                {"role": "user", "content": f"Query: {query}\n\nDoes this query require workflow template matching?"}
+            ],
         )
 
         # Parse response
@@ -188,6 +193,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     user_id: Optional[str] = None
 
+
 class ChatResponse(BaseModel):
     session_id: str
     status: str
@@ -197,11 +203,13 @@ class ChatResponse(BaseModel):
     session_path: Optional[str] = None
     error: Optional[str] = None
 
+
 class QueueStatus(BaseModel):
     position: int
     estimated_wait_time: int  # in seconds
     total_users_in_queue: int
     chats_ahead: int  # number of chats waiting before this one
+
 
 class SessionInfo(BaseModel):
     session_id: str
@@ -209,6 +217,7 @@ class SessionInfo(BaseModel):
     created_at: str
     language: Language
     query: str
+
 
 # Multi-Turn Data Structures
 class ConversationTurn(BaseModel):
@@ -221,6 +230,8 @@ class ConversationTurn(BaseModel):
     timestamp: str
     status: str = "processing"
     ready_for_execution: Optional[bool] = None  # Only relevant for planning turns
+    structured_data: Optional[Dict[str, Any]] = None  # For RNA structures, etc.
+
 
 class MultiTurnSession(BaseModel):
     session_id: str
@@ -253,16 +264,19 @@ class MultiTurnSession(BaseModel):
         """Get the latest query from the turns"""
         return self.turns[-1].query if self.turns else ""
 
+
 class ContinueRequest(BaseModel):
     session_id: str
     message: str
     language: Language = Language.EN
     user_id: Optional[str] = None
 
+
 class RenameMultiSessionRequest(BaseModel):
     session_id: str
     new_name: str
     user_id: str
+
 
 # Template Models
 class Template(BaseModel):
@@ -275,18 +289,22 @@ class Template(BaseModel):
     change_suggestions: Optional[List[str]] = None
     session_id: Optional[str] = None
 
+
 class TemplateListRequest(BaseModel):
     templates: List[Template]
+
 
 class TemplateResponse(BaseModel):
     success: bool
     message: str
     total_templates: Optional[int] = None
 
+
 # Sharing Models
 class ShareSessionRequest(BaseModel):
     session_id: str
     user_id: Optional[str] = None
+
 
 class SharedSessionInfo(BaseModel):
     session_id: str
@@ -301,16 +319,27 @@ class SharedSessionInfo(BaseModel):
     first_query: str
     last_query: str
 
+
 # Queue Management System
 class UserRequest:
-    def __init__(self, session_id: str, message: str, language: Language, uploaded_files: List[str] = None,
-                 is_continuation: bool = False, previous_context: str = "", turn_number: int = 1, user_id: str = None,
-                 use_template: bool = True, turn_type: str = "execution"):
+    def __init__(
+        self,
+        session_id: str,
+        message: str,
+        language: Language,
+        uploaded_files: List[str] = None,
+        is_continuation: bool = False,
+        previous_context: str = "",
+        turn_number: int = 1,
+        user_id: str = None,
+        use_template: bool = True,
+        turn_type: str = "execution",
+    ):
         self.session_id = session_id
         # Sanitize message: convert HTML <br> tags and newlines to spaces to avoid parsing issues
-        sanitized = re.sub(r'<br\s*/?>', ' ', message, flags=re.IGNORECASE)
-        sanitized = re.sub(r'\n+', ' ', sanitized)  # Replace newlines with spaces
-        sanitized = re.sub(r'\s+', ' ', sanitized).strip()  # Normalize multiple spaces
+        sanitized = re.sub(r"<br\s*/?>", " ", message, flags=re.IGNORECASE)
+        sanitized = re.sub(r"\n+", " ", sanitized)  # Replace newlines with spaces
+        sanitized = re.sub(r"\s+", " ", sanitized).strip()  # Normalize multiple spaces
         self.message = sanitized
         self.language = language
         self.uploaded_files = uploaded_files or []
@@ -368,6 +397,7 @@ Current question/request:
 Please provide a response that builds upon the previous analysis and addresses the current question."""
         return self.message
 
+
 class QueueManager:
     def __init__(self, skip_startup_session_check: bool = False):
         """Initialize QueueManager
@@ -413,24 +443,21 @@ class QueueManager:
         # Start periodic cleanup thread for old cached sessions
         self.cleanup_thread = threading.Thread(target=self._periodic_cache_cleanup, daemon=True)
         self.cleanup_thread.start()
-    
+
     def add_request(self, user_request: UserRequest) -> int:
         """Add request to queue and return position"""
         with self.processing_lock:
             self.active_sessions[user_request.session_id] = user_request
             self.request_queue.put(user_request)
             return self.request_queue.qsize()
-    
+
     def get_queue_status(self, session_id: str) -> Optional[QueueStatus]:
         """Get current queue position for a session"""
         with self.processing_lock:
             if session_id == self.current_processing_session:
                 # Currently processing - no one ahead in the queue
                 return QueueStatus(
-                    position=0,
-                    estimated_wait_time=0,
-                    total_users_in_queue=self.request_queue.qsize(),
-                    chats_ahead=0
+                    position=0, estimated_wait_time=0, total_users_in_queue=self.request_queue.qsize(), chats_ahead=0
                 )
 
             # Find position in queue
@@ -463,11 +490,11 @@ class QueueManager:
                     position=position,
                     estimated_wait_time=estimated_wait,
                     total_users_in_queue=self.request_queue.qsize(),
-                    chats_ahead=chats_ahead
+                    chats_ahead=chats_ahead,
                 )
 
             return None
-    
+
     def get_session_progress(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get current progress for a session"""
         if session_id in self.active_sessions:
@@ -528,8 +555,8 @@ class QueueManager:
                 "json_result": user_request.json_result,
                 "periodic_snapshots": user_request.periodic_snapshots,
                 "snapshot_count": len(user_request.periodic_snapshots),
-                "user_id": getattr(user_request, 'user_id', None),  # Include user_id for security
-                "storage_location": "active"  # Mark as active session for /status endpoint
+                "user_id": getattr(user_request, "user_id", None),  # Include user_id for security
+                "storage_location": "active",  # Mark as active session for /status endpoint
             }
 
         # Try to load from persistent storage if not in active sessions
@@ -544,7 +571,7 @@ class QueueManager:
         import re
 
         # Pattern to match Human Message sections with enhanced content (supports both 70 and 80 char formats)
-        pattern = r'(=+ Human Message =+\n\n)(.*?)((?=\n=+ Ai Message|$))'
+        pattern = r"(=+ Human Message =+\n\n)(.*?)((?=\n=+ Ai Message|$))"
 
         def replace_human_message(match):
             prefix = match.group(1)
@@ -560,9 +587,9 @@ class QueueManager:
         if not user_request.template_matched:
             return thinking_content
 
-        template_header = f"""{'='*40}
+        template_header = f"""{"=" * 40}
 WORKFLOW TEMPLATE MATCHED
-{'='*40}
+{"=" * 40}
 
 Template: {user_request.template_title}
 Confidence: {user_request.template_confidence}
@@ -571,17 +598,19 @@ Reasoning: {user_request.template_reasoning}
         if user_request.template_modification:
             template_header += f"Modification Applied: {user_request.template_modification}\n"
 
-        template_header += f"\n{'='*40}\n\n"
+        template_header += f"\n{'=' * 40}\n\n"
         return template_header + thinking_content
 
-    def create_json_snapshot(self, user_request: UserRequest, accumulated_thinking: str = "", session_path: str = "") -> dict:
+    def create_json_snapshot(
+        self, user_request: UserRequest, accumulated_thinking: str = "", session_path: str = ""
+    ) -> dict:
         """Create a JSON snapshot of current progress"""
         # Collect image files from session if path exists
         # For multi-turn sessions, only include images created during this turn
         image_files = []
         if session_path and os.path.exists(session_path):
-            image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp'}
-            turn_start_time = user_request.turn_start_time if hasattr(user_request, 'turn_start_time') else None
+            image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp"}
+            turn_start_time = user_request.turn_start_time if hasattr(user_request, "turn_start_time") else None
             for file in os.listdir(session_path):
                 if any(file.lower().endswith(ext) for ext in image_extensions):
                     file_path = os.path.join(session_path, file)
@@ -604,17 +633,17 @@ Reasoning: {user_request.template_reasoning}
             "query": user_request.message,
             "files": {
                 "images": image_files,
-                "session_zip": None  # Will be set after completion
+                "session_zip": None,  # Will be set after completion
             },
             "content": {
                 "thinking_content": cleaned_thinking,
                 "thinking_length": len(cleaned_thinking),
-                "raw_result": user_request.result
+                "raw_result": user_request.result,
             },
             "error": user_request.error,
             "session_path": session_path,
             "is_complete": user_request.is_complete,
-            "is_cancelled": user_request.is_cancelled
+            "is_cancelled": user_request.is_cancelled,
         }
         return snapshot
 
@@ -651,6 +680,7 @@ Reasoning: {user_request.template_reasoning}
                                 except:
                                     return 0
                             return 0
+
                         matching_sessions.sort(key=get_turn_number, reverse=True)
                         actual_session_id = matching_sessions[0]
                     print(f"Stop request for '{session_id}' resolved to active session '{actual_session_id}'")
@@ -671,22 +701,28 @@ Reasoning: {user_request.template_reasoning}
             user_request.stop_requested = True  # Set stop flag
 
             # Add cancellation progress update
-            user_request.progress_queue.put({
-                "type": "cancelled",
-                "message": "Task was cancelled by user",
-                "was_queued": was_queued,
-                "was_running": was_running,
-                "timestamp": datetime.now().isoformat()
-            })
+            user_request.progress_queue.put(
+                {
+                    "type": "cancelled",
+                    "message": "Task was cancelled by user",
+                    "was_queued": was_queued,
+                    "was_running": was_running,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
 
             # Update multiturn session's last_turn_finished_at
-            multiturn_session_id = getattr(user_request, 'original_session_id', None) or session_id.split('_turn_')[0]
+            multiturn_session_id = getattr(user_request, "original_session_id", None) or session_id.split("_turn_")[0]
             if multiturn_session_id in self.multiturn_sessions:
                 self.multiturn_sessions[multiturn_session_id].last_turn_finished_at = datetime.now().isoformat()
                 self._save_multiturn_session(self.multiturn_sessions[multiturn_session_id])
 
             # Force stop the agent process if running
-            if hasattr(user_request, 'agent_process') and user_request.agent_process and user_request.agent_process.is_alive():
+            if (
+                hasattr(user_request, "agent_process")
+                and user_request.agent_process
+                and user_request.agent_process.is_alive()
+            ):
                 pid = user_request.agent_process.pid
                 print(f"Terminating process tree for session {actual_session_id} (PID: {pid})")
 
@@ -744,7 +780,11 @@ Reasoning: {user_request.template_reasoning}
                     print(f"WARNING: Process for session {actual_session_id} may still be running")
 
             # Also check for legacy thread-based execution
-            elif hasattr(user_request, 'agent_thread') and user_request.agent_thread and user_request.agent_thread.is_alive():
+            elif (
+                hasattr(user_request, "agent_thread")
+                and user_request.agent_thread
+                and user_request.agent_thread.is_alive()
+            ):
                 # Legacy thread handling
                 print(f"WARNING: Session {actual_session_id} using thread-based execution (cannot force kill)")
                 stopped = self._wait_and_verify_stop(user_request, actual_session_id, max_wait=3)
@@ -757,7 +797,12 @@ Reasoning: {user_request.template_reasoning}
                 # Remove from active sessions immediately for queued cancellations
                 if actual_session_id in self.active_sessions:
                     del self.active_sessions[actual_session_id]
-                return {"success": True, "was_queued": True, "was_running": False, "actual_session_id": actual_session_id}
+                return {
+                    "success": True,
+                    "was_queued": True,
+                    "was_running": False,
+                    "actual_session_id": actual_session_id,
+                }
 
             # Move any generated files to session folder to keep workspace clean
             self._move_generated_files_to_session(user_request)
@@ -768,11 +813,16 @@ Reasoning: {user_request.template_reasoning}
             # Ensure S3 upload for cancelled session
             self._trigger_s3_upload_for_session(user_request)
 
-            return {"success": True, "was_queued": False, "was_running": was_running, "actual_session_id": actual_session_id}
+            return {
+                "success": True,
+                "was_queued": False,
+                "was_running": was_running,
+                "actual_session_id": actual_session_id,
+            }
 
     def _wait_and_verify_stop(self, user_request: UserRequest, session_id: str, max_wait: int = 10) -> bool:
         """Wait for thread to stop and verify it's really stopped"""
-        if not hasattr(user_request, 'agent_thread') or not user_request.agent_thread:
+        if not hasattr(user_request, "agent_thread") or not user_request.agent_thread:
             return True
 
         print(f"Waiting for thread {session_id} to stop (max {max_wait} seconds)...")
@@ -798,6 +848,7 @@ Reasoning: {user_request.template_reasoning}
                 # Copy ZIP file to session folder so it gets uploaded to S3
                 if zip_path and os.path.exists(zip_path):
                     import shutil
+
                     zip_filename = os.path.basename(zip_path)
                     session_zip_path = os.path.join(user_request.session_path, zip_filename)
                     shutil.copy2(zip_path, session_zip_path)
@@ -807,7 +858,9 @@ Reasoning: {user_request.template_reasoning}
             session_data = {
                 "session_id": user_request.session_id,
                 "message": user_request.message,
-                "language": user_request.language.value if hasattr(user_request.language, 'value') else user_request.language,
+                "language": user_request.language.value
+                if hasattr(user_request.language, "value")
+                else user_request.language,
                 "status": user_request.status,
                 "is_complete": user_request.is_complete,
                 "is_cancelled": user_request.is_cancelled,
@@ -816,18 +869,21 @@ Reasoning: {user_request.template_reasoning}
                 "json_result": user_request.json_result,
                 "user_id": user_request.user_id,
                 "session_path": user_request.session_path,
-                "created_at": user_request.created_at.isoformat() if hasattr(user_request.created_at, 'isoformat') else str(user_request.created_at)
+                "created_at": user_request.created_at.isoformat()
+                if hasattr(user_request.created_at, "isoformat")
+                else str(user_request.created_at),
             }
 
             # Upload to cloud asynchronously
             def upload_in_thread():
                 import asyncio
+
                 try:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
-                    loop.run_until_complete(cloud_storage_manager.upload_session_to_cloud(
-                        user_request.session_id, session_data
-                    ))
+                    loop.run_until_complete(
+                        cloud_storage_manager.upload_session_to_cloud(user_request.session_id, session_data)
+                    )
                     loop.close()
                     print(f"Successfully uploaded session {user_request.session_id} to S3")
                 except Exception as e:
@@ -859,10 +915,10 @@ Reasoning: {user_request.template_reasoning}
                 "periodic_snapshots": user_request.periodic_snapshots,
                 "session_path": user_request.session_path,
                 "all_progress_updates": user_request.all_progress_updates,
-                "user_id": user_request.user_id
+                "user_id": user_request.user_id,
             }
 
-            with open(session_file, 'w', encoding='utf-8') as f:
+            with open(session_file, "w", encoding="utf-8") as f:
                 json.dump(session_data, f, indent=2, ensure_ascii=False, default=str)
         except Exception as e:
             print(f"Error saving session {user_request.session_id} to storage: {e}")
@@ -890,17 +946,34 @@ Reasoning: {user_request.template_reasoning}
 
             # System files to never move
             system_files = {
-                'requirements.txt', 'requirements_fastapi.txt', 'requirements-test.txt',
-                'pytest.ini', 'README.md', 'CLOUD_STORAGE_README.md', 'TEST_SUMMARY.md',
-                '.env', '.env.example', 'Dockerfile', 'docker-compose.yml', '.gitignore',
-                'setup.py', 'setup.cfg', 'pyproject.toml', 'Makefile', 'dleader_logo.png'
+                "requirements.txt",
+                "requirements_fastapi.txt",
+                "requirements-test.txt",
+                "pytest.ini",
+                "README.md",
+                "CLOUD_STORAGE_README.md",
+                "TEST_SUMMARY.md",
+                ".env",
+                ".env.example",
+                "Dockerfile",
+                "docker-compose.yml",
+                ".gitignore",
+                "setup.py",
+                "setup.cfg",
+                "pyproject.toml",
+                "Makefile",
+                "dleader_logo.png",
             }
 
             # Application Python files to skip
             app_python_files = {
-                'agent_fastapi_server_multiturn.py', 'agent_gradio_fastapi_multiturn.py',
-                'cloud_storage_manager.py', 'unified_session_manager.py', 'a1.py',
-                'agent_fastapi_server.py', 'agent_interface_gradio.py'
+                "agent_fastapi_server_multiturn.py",
+                "agent_gradio_fastapi_multiturn.py",
+                "cloud_storage_manager.py",
+                "unified_session_manager.py",
+                "a1.py",
+                "agent_fastapi_server.py",
+                "agent_interface_gradio.py",
             }
 
             import glob
@@ -912,10 +985,26 @@ Reasoning: {user_request.template_reasoning}
 
             # Directories to never move
             system_dirs = {
-                'session_storage', 'results', 'chat_zips', 'multiturn_sessions',
-                'chat_sessions', 's3_mongodb', 'tests', 'docs', '__pycache__',
-                '.git', '.github', 'node_modules', 'venv', 'env', '.env',
-                'build', 'dist', 'egg-info', '.pytest_cache', '.vscode'
+                "session_storage",
+                "results",
+                "chat_zips",
+                "multiturn_sessions",
+                "chat_sessions",
+                "s3_mongodb",
+                "tests",
+                "docs",
+                "__pycache__",
+                ".git",
+                ".github",
+                "node_modules",
+                "venv",
+                "env",
+                ".env",
+                "build",
+                "dist",
+                "egg-info",
+                ".pytest_cache",
+                ".vscode",
             }
 
             # Scan ALL files and directories in current directory
@@ -957,7 +1046,9 @@ Reasoning: {user_request.template_reasoning}
                             total_size_mb = total_size / (1024 * 1024)
 
                             if total_size_mb > 500:
-                                print(f"Directory {filename} is too large ({total_size_mb:.1f}MB > 500MB limit), deleting...")
+                                print(
+                                    f"Directory {filename} is too large ({total_size_mb:.1f}MB > 500MB limit), deleting..."
+                                )
                                 shutil.rmtree(file_path)
                                 skipped_large_files.append(f"{filename}/ ({total_size_mb:.1f}MB)")
                             else:
@@ -977,11 +1068,11 @@ Reasoning: {user_request.template_reasoning}
                     continue
 
                 # Skip test files
-                if filename.startswith('test_') and filename.endswith('.py'):
+                if filename.startswith("test_") and filename.endswith(".py"):
                     continue
 
                 # Skip compiled Python files
-                if filename.endswith(('.pyc', '.pyo', '.pyd')):
+                if filename.endswith((".pyc", ".pyo", ".pyd")):
                     continue
 
                 # Check if file was created or modified after task started
@@ -1045,14 +1136,16 @@ Reasoning: {user_request.template_reasoning}
                 print(f"{summary} for session {user_request.session_id}")
 
                 # Add progress update about file cleanup
-                user_request.progress_queue.put({
-                    "type": "cleanup",
-                    "message": summary,
-                    "files_moved": moved_files,
-                    "folders_moved": moved_folders,
-                    "files_deleted": skipped_large_files,
-                    "timestamp": datetime.now().isoformat()
-                })
+                user_request.progress_queue.put(
+                    {
+                        "type": "cleanup",
+                        "message": summary,
+                        "files_moved": moved_files,
+                        "folders_moved": moved_folders,
+                        "files_deleted": skipped_large_files,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
             else:
                 print(f"No new files found to move for session {user_request.session_id}")
 
@@ -1071,7 +1164,7 @@ Reasoning: {user_request.template_reasoning}
             if not os.path.exists(session_file):
                 return None
 
-            with open(session_file, 'r', encoding='utf-8') as f:
+            with open(session_file, "r", encoding="utf-8") as f:
                 session_data = json.load(f)
 
             return {
@@ -1088,7 +1181,7 @@ Reasoning: {user_request.template_reasoning}
                 "periodic_snapshots": session_data.get("periodic_snapshots", []),
                 "snapshot_count": len(session_data.get("periodic_snapshots", [])),
                 "session_path": session_data.get("session_path"),  # Include session path
-                "user_id": session_data.get("user_id")  # Include user_id
+                "user_id": session_data.get("user_id"),  # Include user_id
             }
         except json.JSONDecodeError as e:
             # JSON parsing error - file is corrupted
@@ -1116,7 +1209,7 @@ Reasoning: {user_request.template_reasoning}
             incomplete_sessions = 0
 
             for filename in os.listdir(self.sessions_storage_dir):
-                if filename.endswith('.json'):
+                if filename.endswith(".json"):
                     total_files += 1
                     session_id = filename[:-5]  # Remove .json extension
                     try:
@@ -1136,9 +1229,13 @@ Reasoning: {user_request.template_reasoning}
 
             # Log summary instead of individual errors
             if total_files > 0:
-                print(f"Session storage check: {total_files} files scanned, {corrupted_files} corrupted/skipped, {incomplete_sessions} incomplete")
+                print(
+                    f"Session storage check: {total_files} files scanned, {corrupted_files} corrupted/skipped, {incomplete_sessions} incomplete"
+                )
                 if corrupted_files > 0:
-                    print(f"Note: {corrupted_files} corrupted session files were skipped. Sessions are now managed via cloud storage.")
+                    print(
+                        f"Note: {corrupted_files} corrupted session files were skipped. Sessions are now managed via cloud storage."
+                    )
         except Exception as e:
             print(f"Error scanning session storage: {e}")
 
@@ -1152,36 +1249,34 @@ Reasoning: {user_request.template_reasoning}
             from s3_mongodb.func_mongodb import get_mongodb_collection
 
             # Clean up sessions collection
-            sessions_collection = get_mongodb_collection(
-                os.getenv("SESSION_DB_NAME", "dleader_agent"),
-                "sessions"
-            )
+            sessions_collection = get_mongodb_collection(os.getenv("SESSION_DB_NAME", "dleader_agent"), "sessions")
 
             if sessions_collection is not None:
                 # Find all sessions with status="processing"
                 result = sessions_collection.update_many(
                     {"status": "processing"},
-                    {"$set": {
-                        "status": "interrupted",
-                        "interrupted_at": datetime.now().isoformat(),
-                        "interrupted_reason": "Server restart - session was processing when server stopped"
-                    }}
+                    {
+                        "$set": {
+                            "status": "interrupted",
+                            "interrupted_at": datetime.now().isoformat(),
+                            "interrupted_reason": "Server restart - session was processing when server stopped",
+                        }
+                    },
                 )
                 if result.modified_count > 0:
-                    print(f"[Startup Cleanup] Marked {result.modified_count} stale processing sessions as 'interrupted' in sessions collection")
+                    print(
+                        f"[Startup Cleanup] Marked {result.modified_count} stale processing sessions as 'interrupted' in sessions collection"
+                    )
 
             # Clean up multiturn_sessions collection - update turns with status="processing"
             multiturn_collection = get_mongodb_collection(
-                os.getenv("SESSION_DB_NAME", "dleader_agent"),
-                "multiturn_sessions"
+                os.getenv("SESSION_DB_NAME", "dleader_agent"), "multiturn_sessions"
             )
 
             if multiturn_collection is not None:
                 # Find multiturn sessions that have turns with status="processing"
                 # and update those specific turns
-                stale_sessions = multiturn_collection.find({
-                    "turns": {"$elemMatch": {"status": "processing"}}
-                })
+                stale_sessions = multiturn_collection.find({"turns": {"$elemMatch": {"status": "processing"}}})
 
                 updated_count = 0
                 for session in stale_sessions:
@@ -1197,10 +1292,7 @@ Reasoning: {user_request.template_reasoning}
                             updated = True
 
                     if updated:
-                        multiturn_collection.update_one(
-                            {"_id": session_id},
-                            {"$set": {"turns": turns}}
-                        )
+                        multiturn_collection.update_one({"_id": session_id}, {"$set": {"turns": turns}})
                         updated_count += 1
 
                 if updated_count > 0:
@@ -1209,6 +1301,7 @@ Reasoning: {user_request.template_reasoning}
         except Exception as e:
             print(f"[Startup Cleanup] Error cleaning up stale processing sessions: {e}")
             import traceback
+
             traceback.print_exc()
 
     # REMOVED: No longer loading multi-turn sessions from local JSON files
@@ -1244,13 +1337,13 @@ Reasoning: {user_request.template_reasoning}
             for turn in session.turns:
                 files_info = turn.files
                 if isinstance(files_info, dict):
-                    tp_file = files_info.get('thinking_process', {})
+                    tp_file = files_info.get("thinking_process", {})
                     if isinstance(tp_file, dict):
-                        tp_filename = tp_file.get('filename', 'N/A')
+                        tp_filename = tp_file.get("filename", "N/A")
                     else:
                         tp_filename = str(tp_file)[:50]
                 else:
-                    tp_filename = str(files_info)[:50] if files_info else 'None'
+                    tp_filename = str(files_info)[:50] if files_info else "None"
                 print(f"[DEBUG]   Turn {turn.turn_number}: TP file = {tp_filename}")
 
             # Prepare session data for MongoDB
@@ -1260,16 +1353,16 @@ Reasoning: {user_request.template_reasoning}
 
             # DEBUG: Print serialized data going to MongoDB
             print(f"[DEBUG] Serialized data for MongoDB:")
-            for i, turn in enumerate(session_data.get('turns', [])):
-                files_info = turn.get('files', {})
+            for i, turn in enumerate(session_data.get("turns", [])):
+                files_info = turn.get("files", {})
                 if isinstance(files_info, dict):
-                    tp_file = files_info.get('thinking_process', {})
+                    tp_file = files_info.get("thinking_process", {})
                     if isinstance(tp_file, dict):
-                        tp_filename = tp_file.get('filename', 'N/A')
+                        tp_filename = tp_file.get("filename", "N/A")
                     else:
                         tp_filename = str(tp_file)[:50]
                 else:
-                    tp_filename = str(files_info)[:50] if files_info else 'None'
+                    tp_filename = str(files_info)[:50] if files_info else "None"
                 print(f"[DEBUG]   Turn {turn.get('turn_number')}: TP file = {tp_filename}")
 
             # Save to MongoDB
@@ -1277,7 +1370,7 @@ Reasoning: {user_request.template_reasoning}
                 "database_name": os.getenv("SESSION_DB_NAME", "dleader_agent"),
                 "collection_name": "multiturn_sessions",
                 "items": [session_data],
-                "id_field": "_id"
+                "id_field": "_id",
             }
 
             result = upsert_wrapper(event)
@@ -1288,7 +1381,9 @@ Reasoning: {user_request.template_reasoning}
         except Exception as e:
             print(f"Error saving multi-turn session {session.session_id} to MongoDB: {e}")
 
-    def create_or_get_multiturn_session(self, session_id: str, language: Language, user_id: str = None, initial_query: str = None) -> MultiTurnSession:
+    def create_or_get_multiturn_session(
+        self, session_id: str, language: Language, user_id: str = None, initial_query: str = None
+    ) -> MultiTurnSession:
         """Create new multi-turn session or get existing one from MongoDB"""
         # Check in-memory cache first
         if session_id in self.multiturn_sessions:
@@ -1297,10 +1392,8 @@ Reasoning: {user_request.template_reasoning}
         # Try to load from MongoDB
         try:
             from s3_mongodb.func_mongodb import get_mongodb_collection
-            collection = get_mongodb_collection(
-                os.getenv("SESSION_DB_NAME", "dleader_agent"),
-                "multiturn_sessions"
-            )
+
+            collection = get_mongodb_collection(os.getenv("SESSION_DB_NAME", "dleader_agent"), "multiturn_sessions")
             if collection is not None:
                 session_data = collection.find_one({"session_id": session_id})
                 if session_data:
@@ -1311,9 +1404,19 @@ Reasoning: {user_request.template_reasoning}
                         for t in session_data["turns"]:
                             turn_num = t.get("turn_number")
                             files = t.get("files", {})
-                            tp_file = files.get("thinking_process", {}).get("filename", "NONE") if isinstance(files.get("thinking_process"), dict) else "NONE"
-                            report_file = files.get("final_report", {}).get("filename", "NONE") if isinstance(files.get("final_report"), dict) else "NONE"
-                            print(f"[DEBUG QUEUEMGR LOAD FROM MONGODB]   Turn {turn_num}: TP={tp_file}, Report={report_file}")
+                            tp_file = (
+                                files.get("thinking_process", {}).get("filename", "NONE")
+                                if isinstance(files.get("thinking_process"), dict)
+                                else "NONE"
+                            )
+                            report_file = (
+                                files.get("final_report", {}).get("filename", "NONE")
+                                if isinstance(files.get("final_report"), dict)
+                                else "NONE"
+                            )
+                            print(
+                                f"[DEBUG QUEUEMGR LOAD FROM MONGODB]   Turn {turn_num}: TP={tp_file}, Report={report_file}"
+                            )
 
                     # Remove MongoDB _id field
                     session_data.pop("_id", None)
@@ -1338,7 +1441,7 @@ Reasoning: {user_request.template_reasoning}
             created_at=now,
             last_updated=now,
             language=language,
-            user_id=user_id
+            user_id=user_id,
         )
         self.multiturn_sessions[session_id] = session
         self._save_multiturn_session(session)
@@ -1353,12 +1456,7 @@ Reasoning: {user_request.template_reasoning}
         turn_number = session.total_turns + 1
         now = datetime.now().isoformat()
 
-        new_turn = ConversationTurn(
-            turn_number=turn_number,
-            query=query,
-            timestamp=now,
-            status="processing"
-        )
+        new_turn = ConversationTurn(turn_number=turn_number, query=query, timestamp=now, status="processing")
 
         session.turns.append(new_turn)
         session.total_turns = turn_number
@@ -1368,9 +1466,17 @@ Reasoning: {user_request.template_reasoning}
         self._save_multiturn_session(session)
         return turn_number
 
-    def complete_turn(self, session_id: str, turn_number: int, response_content: str,
-                     final_report: str, files: Dict[str, str], turn_type: str = "execution",
-                     ready_for_execution: bool = None):
+    def complete_turn(
+        self,
+        session_id: str,
+        turn_number: int,
+        response_content: str,
+        final_report: str,
+        files: Dict[str, str],
+        turn_type: str = "execution",
+        ready_for_execution: bool = None,
+        structured_data: Dict[str, Any] = None,
+    ):
         """Complete a turn with results
 
         Args:
@@ -1381,6 +1487,7 @@ Reasoning: {user_request.template_reasoning}
             files: Generated files
             turn_type: Type of turn ("planning" or "execution")
             ready_for_execution: For planning turns, whether agent is ready to execute
+            structured_data: Pre-extracted structured data (e.g., RNA structures)
         """
         # DEBUG: Print what files were passed in
         print(f"\n[DEBUG complete_turn] Session {session_id}, Turn {turn_number}")
@@ -1389,7 +1496,7 @@ Reasoning: {user_request.template_reasoning}
             for fname, fpath in files.items():
                 if isinstance(fpath, str):
                     # Extract just the filename from path
-                    filename_only = os.path.basename(fpath) if '/' in fpath else fpath
+                    filename_only = os.path.basename(fpath) if "/" in fpath else fpath
                     print(f"[DEBUG]   {fname}: {filename_only}")
                 else:
                     print(f"[DEBUG]   {fname}: {str(fpath)[:50]}")
@@ -1413,27 +1520,31 @@ Reasoning: {user_request.template_reasoning}
                 if files:
                     # Convert simple file paths to richer metadata
                     enhanced_files = {}
-                    for file_name, file_path in (files.items() if isinstance(files, dict) else enumerate(files)):
+                    for file_name, file_path in files.items() if isinstance(files, dict) else enumerate(files):
                         if isinstance(file_path, str):
                             # Extract filename from path
-                            filename = os.path.basename(file_path) if '/' in file_path or '\\' in file_path else file_path
+                            filename = (
+                                os.path.basename(file_path) if "/" in file_path or "\\" in file_path else file_path
+                            )
                             file_metadata = {
-                                'path': file_path,
-                                'filename': filename,
-                                'turn': turn_number,
-                                'created_at': datetime.now().isoformat()
+                                "path": file_path,
+                                "filename": filename,
+                                "turn": turn_number,
+                                "created_at": datetime.now().isoformat(),
                             }
 
                             # Check if we have S3 metadata for this file
                             turn_key = f"{session_id}_turn_{turn_number}"
-                            if hasattr(self, '_temp_s3_metadata') and turn_key in self._temp_s3_metadata:
+                            if hasattr(self, "_temp_s3_metadata") and turn_key in self._temp_s3_metadata:
                                 s3_metadata = self._temp_s3_metadata[turn_key].get(file_name, {})
                                 if s3_metadata:
-                                    file_metadata.update({
-                                        's3_key': s3_metadata.get('s3_key'),
-                                        'bucket': s3_metadata.get('bucket'),
-                                        'file_size': s3_metadata.get('file_size')
-                                    })
+                                    file_metadata.update(
+                                        {
+                                            "s3_key": s3_metadata.get("s3_key"),
+                                            "bucket": s3_metadata.get("bucket"),
+                                            "file_size": s3_metadata.get("file_size"),
+                                        }
+                                    )
 
                             enhanced_files[file_name if isinstance(files, dict) else str(file_path)] = file_metadata
                         else:
@@ -1442,7 +1553,7 @@ Reasoning: {user_request.template_reasoning}
 
                     # DEBUG: Print what turn.files was set to
                     print(f"[DEBUG] Turn.files SET TO:")
-                    tp_file = enhanced_files.get('thinking_process', {})
+                    tp_file = enhanced_files.get("thinking_process", {})
                     if isinstance(tp_file, dict):
                         print(f"[DEBUG]   thinking_process: {tp_file.get('path', 'N/A')}")
                     else:
@@ -1456,14 +1567,19 @@ Reasoning: {user_request.template_reasoning}
                             file_path = os.path.join(session_path, file_name)
                             if os.path.isfile(file_path):
                                 generated_files[file_name] = {
-                                    'path': file_path,
-                                    'turn': turn_number,
-                                    'created_at': datetime.now().isoformat()
+                                    "path": file_path,
+                                    "turn": turn_number,
+                                    "created_at": datetime.now().isoformat(),
                                 }
                         if generated_files:
                             turn.files = generated_files
                     else:
                         turn.files = files
+
+                # Store structured data (e.g., RNA structures) if provided
+                if structured_data:
+                    turn.structured_data = structured_data
+                    print(f"[DEBUG] Stored structured_data with keys: {list(structured_data.keys())}")
 
                 turn.status = "completed"
                 break
@@ -1551,7 +1667,9 @@ Reasoning: {user_request.template_reasoning}
                 if sessions_to_remove:
                     print(f"[Cache Cleanup] Removed {len(sessions_to_remove)} old sessions from cache")
                 else:
-                    print(f"[Cache Cleanup] No old sessions to remove (current cache size: {len(self.multiturn_sessions)})")
+                    print(
+                        f"[Cache Cleanup] No old sessions to remove (current cache size: {len(self.multiturn_sessions)})"
+                    )
 
             except Exception as e:
                 print(f"Error in periodic cache cleanup: {e}")
@@ -1566,14 +1684,16 @@ Reasoning: {user_request.template_reasoning}
             user_request.progress_queue.put({"type": "status", "message": "Starting agent initialization..."})
 
             # Update multiturn session's last_turn_started_at
-            multiturn_session_id = getattr(user_request, 'original_session_id', None) or user_request.session_id
+            multiturn_session_id = getattr(user_request, "original_session_id", None) or user_request.session_id
             if multiturn_session_id in self.multiturn_sessions:
-                self.multiturn_sessions[multiturn_session_id].last_turn_started_at = user_request.task_start_time.isoformat()
+                self.multiturn_sessions[
+                    multiturn_session_id
+                ].last_turn_started_at = user_request.task_start_time.isoformat()
                 self.multiturn_sessions[multiturn_session_id].last_turn_finished_at = None  # Reset finished time
                 self._save_multiturn_session(self.multiturn_sessions[multiturn_session_id])
 
             # For multi-turn sessions, use shared session folder
-            if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+            if hasattr(user_request, "original_session_id") and user_request.original_session_id:
                 # This is a continuation turn - use existing session folder
                 original_session_id = user_request.original_session_id
                 if original_session_id in self.session_history:
@@ -1603,14 +1723,16 @@ Reasoning: {user_request.template_reasoning}
             user_request.turn_start_time = start_time
             current_path = os.getcwd()
             chat_sessions_path = os.path.join(current_path, "chat_sessions")
-            
+
             # Initialize agent
             agent = create_agent()
-            
+
             # Handle uploaded files for this turn
             if user_request.uploaded_files:
                 user_request.progress_queue.put({"type": "status", "message": "Processing uploaded files..."})
-                print(f"Processing {len(user_request.uploaded_files)} uploaded files for session {user_request.session_id}")
+                print(
+                    f"Processing {len(user_request.uploaded_files)} uploaded files for session {user_request.session_id}"
+                )
                 print(f"Session path: {session_path}")
 
                 # Ensure session folder exists before copying files
@@ -1639,48 +1761,55 @@ Reasoning: {user_request.template_reasoning}
                         print(f"WARNING: Source file doesn't exist: {file_path}")
 
             # For multi-turn sessions, ensure all previous files are available
-            if user_request.is_continuation and hasattr(user_request, 'original_session_id'):
-                user_request.progress_queue.put({"type": "status", "message": "Checking for files from previous turns..."})
+            if user_request.is_continuation and hasattr(user_request, "original_session_id"):
+                user_request.progress_queue.put(
+                    {"type": "status", "message": "Checking for files from previous turns..."}
+                )
 
                 # Download files from S3 if cloud storage is configured
                 if cloud_storage_manager and cloud_storage_manager.s3_client:
                     try:
-                        user_request.progress_queue.put({"type": "status", "message": "Downloading files from previous turns..."})
+                        user_request.progress_queue.put(
+                            {"type": "status", "message": "Downloading files from previous turns..."}
+                        )
 
                         # Download all files from S3 for this session
                         downloaded_files = asyncio.run(
                             cloud_storage_manager.download_turn_files_from_s3(
-                                user_request.original_session_id,
-                                session_path
+                                user_request.original_session_id, session_path
                             )
                         )
 
                         if downloaded_files:
-                            user_request.progress_queue.put({
-                                "type": "status",
-                                "message": f"Downloaded {len(downloaded_files)} files from previous turns"
-                            })
+                            user_request.progress_queue.put(
+                                {
+                                    "type": "status",
+                                    "message": f"Downloaded {len(downloaded_files)} files from previous turns",
+                                }
+                            )
                             print(f"Downloaded {len(downloaded_files)} files from S3: {list(downloaded_files.keys())}")
                         else:
                             print(f"No files to download from S3 for session {user_request.original_session_id}")
 
                     except Exception as e:
                         print(f"Error downloading files from S3: {e}")
-                        user_request.progress_queue.put({
-                            "type": "status",
-                            "message": f"Warning: Could not download some files from previous turns: {str(e)}"
-                        })
+                        user_request.progress_queue.put(
+                            {
+                                "type": "status",
+                                "message": f"Warning: Could not download some files from previous turns: {str(e)}",
+                            }
+                        )
 
                 # Verify USER-UPLOADED files are available locally (not system files)
-                if hasattr(user_request, 'all_turn_files'):
+                if hasattr(user_request, "all_turn_files"):
                     missing_user_files = []
-                    system_file_prefixes = ['query_', 'report_', 'thinking_process_', 'result_', 'snapshot_']
+                    system_file_prefixes = ["query_", "report_", "thinking_process_", "result_", "snapshot_"]
 
                     for filename, file_info in user_request.all_turn_files.items():
                         # Skip system-generated files (these are in MongoDB, not needed locally)
                         if any(filename.startswith(prefix) for prefix in system_file_prefixes):
                             continue
-                        if filename.endswith('.zip'):
+                        if filename.endswith(".zip"):
                             continue
 
                         local_path = os.path.join(session_path, filename)
@@ -1689,27 +1818,33 @@ Reasoning: {user_request.template_reasoning}
                             logger.warning(f"User file {filename} is still missing after S3 download")
 
                     if missing_user_files:
-                        user_request.progress_queue.put({
-                            "type": "status",
-                            "message": f"Warning: {len(missing_user_files)} user files could not be retrieved: {', '.join(missing_user_files[:3])}"
-                        })
+                        user_request.progress_queue.put(
+                            {
+                                "type": "status",
+                                "message": f"Warning: {len(missing_user_files)} user files could not be retrieved: {', '.join(missing_user_files[:3])}",
+                            }
+                        )
 
             # Load ALL files from session folder into agent's data lake (including previous turns)
             agent.data_lake_dict = {}
             if os.path.exists(session_path):
                 for filename in os.listdir(session_path):
                     file_path = os.path.join(session_path, filename)
-                    if os.path.isfile(file_path) and not filename.startswith('.'):
+                    if os.path.isfile(file_path) and not filename.startswith("."):
                         try:
-                            if filename.endswith('.csv'):
+                            if filename.endswith(".csv"):
                                 data = pd.read_csv(file_path)
-                                agent.data_lake_dict[filename] = f"Dataset with {data.shape[0]} rows and {data.shape[1]} columns (Path: {file_path})"
-                            elif filename.endswith(('.xlsx', '.xls')):
+                                agent.data_lake_dict[filename] = (
+                                    f"Dataset with {data.shape[0]} rows and {data.shape[1]} columns (Path: {file_path})"
+                                )
+                            elif filename.endswith((".xlsx", ".xls")):
                                 data = pd.read_excel(file_path)
-                                agent.data_lake_dict[filename] = f"Excel file with {data.shape[0]} rows and {data.shape[1]} columns (Path: {file_path})"
-                            elif filename.endswith(('.txt', '.md', '.json')):
+                                agent.data_lake_dict[filename] = (
+                                    f"Excel file with {data.shape[0]} rows and {data.shape[1]} columns (Path: {file_path})"
+                                )
+                            elif filename.endswith((".txt", ".md", ".json")):
                                 agent.data_lake_dict[filename] = f"Text file (Path: {file_path})"
-                            elif filename.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg')):
+                            elif filename.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg")):
                                 agent.data_lake_dict[filename] = f"Image file (Path: {file_path})"
                             else:
                                 agent.data_lake_dict[filename] = f"File (format auto-detected) (Path: {file_path})"
@@ -1719,11 +1854,10 @@ Reasoning: {user_request.template_reasoning}
             # Configure agent with all available files
             if agent.data_lake_dict:
                 agent.configure()
-                user_request.progress_queue.put({
-                    "type": "status",
-                    "message": f"Loaded {len(agent.data_lake_dict)} files from session folder"
-                })
-            
+                user_request.progress_queue.put(
+                    {"type": "status", "message": f"Loaded {len(agent.data_lake_dict)} files from session folder"}
+                )
+
             # Use process-based execution for true termination capability
             # Create multiprocessing queues for communication
             message_queue = MPQueue()
@@ -1739,8 +1873,15 @@ Reasoning: {user_request.template_reasoning}
             # Create and start process
             agent_process = Process(
                 target=run_agent_in_process,
-                args=(message_queue, result_queue, user_request.enhanced_message, session_path,
-                      user_request.use_template, user_request.turn_type, user_request.agent_config)
+                args=(
+                    message_queue,
+                    result_queue,
+                    user_request.enhanced_message,
+                    session_path,
+                    user_request.use_template,
+                    user_request.turn_type,
+                    user_request.agent_config,
+                ),
             )
             user_request.agent_process = agent_process
             agent_process.start()
@@ -1756,10 +1897,7 @@ Reasoning: {user_request.template_reasoning}
             while agent_process.is_alive():
                 # Check if task was cancelled
                 if user_request.is_cancelled:
-                    user_request.progress_queue.put({
-                        "type": "cancelled",
-                        "message": "Task was cancelled by user"
-                    })
+                    user_request.progress_queue.put({"type": "cancelled", "message": "Task was cancelled by user"})
                     # Terminate the process immediately
                     if agent_process.is_alive():
                         agent_process.terminate()
@@ -1773,10 +1911,7 @@ Reasoning: {user_request.template_reasoning}
                     while not result_queue.empty():
                         msg = result_queue.get_nowait()
                         if msg["type"] == "status":
-                            user_request.progress_queue.put({
-                                "type": "status",
-                                "message": msg["content"]
-                            })
+                            user_request.progress_queue.put({"type": "status", "message": msg["content"]})
                         elif msg["type"] == "template_matched":
                             # Store template information in UserRequest
                             user_request.template_matched = True
@@ -1784,27 +1919,29 @@ Reasoning: {user_request.template_reasoning}
                             user_request.template_confidence = msg.get("confidence")
                             user_request.template_reasoning = msg.get("reasoning")
                             # Forward to progress queue
-                            user_request.progress_queue.put({
-                                "type": "template_matched",
-                                "message": msg["content"],
-                                "template_title": msg.get("template_title"),
-                                "confidence": msg.get("confidence"),
-                                "reasoning": msg.get("reasoning")
-                            })
+                            user_request.progress_queue.put(
+                                {
+                                    "type": "template_matched",
+                                    "message": msg["content"],
+                                    "template_title": msg.get("template_title"),
+                                    "confidence": msg.get("confidence"),
+                                    "reasoning": msg.get("reasoning"),
+                                }
+                            )
                         elif msg["type"] == "thinking_update":
                             accumulated_thinking = msg["content"]
-                            user_request.progress_queue.put({
-                                "type": "thinking_update",
-                                "content": msg["content"],
-                                "accumulated": accumulated_thinking
-                            })
+                            user_request.progress_queue.put(
+                                {
+                                    "type": "thinking_update",
+                                    "content": msg["content"],
+                                    "accumulated": accumulated_thinking,
+                                }
+                            )
                         elif msg["type"] == "snapshot":
                             # Process snapshot from subprocess
                             accumulated_thinking = msg["content"]
                             snapshot = queue_manager.create_json_snapshot(
-                                user_request,
-                                accumulated_thinking,
-                                session_path
+                                user_request, accumulated_thinking, session_path
                             )
                             user_request.periodic_snapshots.clear()
                             user_request.periodic_snapshots.append(snapshot)
@@ -1816,7 +1953,7 @@ Reasoning: {user_request.template_reasoning}
 
                                 # Delete old snapshot files
                                 for file in os.listdir(session_path):
-                                    if file.startswith('snapshot_') and file.endswith('.json'):
+                                    if file.startswith("snapshot_") and file.endswith(".json"):
                                         os.remove(os.path.join(session_path, file))
 
                                 # Clear the snapshot_files list since we deleted the old files
@@ -1826,21 +1963,25 @@ Reasoning: {user_request.template_reasoning}
                                 # Save new snapshot
                                 snapshot_filename = f"snapshot_latest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                                 snapshot_path = os.path.join(session_path, snapshot_filename)
-                                with open(snapshot_path, 'w', encoding='utf-8') as f:
+                                with open(snapshot_path, "w", encoding="utf-8") as f:
                                     json.dump(snapshot, f, indent=2, ensure_ascii=False)
 
                                 # Track snapshot file for S3 upload after completion
-                                user_request.snapshot_files.append({
-                                    'path': snapshot_path,
-                                    'filename': snapshot_filename,
-                                    'timestamp': datetime.now().isoformat()
-                                })
+                                user_request.snapshot_files.append(
+                                    {
+                                        "path": snapshot_path,
+                                        "filename": snapshot_filename,
+                                        "timestamp": datetime.now().isoformat(),
+                                    }
+                                )
 
-                                user_request.progress_queue.put({
-                                    "type": "snapshot_saved",
-                                    "message": f"Snapshot saved: {snapshot_filename}",
-                                    "snapshot": snapshot
-                                })
+                                user_request.progress_queue.put(
+                                    {
+                                        "type": "snapshot_saved",
+                                        "message": f"Snapshot saved: {snapshot_filename}",
+                                        "snapshot": snapshot,
+                                    }
+                                )
                             except Exception as e:
                                 print(f"Error saving snapshot: {e}")
 
@@ -1861,7 +2002,7 @@ Reasoning: {user_request.template_reasoning}
 
                 # Sleep briefly to avoid busy waiting
                 time.sleep(0.1)
-            
+
             # Wait for process completion
             agent_process.join()
 
@@ -1891,62 +2032,114 @@ Reasoning: {user_request.template_reasoning}
 
             # Get final content (for backwards compatibility)
             final_content = accumulated_thinking
-            if hasattr(locals(), 'stream_capture'):
+            if hasattr(locals(), "stream_capture"):
                 final_content = stream_capture.get_content()
             if len(final_content) > last_content_length:
                 new_content = final_content[last_content_length:]
                 accumulated_thinking += new_content
-            
+
             # Scan for and move ALL new files created during processing
             try:
                 # Define folders and files to exclude from scanning (working directories and system folders)
                 exclude_dirs = {
                     # Working directories for this application
-                    'chat_sessions', 'chat_zips', 'session_storage', 'multiturn_sessions', 'temp_uploads',
-
+                    "chat_sessions",
+                    "chat_zips",
+                    "session_storage",
+                    "multiturn_sessions",
+                    "temp_uploads",
                     # Python cache and build directories
-                    '__pycache__', '.pytest_cache', 'build', 'dist', '*.egg-info', '.eggs',
-
+                    "__pycache__",
+                    ".pytest_cache",
+                    "build",
+                    "dist",
+                    "*.egg-info",
+                    ".eggs",
                     # Virtual environments
-                    'venv', 'env', '.venv', '.env', 'virtualenv', 'ENV', 'env.bak', 'venv.bak',
-
+                    "venv",
+                    "env",
+                    ".venv",
+                    ".env",
+                    "virtualenv",
+                    "ENV",
+                    "env.bak",
+                    "venv.bak",
                     # Version control
-                    '.git', '.svn', '.hg', '.bzr',
-
+                    ".git",
+                    ".svn",
+                    ".hg",
+                    ".bzr",
                     # IDE and editor directories
-                    '.vscode', '.idea', '.eclipse', '.sublime', '*.swp', '*.swo',
-
+                    ".vscode",
+                    ".idea",
+                    ".eclipse",
+                    ".sublime",
+                    "*.swp",
+                    "*.swo",
                     # JavaScript/Node
-                    'node_modules', 'bower_components', '.npm',
-
+                    "node_modules",
+                    "bower_components",
+                    ".npm",
                     # Testing and coverage
-                    'tests', 'test', '.tox', '.coverage', 'htmlcov', '.hypothesis',
-
+                    "tests",
+                    "test",
+                    ".tox",
+                    ".coverage",
+                    "htmlcov",
+                    ".hypothesis",
                     # Documentation
-                    'docs', 'documentation', '.sphinx',
-
+                    "docs",
+                    "documentation",
+                    ".sphinx",
                     # Application specific
-                    's3_mongodb', 'migrations', 'logs', 'log', 'tmp', 'temp', 'cache',
-
+                    "s3_mongodb",
+                    "migrations",
+                    "logs",
+                    "log",
+                    "tmp",
+                    "temp",
+                    "cache",
                     # OS specific
-                    '.DS_Store', 'Thumbs.db', '.Trash',
-
+                    ".DS_Store",
+                    "Thumbs.db",
+                    ".Trash",
                     # Jupyter/IPython
-                    '.ipynb_checkpoints', '.jupyter',
-
+                    ".ipynb_checkpoints",
+                    ".jupyter",
                     # Database
-                    'db', 'database', 'data'
+                    "db",
+                    "database",
+                    "data",
                 }
 
                 # System files to never move
-                system_files = {'requirements.txt', 'requirements_fastapi.txt', 'requirements-test.txt',
-                               'pytest.ini', 'README.md', 'CLOUD_STORAGE_README.md', 'TEST_SUMMARY.md',
-                               '.env', '.env.example', 'Dockerfile', 'docker-compose.yml', '.gitignore',
-                               'setup.py', 'setup.cfg', 'pyproject.toml', 'Makefile'}
+                system_files = {
+                    "requirements.txt",
+                    "requirements_fastapi.txt",
+                    "requirements-test.txt",
+                    "pytest.ini",
+                    "README.md",
+                    "CLOUD_STORAGE_README.md",
+                    "TEST_SUMMARY.md",
+                    ".env",
+                    ".env.example",
+                    "Dockerfile",
+                    "docker-compose.yml",
+                    ".gitignore",
+                    "setup.py",
+                    "setup.cfg",
+                    "pyproject.toml",
+                    "Makefile",
+                }
 
                 # Python files that are part of the application
-                app_files = {'agent_fastapi_server_multiturn.py', 'agent_gradio_fastapi_multiturn.py',
-                            'cloud_storage_manager.py', 'unified_session_manager.py', 'a1.py'}
+                app_files = {
+                    "agent_fastapi_server_multiturn.py",
+                    "agent_gradio_fastapi_multiturn.py",
+                    "cloud_storage_manager.py",
+                    "unified_session_manager.py",
+                    "a1.py",
+                }
 
                 all_new_files = []
 
@@ -1965,7 +2158,7 @@ Reasoning: {user_request.template_reasoning}
                             continue
 
                         # Skip Python cache files and compiled files
-                        if file.endswith(('.pyc', '.pyo', '.pyd', '.so', '.dll', '.dylib')):
+                        if file.endswith((".pyc", ".pyo", ".pyd", ".so", ".dll", ".dylib")):
                             continue
 
                         file_path = os.path.join(root, file)
@@ -1998,8 +2191,19 @@ Reasoning: {user_request.template_reasoning}
                     print(f"Found {len(all_new_files)} new files created during processing:")
 
                     # Group files by type for logging
-                    image_files = [f for f in all_new_files if any(f.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp'])]
-                    data_files = [f for f in all_new_files if any(f.lower().endswith(ext) for ext in ['.csv', '.xlsx', '.xls', '.tsv', '.json'])]
+                    image_files = [
+                        f
+                        for f in all_new_files
+                        if any(
+                            f.lower().endswith(ext)
+                            for ext in [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp"]
+                        )
+                    ]
+                    data_files = [
+                        f
+                        for f in all_new_files
+                        if any(f.lower().endswith(ext) for ext in [".csv", ".xlsx", ".xls", ".tsv", ".json"])
+                    ]
                     other_files = [f for f in all_new_files if f not in image_files and f not in data_files]
 
                     print(f"  - {len(image_files)} image files")
@@ -2010,16 +2214,16 @@ Reasoning: {user_request.template_reasoning}
                     moved_files = move_files_to_session(all_new_files, session_path)
                     print(f"Successfully moved {len(moved_files)} files to session folder: {session_path}")
 
-                    user_request.progress_queue.put({
-                        "type": "status",
-                        "message": f"Moved {len(moved_files)} new files to session folder"
-                    })
+                    user_request.progress_queue.put(
+                        {"type": "status", "message": f"Moved {len(moved_files)} new files to session folder"}
+                    )
                 else:
                     print(f"No new files found to move (checked from time: {start_time})")
 
             except Exception as e:
                 print(f"Error handling new files: {e}")
                 import traceback
+
                 traceback.print_exc()
 
             # Save session files
@@ -2036,24 +2240,25 @@ Reasoning: {user_request.template_reasoning}
                 if user_request.error:
                     final_report_content = f"## ❌ Error Report\n\n```\n{user_request.error}\n```"
                 else:
-                    raw_result = user_request.result or 'Processing completed successfully.'
+                    raw_result = user_request.result or "Processing completed successfully."
 
                     # Extract content from <solution> tags if present
-                    if '<solution>' in raw_result and '</solution>' in raw_result:
-                        start_idx = raw_result.find('<solution>') + len('<solution>')
-                        end_idx = raw_result.find('</solution>')
+                    if "<solution>" in raw_result and "</solution>" in raw_result:
+                        start_idx = raw_result.find("<solution>") + len("<solution>")
+                        end_idx = raw_result.find("</solution>")
                         solution_content = raw_result[start_idx:end_idx].strip()
                     else:
                         solution_content = raw_result
 
                     # Remove any remaining XML-like tags that might interfere with HTML/Markdown rendering
                     import re
+
                     # Remove all XML-like tags (e.g., <tag>, </tag>, <tag attr="value">)
-                    solution_content = re.sub(r'</?[a-zA-Z_][a-zA-Z0-9_]*(?:\s+[^>]*)?>', '', solution_content)
+                    solution_content = re.sub(r"</?[a-zA-Z_][a-zA-Z0-9_]*(?:\s+[^>]*)?>", "", solution_content)
 
                     final_report_content = f"## ✅ Final Report\n\n{solution_content}"
 
-                with open(report_path, 'w', encoding='utf-8') as f:
+                with open(report_path, "w", encoding="utf-8") as f:
                     f.write(final_report_content)
 
                 # Save thinking process (cleaned version with template info)
@@ -2062,20 +2267,20 @@ Reasoning: {user_request.template_reasoning}
 
                 thinking_filename = f"thinking_process_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
                 thinking_path = os.path.join(session_path, thinking_filename)
-                with open(thinking_path, 'w', encoding='utf-8') as f:
+                with open(thinking_path, "w", encoding="utf-8") as f:
                     f.write(cleaned_thinking)
 
                 # Save query/message for reference
                 query_filename = f"query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
                 query_path = os.path.join(session_path, query_filename)
-                with open(query_path, 'w', encoding='utf-8') as f:
+                with open(query_path, "w", encoding="utf-8") as f:
                     f.write(f"Query: {user_request.message}\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
                 # Collect image files from session
                 # For multi-turn sessions, only include images created during this turn
                 image_files = []
-                image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp'}
-                turn_start_time = user_request.turn_start_time if hasattr(user_request, 'turn_start_time') else None
+                image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp"}
+                turn_start_time = user_request.turn_start_time if hasattr(user_request, "turn_start_time") else None
                 for file in os.listdir(session_path):
                     if any(file.lower().endswith(ext) for ext in image_extensions):
                         file_path = os.path.join(session_path, file)
@@ -2098,15 +2303,15 @@ Reasoning: {user_request.template_reasoning}
                         "thinking_process": thinking_path,
                         "query_file": query_path,
                         "images": image_files,
-                        "session_zip": None  # Will be set after zip creation
+                        "session_zip": None,  # Will be set after zip creation
                     },
                     "content": {
                         "final_report": final_report_content,
                         "thinking_content": cleaned_thinking,
-                        "raw_result": user_request.result
+                        "raw_result": user_request.result,
                     },
                     "error": user_request.error,
-                    "session_path": session_path
+                    "session_path": session_path,
                 }
 
                 # Store JSON result in user request
@@ -2115,7 +2320,7 @@ Reasoning: {user_request.template_reasoning}
                 # Save JSON result to file
                 json_filename = f"result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                 json_path = os.path.join(session_path, json_filename)
-                with open(json_path, 'w', encoding='utf-8') as f:
+                with open(json_path, "w", encoding="utf-8") as f:
                     json.dump(json_result, f, indent=2, ensure_ascii=False)
 
                 # Add JSON file path to the result
@@ -2128,38 +2333,39 @@ Reasoning: {user_request.template_reasoning}
             pdf_path = None
             try:
                 # Check if we have the required variables for PDF generation
-                report_content_for_pdf = locals().get('final_report_content')
-                images_for_pdf = locals().get('image_files', [])
+                report_content_for_pdf = locals().get("final_report_content")
+                images_for_pdf = locals().get("image_files", [])
 
                 if report_content_for_pdf and session_path:
-                    user_request.progress_queue.put({
-                        "type": "status",
-                        "message": "Generating PDF report..."
-                    })
+                    user_request.progress_queue.put({"type": "status", "message": "Generating PDF report..."})
                     # Get turn number for multi-turn sessions
-                    turn_num = user_request.turn_number if hasattr(user_request, 'turn_number') else None
-                    pdf_path = generate_report_pdf(session_path, report_content_for_pdf, images_for_pdf, turn_number=turn_num)
+                    turn_num = user_request.turn_number if hasattr(user_request, "turn_number") else None
+                    pdf_path = generate_report_pdf(
+                        session_path, report_content_for_pdf, images_for_pdf, turn_number=turn_num
+                    )
                     if pdf_path:
                         print(f"Generated PDF report: {pdf_path}")
                         # Add PDF path to json_result files
-                        if hasattr(user_request, 'json_result') and user_request.json_result:
+                        if hasattr(user_request, "json_result") and user_request.json_result:
                             user_request.json_result["files"]["report_pdf"] = pdf_path
                             # Re-save JSON with updated PDF path
                             if "result_json" in user_request.json_result["files"]:
                                 json_path_for_update = user_request.json_result["files"]["result_json"]
-                                with open(json_path_for_update, 'w', encoding='utf-8') as f:
+                                with open(json_path_for_update, "w", encoding="utf-8") as f:
                                     json.dump(user_request.json_result, f, indent=2, ensure_ascii=False)
-                        user_request.progress_queue.put({
-                            "type": "status",
-                            "message": f"PDF report generated: {os.path.basename(pdf_path)}"
-                        })
+                        user_request.progress_queue.put(
+                            {"type": "status", "message": f"PDF report generated: {os.path.basename(pdf_path)}"}
+                        )
                     else:
                         print("PDF generation returned None")
                 else:
-                    print(f"Skipping PDF generation: report_content={bool(report_content_for_pdf)}, session_path={bool(session_path)}")
+                    print(
+                        f"Skipping PDF generation: report_content={bool(report_content_for_pdf)}, session_path={bool(session_path)}"
+                    )
             except Exception as e:
                 print(f"Error generating PDF report: {e}")
                 import traceback
+
                 traceback.print_exc()
 
             # Create ZIP files - both session-wide and per-turn
@@ -2172,52 +2378,56 @@ Reasoning: {user_request.template_reasoning}
                 # containing only files created during this turn
                 current_turn_number = None
                 turn_start_time = None
-                if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+                if hasattr(user_request, "original_session_id") and user_request.original_session_id:
                     current_turn_number = user_request.turn_number
                     turn_start_time = start_time  # start_time was recorded at beginning of turn processing
 
-                zip_file_path = create_session_zip(session_path, save_to_chat_zips=True, turn_number=current_turn_number, turn_start_time=turn_start_time)
+                zip_file_path = create_session_zip(
+                    session_path,
+                    save_to_chat_zips=True,
+                    turn_number=current_turn_number,
+                    turn_start_time=turn_start_time,
+                )
                 if zip_file_path:
                     # Update JSON result with zip path
                     if user_request.json_result:
                         user_request.json_result["files"]["session_zip"] = zip_file_path
                         # Re-save JSON with updated zip path
                         json_path = user_request.json_result["files"]["result_json"]
-                        with open(json_path, 'w', encoding='utf-8') as f:
+                        with open(json_path, "w", encoding="utf-8") as f:
                             json.dump(user_request.json_result, f, indent=2, ensure_ascii=False)
 
-                    user_request.progress_queue.put({
-                        "type": "status",
-                        "message": f"Session zip created: {os.path.basename(zip_file_path)}"
-                    })
+                    user_request.progress_queue.put(
+                        {"type": "status", "message": f"Session zip created: {os.path.basename(zip_file_path)}"}
+                    )
 
                 # For multi-turn sessions, also create per-turn ZIP
-                if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+                if hasattr(user_request, "original_session_id") and user_request.original_session_id:
                     base_session_id = user_request.original_session_id
                     turn_number = user_request.turn_number
 
-                    user_request.progress_queue.put({
-                        "type": "status",
-                        "message": f"Creating turn {turn_number} ZIP..."
-                    })
+                    user_request.progress_queue.put(
+                        {"type": "status", "message": f"Creating turn {turn_number} ZIP..."}
+                    )
 
                     turn_zip_result = create_turn_zip(
-                        session_path,
-                        base_session_id,
-                        turn_number,
-                        save_to_chat_zips=True
+                        session_path, base_session_id, turn_number, save_to_chat_zips=True
                     )
 
                     if turn_zip_result:
-                        turn_zip_file_path = turn_zip_result['zip_path']
-                        print(f"Created turn {turn_number} ZIP: {turn_zip_file_path} "
-                              f"({turn_zip_result['file_count']} files, "
-                              f"{turn_zip_result['total_size'] / 1024 / 1024:.2f}MB)")
+                        turn_zip_file_path = turn_zip_result["zip_path"]
+                        print(
+                            f"Created turn {turn_number} ZIP: {turn_zip_file_path} "
+                            f"({turn_zip_result['file_count']} files, "
+                            f"{turn_zip_result['total_size'] / 1024 / 1024:.2f}MB)"
+                        )
 
-                        user_request.progress_queue.put({
-                            "type": "status",
-                            "message": f"Turn {turn_number} ZIP created: {os.path.basename(turn_zip_file_path)}"
-                        })
+                        user_request.progress_queue.put(
+                            {
+                                "type": "status",
+                                "message": f"Turn {turn_number} ZIP created: {os.path.basename(turn_zip_file_path)}",
+                            }
+                        )
 
                         # Copy turn ZIP to session folder for S3 upload
                         turn_zip_filename = os.path.basename(turn_zip_file_path)
@@ -2231,7 +2441,7 @@ Reasoning: {user_request.template_reasoning}
                 print(f"Error creating ZIP files: {e}")
 
             # Upload snapshots to S3 for persistence
-            if hasattr(user_request, 'snapshot_files') and user_request.snapshot_files:
+            if hasattr(user_request, "snapshot_files") and user_request.snapshot_files:
                 try:
                     print(f"Uploading {len(user_request.snapshot_files)} snapshot(s) to S3...")
                     uploaded_snapshots = []
@@ -2239,7 +2449,7 @@ Reasoning: {user_request.template_reasoning}
                     for snapshot_file in user_request.snapshot_files:
                         try:
                             # Determine session ID for S3 key
-                            if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+                            if hasattr(user_request, "original_session_id") and user_request.original_session_id:
                                 snapshot_session_id = user_request.original_session_id
                             else:
                                 snapshot_session_id = user_request.session_id
@@ -2247,17 +2457,16 @@ Reasoning: {user_request.template_reasoning}
                             s3_key = f"sessions/{snapshot_session_id}/snapshots/{snapshot_file['filename']}"
 
                             # Upload to S3
-                            if os.path.exists(snapshot_file['path']):
-                                asyncio.run(cloud_storage_manager.upload_file(
-                                    snapshot_file['path'],
-                                    s3_key
-                                ))
+                            if os.path.exists(snapshot_file["path"]):
+                                asyncio.run(cloud_storage_manager.upload_file(snapshot_file["path"], s3_key))
 
-                                uploaded_snapshots.append({
-                                    'filename': snapshot_file['filename'],
-                                    's3_key': s3_key,
-                                    'timestamp': snapshot_file['timestamp']
-                                })
+                                uploaded_snapshots.append(
+                                    {
+                                        "filename": snapshot_file["filename"],
+                                        "s3_key": s3_key,
+                                        "timestamp": snapshot_file["timestamp"],
+                                    }
+                                )
                                 print(f"Uploaded snapshot: {snapshot_file['filename']}")
                             else:
                                 print(f"Snapshot file not found: {snapshot_file['path']}")
@@ -2289,13 +2498,13 @@ Reasoning: {user_request.template_reasoning}
                 "type": "completion",
                 "final_report": final_report_content,
                 "thinking_content": cleaned_thinking,
-                "session_path": session_path
+                "session_path": session_path,
             }
             user_request.progress_queue.put(completion_update)
             user_request.all_progress_updates.append(completion_update)
 
             # Clean up temp upload directory for this session
-            if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+            if hasattr(user_request, "original_session_id") and user_request.original_session_id:
                 temp_upload_dir = os.path.join(os.getcwd(), "temp_uploads", user_request.original_session_id)
             else:
                 temp_upload_dir = os.path.join(os.getcwd(), "temp_uploads", user_request.session_id)
@@ -2327,21 +2536,25 @@ Reasoning: {user_request.template_reasoning}
                     "result": user_request.result,
                     "json_result": user_request.json_result,
                     # For multi-turn sessions, pass turn_start_time to filter images
-                    "turn_start_time": user_request.turn_start_time if hasattr(user_request, 'turn_start_time') else None
+                    "turn_start_time": user_request.turn_start_time
+                    if hasattr(user_request, "turn_start_time")
+                    else None,
                 }
 
                 # Add snapshot metadata if snapshots were uploaded
-                if hasattr(user_request, 'uploaded_snapshots'):
+                if hasattr(user_request, "uploaded_snapshots"):
                     session_data["snapshots"] = user_request.uploaded_snapshots
+
                 # Upload to cloud asynchronously (don't wait for completion)
                 def upload_in_thread():
                     import asyncio
+
                     try:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
-                        loop.run_until_complete(cloud_storage_manager.upload_session_to_cloud(
-                            user_request.session_id, session_data
-                        ))
+                        loop.run_until_complete(
+                            cloud_storage_manager.upload_session_to_cloud(user_request.session_id, session_data)
+                        )
                         loop.close()
                     except Exception as e:
                         print(f"Background cloud upload failed for session {user_request.session_id}: {e}")
@@ -2353,30 +2566,137 @@ Reasoning: {user_request.template_reasoning}
                 print(f"Failed to initiate cloud upload for session {user_request.session_id}: {e}")
 
             # Update multi-turn session if this is a turn
-            if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+            print(
+                f"[DEBUG RNA] Checking multi-turn: original_session_id={getattr(user_request, 'original_session_id', None)}"
+            )
+            if hasattr(user_request, "original_session_id") and user_request.original_session_id:
                 # Get file paths for the turn
                 # For multi-turn sessions, use turn-specific zip as session_zip (so it shows in final report)
                 turn_session_zip = turn_zip_file_path if turn_zip_file_path else zip_file_path
                 files_dict = {
-                    'report_md': report_path,
-                    'thinking_process': thinking_path,
-                    'query_file': query_path,
-                    'session_zip': turn_session_zip,  # Use turn-specific zip for multi-turn
-                    'result_json': json_path
+                    "report_md": report_path,
+                    "thinking_process": thinking_path,
+                    "query_file": query_path,
+                    "session_zip": turn_session_zip,  # Use turn-specific zip for multi-turn
+                    "result_json": json_path,
                 }
 
                 # Add images for this turn (use the filtered image_files list)
-                if 'image_files' in locals() and image_files:
-                    files_dict['images'] = image_files
+                if "image_files" in locals() and image_files:
+                    files_dict["images"] = image_files
 
                 # Add PDF report if it was generated
                 if pdf_path:
-                    files_dict['report_pdf'] = pdf_path
+                    files_dict["report_pdf"] = pdf_path
 
                 # Also keep turn_zip for backwards compatibility
                 if turn_zip_file_path:
-                    files_dict['turn_zip'] = turn_zip_file_path
+                    files_dict["turn_zip"] = turn_zip_file_path
                     print(f"[DEBUG] Using turn ZIP as session_zip: {os.path.basename(turn_zip_file_path)}")
+
+                # Extract structured data (RNA structures)
+                # Method 0: Parse JSON markers embedded in tool output (most reliable)
+                # Method 1: Try to find JSON files from session_path and project root
+                # Method 2: Parse RNA structures from agent's thinking process output
+                turn_structured_data = {}
+                all_rna_structures = []
+
+                # Method 0: Parse JSON markers from thinking process (preferred method)
+                if cleaned_thinking:
+                    import re
+
+                    json_marker_pattern = re.compile(
+                        r"__RNA_STRUCTURE_JSON_START__\s*(\{.*?\})\s*__RNA_STRUCTURE_JSON_END__", re.DOTALL
+                    )
+                    marker_matches = json_marker_pattern.findall(cleaned_thinking)
+                    for match in marker_matches:
+                        try:
+                            rna_data = json.loads(match)
+                            if "rna_structures" in rna_data:
+                                all_rna_structures.extend(rna_data["rna_structures"])
+                                print(
+                                    f"[DEBUG] Extracted {len(rna_data['rna_structures'])} RNA structures from JSON markers"
+                                )
+                        except json.JSONDecodeError as e:
+                            print(f"[DEBUG] Failed to parse RNA JSON from markers: {e}")
+
+                # Method 1: Search for JSON files (fallback if markers not found)
+                if not all_rna_structures:
+                    search_paths = []
+                    if session_path and os.path.exists(session_path):
+                        search_paths.append(session_path)
+                    search_paths.append(os.getcwd())
+
+                    for search_path in search_paths:
+                        rna_json_patterns = [
+                            os.path.join(search_path, "*rna*structure*.json"),
+                            os.path.join(search_path, "rna_structures_*.json"),
+                            os.path.join(search_path, "*_rna_structure.json"),
+                        ]
+                        for pattern in rna_json_patterns:
+                            for json_file in glob.glob(pattern):
+                                try:
+                                    with open(json_file, "r") as f:
+                                        data = json.load(f)
+                                        if "rna_structures" in data:
+                                            all_rna_structures.extend(data["rna_structures"])
+                                            print(f"[DEBUG] Extracted RNA structures from JSON file: {json_file}")
+                                except Exception as e:
+                                    print(f"Warning: Could not read RNA JSON file {json_file}: {e}")
+
+                # Method 2: Parse from thinking process if no JSON files found
+                print(f"[DEBUG RNA] cleaned_thinking length: {len(cleaned_thinking) if cleaned_thinking else 0}")
+                print(f"[DEBUG RNA] Contains 'Structure:': {'Structure:' in (cleaned_thinking or '')}")
+                print(f"[DEBUG RNA] Contains 'base pairs': {'base pairs' in (cleaned_thinking or '')}")
+                if not all_rna_structures and cleaned_thinking:
+                    # Look for RNA-FM output patterns in the thinking process
+                    import re
+
+                    # Pattern 1: "ID: xxx\nSequence:  xxx\nStructure: xxx" (multi-line format)
+                    # Note: Sequence may have multiple spaces after colon
+                    rna_pattern = re.compile(
+                        r"ID:\s*(\S+)\s*\n\s*Sequence:\s+([AUGC]+)\s*\n\s*Structure:\s*([.\(\)]+)", re.IGNORECASE
+                    )
+                    matches = rna_pattern.findall(cleaned_thinking)
+                    for match in matches:
+                        seq_id, sequence, structure = match
+                        all_rna_structures.append(
+                            {
+                                "id": seq_id,
+                                "sequence": sequence.upper(),
+                                "structure": structure,
+                                "length": len(sequence),
+                                "base_pairs": structure.count("("),
+                                "method": "rnafm",
+                            }
+                        )
+                        print(f"[DEBUG] Extracted RNA structure from thinking (format 1): {seq_id}")
+
+                    # Pattern 2: "seq_id: (((..))) (N base pairs)" summary format
+                    if not all_rna_structures:
+                        summary_pattern = re.compile(
+                            r"\s+(\w+):\s*([.\(\)]+)\s*\((\d+)\s*base\s*pairs?\)", re.IGNORECASE
+                        )
+                        matches = summary_pattern.findall(cleaned_thinking)
+                        for match in matches:
+                            seq_id, structure, base_pairs = match
+                            # Filter out common false positives
+                            if seq_id.lower() not in ("step", "error", "note", "output", "result"):
+                                all_rna_structures.append(
+                                    {
+                                        "id": seq_id,
+                                        "sequence": "",  # Not available in summary format
+                                        "structure": structure,
+                                        "length": len(structure),
+                                        "base_pairs": int(base_pairs),
+                                        "method": "rnafm",
+                                    }
+                                )
+                                print(f"[DEBUG] Extracted RNA structure from thinking (format 2): {seq_id}")
+
+                if all_rna_structures:
+                    turn_structured_data["rna_structures"] = all_rna_structures
+                    print(f"[DEBUG] Total RNA structures extracted: {len(all_rna_structures)}")
 
                 # Complete the turn in multi-turn session
                 queue_manager.complete_turn(
@@ -2386,9 +2706,10 @@ Reasoning: {user_request.template_reasoning}
                     final_report_content,
                     files_dict,
                     turn_type=user_request.turn_type,
-                    ready_for_execution=getattr(user_request, 'ready_for_execution', None)
+                    ready_for_execution=getattr(user_request, "ready_for_execution", None),
+                    structured_data=turn_structured_data if turn_structured_data else None,
                 )
-            
+
         except Exception as e:
             user_request.status = "error"
             user_request.error = str(e)
@@ -2397,15 +2718,12 @@ Reasoning: {user_request.template_reasoning}
             # Move any generated files to session folder even on error
             queue_manager._move_generated_files_to_session(user_request)
 
-            error_update = {
-                "type": "error",
-                "error": str(e)
-            }
+            error_update = {"type": "error", "error": str(e)}
             user_request.progress_queue.put(error_update)
             user_request.all_progress_updates.append(error_update)
 
             # Clean up temp upload directory even on error
-            if hasattr(user_request, 'original_session_id') and user_request.original_session_id:
+            if hasattr(user_request, "original_session_id") and user_request.original_session_id:
                 temp_upload_dir = os.path.join(os.getcwd(), "temp_uploads", user_request.original_session_id)
             else:
                 temp_upload_dir = os.path.join(os.getcwd(), "temp_uploads", user_request.session_id)
@@ -2435,17 +2753,19 @@ Reasoning: {user_request.template_reasoning}
                     "all_progress_updates": user_request.all_progress_updates,
                     "periodic_snapshots": user_request.periodic_snapshots,
                     "result": user_request.result,
-                    "json_result": user_request.json_result
+                    "json_result": user_request.json_result,
                 }
+
                 # Upload to cloud asynchronously (don't wait for completion)
                 def upload_in_thread():
                     import asyncio
+
                     try:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
-                        loop.run_until_complete(cloud_storage_manager.upload_session_to_cloud(
-                            user_request.session_id, session_data
-                        ))
+                        loop.run_until_complete(
+                            cloud_storage_manager.upload_session_to_cloud(user_request.session_id, session_data)
+                        )
                         loop.close()
                     except Exception as e:
                         print(f"Background cloud upload failed for session {user_request.session_id}: {e}")
@@ -2470,11 +2790,11 @@ Reasoning: {user_request.template_reasoning}
         try:
             if os.path.exists(self.sessions_storage_dir):
                 for filename in os.listdir(self.sessions_storage_dir):
-                    if filename.endswith('.json'):
+                    if filename.endswith(".json"):
                         session_id = filename[:-5]  # Remove .json extension
                         try:
                             session_file = os.path.join(self.sessions_storage_dir, filename)
-                            with open(session_file, 'r', encoding='utf-8') as f:
+                            with open(session_file, "r", encoding="utf-8") as f:
                                 session_data = json.load(f)
                             sessions.append(session_data)
                         except Exception as e:
@@ -2483,12 +2803,21 @@ Reasoning: {user_request.template_reasoning}
             print(f"Error accessing stored sessions directory: {e}")
         return sessions
 
+
 # Initialize queue manager
 queue_manager = QueueManager()
 
+
 # Process-based agent runner (defined at module level for pickling)
-def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced_message: str, session_path: str,
-                         use_template: bool = True, turn_type: str = "execution", agent_config: dict = None):
+def run_agent_in_process(
+    message_queue: MPQueue,
+    result_queue: MPQueue,
+    enhanced_message: str,
+    session_path: str,
+    use_template: bool = True,
+    turn_type: str = "execution",
+    agent_config: dict = None,
+):
     """
     Run agent in a separate process for true termination capability
     This function runs in a separate process and communicates via queues
@@ -2531,6 +2860,7 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
     # TeeIO class to capture output while still allowing writes to original stdout
     class TeeIO:
         """Write to both a buffer and the original stdout"""
+
         def __init__(self, buffer, original_stdout):
             self.buffer = buffer
             self.original_stdout = original_stdout
@@ -2580,6 +2910,7 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
 
     # Also handle SIGTERM signal
     import signal
+
     def signal_handler(signum, frame):
         cleanup_subprocesses()
         sys.exit(0)
@@ -2595,18 +2926,11 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                 current_output = output_buffer.getvalue()
 
             # Send snapshot with current output
-            result_queue.put({
-                "type": "snapshot",
-                "content": current_output,
-                "timestamp": time.time()
-            })
+            result_queue.put({"type": "snapshot", "content": current_output, "timestamp": time.time()})
 
             # Also send as thinking update for real-time display
             if current_output:
-                result_queue.put({
-                    "type": "thinking_update",
-                    "content": current_output
-                })
+                result_queue.put({"type": "thinking_update", "content": current_output})
 
     # Event to signal agent completion
     agent_complete = threading.Event()
@@ -2622,39 +2946,32 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
 
     try:
         # Send status update
-        result_queue.put({
-            "type": "status",
-            "content": "Agent starting in separate process with snapshot tracking..."
-        })
+        result_queue.put({"type": "status", "content": "Agent starting in separate process with snapshot tracking..."})
 
         # Check if this is a planning turn
         if turn_type == "planning":
             # PLANNING MODE - No tools, just LLM reasoning
-            result_queue.put({
-                "type": "status",
-                "content": "Planning mode: Agent will ask clarifying questions without executing tools..."
-            })
+            result_queue.put(
+                {
+                    "type": "status",
+                    "content": "Planning mode: Agent will ask clarifying questions without executing tools...",
+                }
+            )
 
             # Use direct LLM call without tools
             from langchain_anthropic import ChatAnthropic
 
             llm = ChatAnthropic(
                 model=agent_config.get("model", "claude-sonnet-4-5-20250929"),
-                temperature=agent_config.get("temperature", 0.7)
+                temperature=agent_config.get("temperature", 0.7),
             )
 
             # Build prompt with system and user message
             system_prompt = agent_config.get("system_prompt", "You are a helpful assistant.")
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": enhanced_message}
-            ]
+            messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": enhanced_message}]
 
             # Call LLM
-            result_queue.put({
-                "type": "status",
-                "content": "Generating planning response..."
-            })
+            result_queue.put({"type": "status", "content": "Generating planning response..."})
 
             response = llm.invoke(messages)
             result_content = response.content
@@ -2674,24 +2991,28 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                 final_output = output_buffer.getvalue()
 
             # Send final result with readiness flag
-            result_queue.put({
-                "type": "result",
-                "content": result_content,
-                "output": final_output,
-                "ready_for_execution": ready_for_execution,  # NEW FLAG
-                "turn_type": "planning",
-                "template_info": {"matched": False}  # No template matching in planning mode
-            })
+            result_queue.put(
+                {
+                    "type": "result",
+                    "content": result_content,
+                    "output": final_output,
+                    "ready_for_execution": ready_for_execution,  # NEW FLAG
+                    "turn_type": "planning",
+                    "template_info": {"matched": False},  # No template matching in planning mode
+                }
+            )
 
             # Send final snapshot
-            result_queue.put({
-                "type": "final_snapshot",
-                "content": final_output,
-                "result": result_content,
-                "ready_for_execution": ready_for_execution,
-                "timestamp": time.time(),
-                "template_info": {"matched": False}
-            })
+            result_queue.put(
+                {
+                    "type": "final_snapshot",
+                    "content": final_output,
+                    "result": result_content,
+                    "ready_for_execution": ready_for_execution,
+                    "timestamp": time.time(),
+                    "template_info": {"matched": False},
+                }
+            )
 
             # Skip the rest of execution logic
             return
@@ -2699,6 +3020,7 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
         # EXECUTION MODE - Full agent with tools
         # Create agent
         from agent_fastapi_server_multiturn import create_agent
+
         agent = create_agent()
 
         # Debug: Check LLM initialization (disabled by default)
@@ -2712,38 +3034,28 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
             print(f"Agent LLM stop_sequences: {getattr(agent.llm, 'stop_sequences', 'unknown')}")
             # Test LLM directly
             from langchain_core.messages import HumanMessage
+
             test_response = agent.llm.invoke([HumanMessage(content="Say hello in one word")])
             print(f"Test response type: {type(test_response.content)}")
             print(f"Test response content: {repr(test_response.content[:100]) if test_response.content else 'EMPTY'}")
             print(f"=== END AGENT LLM DEBUG ===\n")
 
         # Send status
-        result_queue.put({
-            "type": "status",
-            "content": "Agent initialized, processing message..."
-        })
+        result_queue.put({"type": "status", "content": "Agent initialized, processing message..."})
 
         # === TEMPLATE MATCHING & QUERY AUGMENTATION ===
         # Try to match the query to a workflow template (if enabled)
         base_message = enhanced_message
-        template_info = {
-            "matched": False,
-            "title": None,
-            "confidence": None,
-            "reasoning": None,
-            "modification": None
-        }
+        template_info = {"matched": False, "title": None, "confidence": None, "reasoning": None, "modification": None}
 
         # use_template parameter is passed to this function
         # Check if template matching is enabled
         if use_template:
             try:
-                result_queue.put({
-                    "type": "status",
-                    "content": "Checking for relevant workflow templates..."
-                })
+                result_queue.put({"type": "status", "content": "Checking for relevant workflow templates..."})
 
                 from agent_fastapi_server_multiturn import get_template_retriever
+
                 retriever = get_template_retriever()
 
                 if retriever:
@@ -2761,13 +3073,15 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                         template_info["reasoning"] = match_result.get("reasoning", "")
                         template_info["modification"] = match_result.get("modification")
 
-                        result_queue.put({
-                            "type": "template_matched",
-                            "content": f"Matched to template: {template_title} (confidence: {confidence})",
-                            "template_title": template_title,
-                            "confidence": confidence,
-                            "reasoning": match_result.get("reasoning", "")
-                        })
+                        result_queue.put(
+                            {
+                                "type": "template_matched",
+                                "content": f"Matched to template: {template_title} (confidence: {confidence})",
+                                "template_title": template_title,
+                                "confidence": confidence,
+                                "reasoning": match_result.get("reasoning", ""),
+                            }
+                        )
 
                         # Augment the query with template prompt
                         augmentation_result = retriever.augment_query_with_template(base_message, match_result)
@@ -2784,10 +3098,9 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                 # Continue without template matching
         else:
             print("Template matching is not using")
-            result_queue.put({
-                "type": "status",
-                "content": "Template matching is not using, proceeding with direct query..."
-            })
+            result_queue.put(
+                {"type": "status", "content": "Template matching is not using, proceeding with direct query..."}
+            )
 
         # === END TEMPLATE MATCHING ===
 
@@ -2796,11 +3109,13 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
             files_in_session = []
             for filename in os.listdir(session_path):
                 file_path = os.path.join(session_path, filename)
-                if os.path.isfile(file_path) and not filename.startswith('.'):
+                if os.path.isfile(file_path) and not filename.startswith("."):
                     files_in_session.append(f"{filename} (Path: {file_path})")
 
             if files_in_session and "Available files" not in enhanced_message:
-                file_info = "\n\nAvailable files in your working directory:\n" + "\n".join([f"- {f}" for f in files_in_session])
+                file_info = "\n\nAvailable files in your working directory:\n" + "\n".join(
+                    [f"- {f}" for f in files_in_session]
+                )
                 enhanced_message = enhanced_message + file_info
 
         # Debug: Check enhanced_message before sending to agent (disabled by default)
@@ -2825,35 +3140,30 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
             final_output = output_buffer.getvalue()
 
         # Send final result with complete output and template info
-        result_queue.put({
-            "type": "result",
-            "content": result,
-            "output": final_output,
-            "template_info": template_info
-        })
+        result_queue.put({"type": "result", "content": result, "output": final_output, "template_info": template_info})
 
         # Send final snapshot
-        result_queue.put({
-            "type": "final_snapshot",
-            "content": final_output,
-            "result": result,
-            "timestamp": time.time(),
-            "template_info": template_info
-        })
+        result_queue.put(
+            {
+                "type": "final_snapshot",
+                "content": final_output,
+                "result": result,
+                "timestamp": time.time(),
+                "template_info": template_info,
+            }
+        )
 
     except Exception as e:
         import traceback
+
         agent_complete.set()
 
         with output_lock:
             error_output = output_buffer.getvalue()
 
-        result_queue.put({
-            "type": "error",
-            "content": str(e),
-            "traceback": traceback.format_exc(),
-            "output": error_output
-        })
+        result_queue.put(
+            {"type": "error", "content": str(e), "traceback": traceback.format_exc(), "output": error_output}
+        )
     finally:
         # Restore original stdout
         sys.stdout = original_stdout
@@ -2870,17 +3180,34 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
 
             # System files to never move
             system_files = {
-                'requirements.txt', 'requirements_fastapi.txt', 'requirements-test.txt',
-                'pytest.ini', 'README.md', 'CLOUD_STORAGE_README.md', 'TEST_SUMMARY.md',
-                '.env', '.env.example', 'Dockerfile', 'docker-compose.yml', '.gitignore',
-                'setup.py', 'setup.cfg', 'pyproject.toml', 'Makefile', 'dleader_logo.png'
+                "requirements.txt",
+                "requirements_fastapi.txt",
+                "requirements-test.txt",
+                "pytest.ini",
+                "README.md",
+                "CLOUD_STORAGE_README.md",
+                "TEST_SUMMARY.md",
+                ".env",
+                ".env.example",
+                "Dockerfile",
+                "docker-compose.yml",
+                ".gitignore",
+                "setup.py",
+                "setup.cfg",
+                "pyproject.toml",
+                "Makefile",
+                "dleader_logo.png",
             }
 
             # Application Python files to skip
             app_python_files = {
-                'agent_fastapi_server_multiturn.py', 'agent_gradio_fastapi_multiturn.py',
-                'cloud_storage_manager.py', 'unified_session_manager.py', 'a1.py',
-                'agent_fastapi_server.py', 'agent_interface_gradio.py'
+                "agent_fastapi_server_multiturn.py",
+                "agent_gradio_fastapi_multiturn.py",
+                "cloud_storage_manager.py",
+                "unified_session_manager.py",
+                "a1.py",
+                "agent_fastapi_server.py",
+                "agent_interface_gradio.py",
             }
 
             moved_count = 0
@@ -2896,8 +3223,17 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                     continue
 
                 # Skip files in system directories
-                if any(file_path.startswith(d + '/') for d in ['chat_sessions', 'chat_zips',
-                       'session_storage', 'multiturn_sessions', 'temp_uploads', 's3_mongodb']):
+                if any(
+                    file_path.startswith(d + "/")
+                    for d in [
+                        "chat_sessions",
+                        "chat_zips",
+                        "session_storage",
+                        "multiturn_sessions",
+                        "temp_uploads",
+                        "s3_mongodb",
+                    ]
+                ):
                     continue
 
                 filename = os.path.basename(file_path)
@@ -2907,11 +3243,11 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                     continue
 
                 # Skip test files
-                if filename.startswith('test_') and filename.endswith('.py'):
+                if filename.startswith("test_") and filename.endswith(".py"):
                     continue
 
                 # Skip compiled Python files
-                if filename.endswith(('.pyc', '.pyo', '.pyd')):
+                if filename.endswith((".pyc", ".pyo", ".pyd")):
                     continue
 
                 # Check if file was created or modified after process started
@@ -2946,7 +3282,7 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                             moved_count += 1
 
                             # Count images
-                            if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp')):
+                            if filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp")):
                                 image_count += 1
                                 print(f"Process: This is an image file: {filename}")
 
@@ -2958,10 +3294,12 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
                     pass
 
             if moved_count > 0:
-                result_queue.put({
-                    "type": "status",
-                    "content": f"Process: Moved {moved_count} files to session ({image_count} images)"
-                })
+                result_queue.put(
+                    {
+                        "type": "status",
+                        "content": f"Process: Moved {moved_count} files to session ({image_count} images)",
+                    }
+                )
                 print(f"Process: Successfully moved {moved_count} files ({image_count} images) to {session_path}")
 
         except Exception as e:
@@ -2970,9 +3308,11 @@ def run_agent_in_process(message_queue: MPQueue, result_queue: MPQueue, enhanced
         # Clean up any remaining subprocesses
         cleanup_subprocesses()
 
+
 # Session and utility classes (reused from original files)
 class SessionManager:
     """Manage session folders and file storage"""
+
     def __init__(self):
         self.sessions_dir = os.path.join(os.getcwd(), "chat_sessions")
         os.makedirs(self.sessions_dir, exist_ok=True)
@@ -3001,27 +3341,30 @@ class SessionManager:
         """Get the current session path"""
         return self.session_path
 
+
 class StreamingCapture:
     """Capture stdout and provide real-time updates"""
+
     def __init__(self):
         self.content = ""
         self.original_stdout = sys.stdout
-        
+
     def write(self, text):
         self.content += text
         self.original_stdout.write(text)
         self.original_stdout.flush()
-        
+
     def flush(self):
         self.original_stdout.flush()
-        
+
     def get_content(self):
         return self.content
+
 
 def scan_for_new_files(current_path, start_time, exclude_folders=None):
     """Scan for files created after start_time, excluding specified folders"""
     if exclude_folders is None:
-        exclude_folders = {'chat_sessions', 'chat_zips', '__pycache__', '.git', '.vscode', 'node_modules'}
+        exclude_folders = {"chat_sessions", "chat_zips", "__pycache__", ".git", ".vscode", "node_modules"}
 
     new_files = []
     try:
@@ -3072,7 +3415,9 @@ def move_files_to_session(file_paths, session_path):
     return moved_files
 
 
-def generate_report_pdf(session_path: str, report_content: str, image_files: list, turn_number: int = None) -> Optional[str]:
+def generate_report_pdf(
+    session_path: str, report_content: str, image_files: list, turn_number: int = None
+) -> Optional[str]:
     """Generate a PDF from the final report with embedded images using pypandoc.
 
     Args:
@@ -3089,7 +3434,7 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
         import re
 
         # Generate filename with timestamp and optional turn number
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if turn_number is not None:
             pdf_filename = f"report_{timestamp}_turn_{turn_number}.pdf"
         else:
@@ -3100,11 +3445,13 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
         cleaned_content = report_content
 
         # Remove download links section (not needed in PDF)
-        cleaned_content = re.sub(r'## 📥 Downloads.*?(?=##|\Z)', '', cleaned_content, flags=re.DOTALL)
-        cleaned_content = re.sub(r'## Downloads.*?(?=##|\Z)', '', cleaned_content, flags=re.DOTALL)
+        cleaned_content = re.sub(r"## 📥 Downloads.*?(?=##|\Z)", "", cleaned_content, flags=re.DOTALL)
+        cleaned_content = re.sub(r"## Downloads.*?(?=##|\Z)", "", cleaned_content, flags=re.DOTALL)
 
         # Remove emojis that may not render well in PDF
-        cleaned_content = re.sub(r'[\U0001F300-\U0001F9FF\U00002600-\U000026FF\U00002700-\U000027BF]', '', cleaned_content)
+        cleaned_content = re.sub(
+            r"[\U0001F300-\U0001F9FF\U00002600-\U000026FF\U00002700-\U000027BF]", "", cleaned_content
+        )
 
         # Note: Unicode characters like arrows (→←↑↓⇒), Greek letters (αβγδ),
         # math symbols (≤≥±×÷∞), subscripts (₀₁₂) are preserved and will render
@@ -3113,11 +3460,11 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
         # Fix markdown list formatting for proper PDF rendering
         # Ensure blank line before bullet lists (required for pandoc to render as proper list)
         # Pattern: Bold text on a line followed by a bullet list without blank line
-        cleaned_content = re.sub(r'(\*\*[^*]+\*\*)\n(- )', r'\1\n\n\2', cleaned_content)
+        cleaned_content = re.sub(r"(\*\*[^*]+\*\*)\n(- )", r"\1\n\n\2", cleaned_content)
         # Also ensure blank line after headings followed by lists
-        cleaned_content = re.sub(r'(^#{1,6}\s+.+)\n(- )', r'\1\n\n\2', cleaned_content, flags=re.MULTILINE)
+        cleaned_content = re.sub(r"(^#{1,6}\s+.+)\n(- )", r"\1\n\n\2", cleaned_content, flags=re.MULTILINE)
         # Ensure blank line before any list that follows a non-list line
-        cleaned_content = re.sub(r'([^\n-])\n(- \*\*)', r'\1\n\n\2', cleaned_content)
+        cleaned_content = re.sub(r"([^\n-])\n(- \*\*)", r"\1\n\n\2", cleaned_content)
 
         # Add images section at the end if there are images
         if image_files:
@@ -3127,7 +3474,7 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
             def extract_fig_number(path):
                 filename = os.path.basename(path).lower()
                 # Match patterns like fig1, fig_1, figure1, figure_1
-                match = re.search(r'(?:fig(?:ure)?[_\s]?)(\d+)', filename)
+                match = re.search(r"(?:fig(?:ure)?[_\s]?)(\d+)", filename)
                 if match:
                     return int(match.group(1))
                 return 999  # Non-numbered figures go at the end
@@ -3140,13 +3487,13 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
                     # Remove file extension and clean up the name
                     base_name = os.path.splitext(filename)[0]
                     # Remove fig/figure prefix with number (e.g., "fig1_", "fig_1_", "figure1_")
-                    clean_name = re.sub(r'^fig(?:ure)?[_\s]?\d+[_\s\-]*', '', base_name, flags=re.IGNORECASE)
+                    clean_name = re.sub(r"^fig(?:ure)?[_\s]?\d+[_\s\-]*", "", base_name, flags=re.IGNORECASE)
                     # Replace underscores and dashes with spaces, title case
-                    clean_name = clean_name.replace('_', ' ').replace('-', ' ').strip()
+                    clean_name = clean_name.replace("_", " ").replace("-", " ").strip()
                     if clean_name:
                         clean_name = clean_name.title()
                     else:
-                        clean_name = base_name.replace('_', ' ').replace('-', ' ').title()
+                        clean_name = base_name.replace("_", " ").replace("-", " ").title()
                     # Create proper figure caption
                     caption = f"Figure {fig_idx}: {clean_name}"
                     # Use absolute path for images
@@ -3161,19 +3508,25 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
         # Using DejaVu Sans font for excellent Unicode support (arrows, Greek, math symbols)
         pypandoc.convert_text(
             final_content,
-            'pdf',
-            format='md',
+            "pdf",
+            format="md",
             outputfile=pdf_path,
             extra_args=[
-                '--pdf-engine=xelatex',
-                '-V', 'geometry:margin=1in',
-                '-V', 'fontsize=11pt',
-                '-V', 'documentclass=article',
-                '-V', 'mainfont=DejaVu Sans',  # Good Unicode coverage (arrows, Greek, math)
-                '-V', 'sansfont=DejaVu Sans',
-                '-V', 'monofont=DejaVu Sans Mono',
-                '--syntax-highlighting=tango'  # Updated from deprecated --highlight-style
-            ]
+                "--pdf-engine=xelatex",
+                "-V",
+                "geometry:margin=1in",
+                "-V",
+                "fontsize=11pt",
+                "-V",
+                "documentclass=article",
+                "-V",
+                "mainfont=DejaVu Sans",  # Good Unicode coverage (arrows, Greek, math)
+                "-V",
+                "sansfont=DejaVu Sans",
+                "-V",
+                "monofont=DejaVu Sans Mono",
+                "--syntax-highlighting=tango",  # Updated from deprecated --highlight-style
+            ],
         )
 
         print(f"Generated PDF report: {pdf_path}")
@@ -3182,12 +3535,15 @@ def generate_report_pdf(session_path: str, report_content: str, image_files: lis
     except Exception as e:
         print(f"Error generating PDF report with pypandoc: {e}")
         import traceback
+
         traceback.print_exc()
         # Fallback to fpdf if pypandoc fails
         return generate_report_pdf_fpdf(session_path, report_content, image_files, turn_number)
 
 
-def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files: list, turn_number: int = None) -> Optional[str]:
+def generate_report_pdf_fpdf(
+    session_path: str, report_content: str, image_files: list, turn_number: int = None
+) -> Optional[str]:
     """Fallback PDF generation using fpdf if pypandoc fails.
 
     Args:
@@ -3206,10 +3562,10 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
         import re
 
         # Unicode font paths (DejaVu has excellent Unicode coverage)
-        DEJAVU_REGULAR = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
-        DEJAVU_BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
-        DEJAVU_ITALIC = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf'
-        DEJAVU_MONO = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
+        DEJAVU_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        DEJAVU_ITALIC = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"
+        DEJAVU_MONO = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 
         # Check if DejaVu fonts are available
         use_unicode_font = os.path.exists(DEJAVU_REGULAR)
@@ -3223,30 +3579,30 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
 
                 # Add Unicode fonts if available
                 if use_unicode_font:
-                    self.add_font('DejaVu', '', DEJAVU_REGULAR)
+                    self.add_font("DejaVu", "", DEJAVU_REGULAR)
                     if os.path.exists(DEJAVU_BOLD):
-                        self.add_font('DejaVu', 'B', DEJAVU_BOLD)
+                        self.add_font("DejaVu", "B", DEJAVU_BOLD)
                     if os.path.exists(DEJAVU_ITALIC):
-                        self.add_font('DejaVu', 'I', DEJAVU_ITALIC)
+                        self.add_font("DejaVu", "I", DEJAVU_ITALIC)
                     if os.path.exists(DEJAVU_MONO):
-                        self.add_font('DejaVuMono', '', DEJAVU_MONO)
+                        self.add_font("DejaVuMono", "", DEJAVU_MONO)
 
             def header(self):
                 if self._use_unicode:
-                    self.set_font('DejaVu', 'B', 10)
+                    self.set_font("DejaVu", "B", 10)
                 else:
-                    self.set_font('Helvetica', 'B', 10)
+                    self.set_font("Helvetica", "B", 10)
                 self.set_text_color(128, 128, 128)
-                self.cell(0, 10, 'KumiChem Agent Report', align='C', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                self.cell(0, 10, "KumiChem Agent Report", align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
             def footer(self):
                 self.set_y(-15)
                 if self._use_unicode:
-                    self.set_font('DejaVu', 'I', 8)
+                    self.set_font("DejaVu", "I", 8)
                 else:
-                    self.set_font('Helvetica', 'I', 8)
+                    self.set_font("Helvetica", "I", 8)
                 self.set_text_color(128, 128, 128)
-                self.cell(0, 10, f'Page {self.page_no()}', align='C')
+                self.cell(0, 10, f"Page {self.page_no()}", align="C")
 
         pdf = UTF8PDF()
         pdf.add_page()
@@ -3254,76 +3610,120 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
         def clean_text(text):
             replacements = {
                 # Quotes
-                '\u2018': "'", '\u2019': "'",  # Single quotes: ' '
-                '\u201c': '"', '\u201d': '"',  # Double quotes: " "
+                "\u2018": "'",
+                "\u2019": "'",  # Single quotes: ' '
+                "\u201c": '"',
+                "\u201d": '"',  # Double quotes: " "
                 # Dashes
-                '\u2013': '-', '\u2014': '--',  # En-dash, em-dash
+                "\u2013": "-",
+                "\u2014": "--",  # En-dash, em-dash
                 # Ellipsis
-                '\u2026': '...',
+                "\u2026": "...",
                 # Spaces
-                '\u00a0': ' ',  # Non-breaking space
+                "\u00a0": " ",  # Non-breaking space
                 # Bullets and checkmarks
-                '\u2022': '*',  # Bullet •
-                '\u2713': '[x]', '\u2714': '[x]',  # Checkmarks ✓ ✔
-                '\u2717': '[ ]', '\u2718': '[ ]',  # X marks ✗ ✘
+                "\u2022": "*",  # Bullet •
+                "\u2713": "[x]",
+                "\u2714": "[x]",  # Checkmarks ✓ ✔
+                "\u2717": "[ ]",
+                "\u2718": "[ ]",  # X marks ✗ ✘
                 # Arrows (comprehensive)
-                '\u2192': '->', '\u2190': '<-',  # → ←
-                '\u2191': '^', '\u2193': 'v',    # ↑ ↓
-                '\u2194': '<->', '\u2195': '^v',  # ↔ ↕
-                '\u21d2': '=>', '\u21d0': '<=',  # ⇒ ⇐
-                '\u21d4': '<=>', '\u21d1': '^^', '\u21d3': 'vv',  # ⇔ ⇑ ⇓
-                '\u2794': '->', '\u2799': '->',  # ➔ ➙
-                '\u279c': '->', '\u27a1': '->',  # ➜ ➡
+                "\u2192": "->",
+                "\u2190": "<-",  # → ←
+                "\u2191": "^",
+                "\u2193": "v",  # ↑ ↓
+                "\u2194": "<->",
+                "\u2195": "^v",  # ↔ ↕
+                "\u21d2": "=>",
+                "\u21d0": "<=",  # ⇒ ⇐
+                "\u21d4": "<=>",
+                "\u21d1": "^^",
+                "\u21d3": "vv",  # ⇔ ⇑ ⇓
+                "\u2794": "->",
+                "\u2799": "->",  # ➔ ➙
+                "\u279c": "->",
+                "\u27a1": "->",  # ➜ ➡
                 # Math symbols
-                '\u00b0': ' deg',  # Degree symbol °
-                '\u00b1': '+/-',  # Plus-minus ±
-                '\u2264': '<=', '\u2265': '>=',  # ≤ ≥
-                '\u2260': '!=',  # ≠
-                '\u2248': '~=',  # ≈
-                '\u00d7': 'x', '\u00f7': '/',  # × ÷
-                '\u221e': 'inf',  # ∞
-                '\u2211': 'sum', '\u220f': 'prod',  # ∑ ∏
-                '\u221a': 'sqrt',  # √
+                "\u00b0": " deg",  # Degree symbol °
+                "\u00b1": "+/-",  # Plus-minus ±
+                "\u2264": "<=",
+                "\u2265": ">=",  # ≤ ≥
+                "\u2260": "!=",  # ≠
+                "\u2248": "~=",  # ≈
+                "\u00d7": "x",
+                "\u00f7": "/",  # × ÷
+                "\u221e": "inf",  # ∞
+                "\u2211": "sum",
+                "\u220f": "prod",  # ∑ ∏
+                "\u221a": "sqrt",  # √
                 # Greek letters (common in scientific text)
-                '\u03b1': 'alpha', '\u03b2': 'beta', '\u03b3': 'gamma',
-                '\u03b4': 'delta', '\u03b5': 'epsilon', '\u03b6': 'zeta',
-                '\u03b7': 'eta', '\u03b8': 'theta', '\u03b9': 'iota',
-                '\u03ba': 'kappa', '\u03bb': 'lambda', '\u03bc': 'mu',
-                '\u03bd': 'nu', '\u03be': 'xi', '\u03c0': 'pi',
-                '\u03c1': 'rho', '\u03c3': 'sigma', '\u03c4': 'tau',
-                '\u03c5': 'upsilon', '\u03c6': 'phi', '\u03c7': 'chi',
-                '\u03c8': 'psi', '\u03c9': 'omega',
+                "\u03b1": "alpha",
+                "\u03b2": "beta",
+                "\u03b3": "gamma",
+                "\u03b4": "delta",
+                "\u03b5": "epsilon",
+                "\u03b6": "zeta",
+                "\u03b7": "eta",
+                "\u03b8": "theta",
+                "\u03b9": "iota",
+                "\u03ba": "kappa",
+                "\u03bb": "lambda",
+                "\u03bc": "mu",
+                "\u03bd": "nu",
+                "\u03be": "xi",
+                "\u03c0": "pi",
+                "\u03c1": "rho",
+                "\u03c3": "sigma",
+                "\u03c4": "tau",
+                "\u03c5": "upsilon",
+                "\u03c6": "phi",
+                "\u03c7": "chi",
+                "\u03c8": "psi",
+                "\u03c9": "omega",
                 # Uppercase Greek
-                '\u0394': 'Delta', '\u03a3': 'Sigma', '\u03a9': 'Omega',
+                "\u0394": "Delta",
+                "\u03a3": "Sigma",
+                "\u03a9": "Omega",
                 # Subscript/superscript numbers (common in chemistry)
-                '\u2080': '0', '\u2081': '1', '\u2082': '2', '\u2083': '3',
-                '\u2084': '4', '\u2085': '5', '\u2086': '6', '\u2087': '7',
-                '\u2088': '8', '\u2089': '9',
-                '\u00b2': '^2', '\u00b3': '^3',  # ² ³
+                "\u2080": "0",
+                "\u2081": "1",
+                "\u2082": "2",
+                "\u2083": "3",
+                "\u2084": "4",
+                "\u2085": "5",
+                "\u2086": "6",
+                "\u2087": "7",
+                "\u2088": "8",
+                "\u2089": "9",
+                "\u00b2": "^2",
+                "\u00b3": "^3",  # ² ³
                 # Prime symbols (for feet/minutes or derivatives)
-                '\u2032': "'", '\u2033': "''",  # ′ ″
+                "\u2032": "'",
+                "\u2033": "''",  # ′ ″
                 # Other common symbols
-                '\u2122': '(TM)', '\u00ae': '(R)', '\u00a9': '(C)',  # ™ ® ©
+                "\u2122": "(TM)",
+                "\u00ae": "(R)",
+                "\u00a9": "(C)",  # ™ ® ©
             }
             for old, new in replacements.items():
                 text = text.replace(old, new)
-            return text.encode('latin-1', errors='replace').decode('latin-1')
+            return text.encode("latin-1", errors="replace").decode("latin-1")
 
         def add_heading(text, level=1):
             sizes = {1: 18, 2: 16, 3: 14, 4: 12}
             size = sizes.get(level, 12)
-            pdf.set_font('Helvetica', 'B', size)
+            pdf.set_font("Helvetica", "B", size)
             pdf.set_text_color(0, 0, 0)
             pdf.multi_cell(0, 8, clean_text(text))
             pdf.ln(3)
 
         def add_code_block(code):
-            pdf.set_font('Courier', '', 9)
+            pdf.set_font("Courier", "", 9)
             pdf.set_fill_color(245, 245, 245)
             pdf.set_text_color(0, 0, 0)
-            for line in clean_text(code).split('\n'):
+            for line in clean_text(code).split("\n"):
                 if len(line) > 100:
-                    line = line[:97] + '...'
+                    line = line[:97] + "..."
                 pdf.cell(0, 5, line, fill=True)
                 pdf.ln()
             pdf.ln(3)
@@ -3347,15 +3747,15 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
                 pdf.image(image_path, x=x, y=pdf.get_y(), w=width)
                 pdf.ln(height + 5)
                 if caption:
-                    pdf.set_font('Helvetica', 'I', 9)
+                    pdf.set_font("Helvetica", "I", 9)
                     pdf.set_text_color(80, 80, 80)
-                    pdf.multi_cell(0, 5, clean_text(caption), align='C')
+                    pdf.multi_cell(0, 5, clean_text(caption), align="C")
                     pdf.ln(5)
             except Exception as e:
                 print(f"Error adding image {image_path} to PDF: {e}")
 
         # Parse markdown content
-        lines = report_content.split('\n')
+        lines = report_content.split("\n")
         in_code_block = False
         code_block_content = []
         i = 0
@@ -3363,15 +3763,15 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
         while i < len(lines):
             line = lines[i]
 
-            if '## 📥 Downloads' in line or '## Downloads' in line:
+            if "## 📥 Downloads" in line or "## Downloads" in line:
                 i += 1
-                while i < len(lines) and not lines[i].startswith('#'):
+                while i < len(lines) and not lines[i].startswith("#"):
                     i += 1
                 continue
 
-            if line.strip().startswith('```'):
+            if line.strip().startswith("```"):
                 if in_code_block:
-                    add_code_block('\n'.join(code_block_content))
+                    add_code_block("\n".join(code_block_content))
                     code_block_content = []
                     in_code_block = False
                 else:
@@ -3384,56 +3784,56 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
                 i += 1
                 continue
 
-            heading_match = re.match(r'^(#{1,6})\s+(.+)$', line)
+            heading_match = re.match(r"^(#{1,6})\s+(.+)$", line)
             if heading_match:
                 level = len(heading_match.group(1))
                 text = heading_match.group(2)
-                text = re.sub(r'[\U0001F300-\U0001F9FF\U00002600-\U000026FF\U00002700-\U000027BF]', '', text).strip()
-                text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
-                text = re.sub(r'\*([^*]+)\*', r'\1', text)
+                text = re.sub(r"[\U0001F300-\U0001F9FF\U00002600-\U000026FF\U00002700-\U000027BF]", "", text).strip()
+                text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+                text = re.sub(r"\*([^*]+)\*", r"\1", text)
                 add_heading(text, level)
                 i += 1
                 continue
 
-            if re.match(r'^(-{3,}|_{3,}|\*{3,})$', line.strip()):
+            if re.match(r"^(-{3,}|_{3,}|\*{3,})$", line.strip()):
                 pdf.line(10, pdf.get_y(), pdf.w - 10, pdf.get_y())
                 pdf.ln(5)
                 i += 1
                 continue
 
-            bullet_match = re.match(r'^(\s*)[-*+]\s+(.+)$', line)
+            bullet_match = re.match(r"^(\s*)[-*+]\s+(.+)$", line)
             if bullet_match:
                 indent = len(bullet_match.group(1)) // 2
                 text = bullet_match.group(2)
-                text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
-                text = re.sub(r'\*([^*]+)\*', r'\1', text)
-                text = re.sub(r'`([^`]+)`', r'\1', text)
-                pdf.set_font('Helvetica', '', 11)
-                pdf.multi_cell(0, 6, f'{"  " * indent}- {clean_text(text)}')
+                text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+                text = re.sub(r"\*([^*]+)\*", r"\1", text)
+                text = re.sub(r"`([^`]+)`", r"\1", text)
+                pdf.set_font("Helvetica", "", 11)
+                pdf.multi_cell(0, 6, f"{'  ' * indent}- {clean_text(text)}")
                 pdf.ln(1)
                 i += 1
                 continue
 
-            num_match = re.match(r'^(\s*)(\d+)\.\s+(.+)$', line)
+            num_match = re.match(r"^(\s*)(\d+)\.\s+(.+)$", line)
             if num_match:
                 indent = len(num_match.group(1)) // 2
                 num = num_match.group(2)
                 text = num_match.group(3)
-                text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
-                text = re.sub(r'\*([^*]+)\*', r'\1', text)
-                pdf.set_font('Helvetica', '', 11)
-                pdf.multi_cell(0, 6, f'{"  " * indent}{num}. {clean_text(text)}')
+                text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+                text = re.sub(r"\*([^*]+)\*", r"\1", text)
+                pdf.set_font("Helvetica", "", 11)
+                pdf.multi_cell(0, 6, f"{'  ' * indent}{num}. {clean_text(text)}")
                 pdf.ln(1)
                 i += 1
                 continue
 
             if line.strip():
                 text = line
-                text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
-                text = re.sub(r'\*([^*]+)\*', r'\1', text)
-                text = re.sub(r'`([^`]+)`', r'\1', text)
-                text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-                pdf.set_font('Helvetica', '', 11)
+                text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+                text = re.sub(r"\*([^*]+)\*", r"\1", text)
+                text = re.sub(r"`([^`]+)`", r"\1", text)
+                text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+                pdf.set_font("Helvetica", "", 11)
                 pdf.set_text_color(0, 0, 0)
                 pdf.multi_cell(0, 6, clean_text(text))
                 pdf.ln(2)
@@ -3449,7 +3849,7 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
             def extract_fig_number(path):
                 filename = os.path.basename(path).lower()
                 # Match patterns like fig1, fig_1, figure1, figure_1
-                match = re.search(r'(?:fig(?:ure)?[_\s]?)(\d+)', filename)
+                match = re.search(r"(?:fig(?:ure)?[_\s]?)(\d+)", filename)
                 if match:
                     return int(match.group(1))
                 return 999  # Non-numbered figures go at the end
@@ -3462,18 +3862,18 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
                     # Remove file extension and clean up the name
                     base_name = os.path.splitext(filename)[0]
                     # Remove fig/figure prefix with number (e.g., "fig1_", "fig_1_", "figure1_")
-                    clean_name = re.sub(r'^fig(?:ure)?[_\s]?\d+[_\s\-]*', '', base_name, flags=re.IGNORECASE)
+                    clean_name = re.sub(r"^fig(?:ure)?[_\s]?\d+[_\s\-]*", "", base_name, flags=re.IGNORECASE)
                     # Replace underscores and dashes with spaces, title case
-                    clean_name = clean_name.replace('_', ' ').replace('-', ' ').strip()
+                    clean_name = clean_name.replace("_", " ").replace("-", " ").strip()
                     if clean_name:
                         clean_name = clean_name.title()
                     else:
-                        clean_name = base_name.replace('_', ' ').replace('-', ' ').title()
+                        clean_name = base_name.replace("_", " ").replace("-", " ").title()
                     # Create proper figure caption
                     caption = f"Figure {fig_idx}: {clean_name}"
                     add_image(img_path, caption)
 
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if turn_number is not None:
             pdf_filename = f"report_{timestamp}_turn_{turn_number}.pdf"
         else:
@@ -3487,6 +3887,7 @@ def generate_report_pdf_fpdf(session_path: str, report_content: str, image_files
     except Exception as e:
         print(f"Error generating PDF report with fpdf: {e}")
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -3522,15 +3923,13 @@ def create_session_zip(session_path, save_to_chat_zips=True, turn_number=None, t
         else:
             # Create temporary zip file
             zip_file = tempfile.NamedTemporaryFile(
-                suffix='.zip',
-                prefix=f"{'_'.join(session_name.split('_')[:-1])}_",
-                delete=False
+                suffix=".zip", prefix=f"{'_'.join(session_name.split('_')[:-1])}_", delete=False
             )
             zip_file.close()
             zip_file_path = zip_file.name
 
         # Create zip archive
-        with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(zip_file_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             total_size = 0
             max_zip_size = 500 * 1024 * 1024  # 500MB max zip size
             skipped_files = []
@@ -3605,16 +4004,12 @@ def create_turn_zip(session_path, base_session_id, turn_number, save_to_chat_zip
             zip_file_path = os.path.join(chat_zips_dir, zip_filename)
         else:
             # Create temporary zip file
-            zip_file = tempfile.NamedTemporaryFile(
-                suffix='.zip',
-                prefix=f"turn_{turn_number}_",
-                delete=False
-            )
+            zip_file = tempfile.NamedTemporaryFile(suffix=".zip", prefix=f"turn_{turn_number}_", delete=False)
             zip_file.close()
             zip_file_path = zip_file.name
 
         # Create ZIP archive
-        with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(zip_file_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             total_size = 0
             max_zip_size = 500 * 1024 * 1024  # 500MB max
             skipped_files = []
@@ -3626,7 +4021,7 @@ def create_turn_zip(session_path, base_session_id, turn_number, save_to_chat_zip
                     file_path = os.path.join(root, file)
 
                     # Skip snapshot files (not needed in turn ZIP)
-                    if file.startswith('snapshot_'):
+                    if file.startswith("snapshot_"):
                         continue
 
                     # For turn-specific ZIP, we want ALL files generated so far
@@ -3658,14 +4053,16 @@ def create_turn_zip(session_path, base_session_id, turn_number, save_to_chat_zip
                 notice_content += "\n\nThese files were too large and excluded to keep download size manageable."
                 zipf.writestr("SKIPPED_LARGE_FILES.txt", notice_content)
 
-        print(f"Created turn {turn_number} zip: {zip_file_path} ({len(included_files)} files, {total_size / 1024 / 1024:.2f}MB)")
+        print(
+            f"Created turn {turn_number} zip: {zip_file_path} ({len(included_files)} files, {total_size / 1024 / 1024:.2f}MB)"
+        )
 
         return {
-            'zip_path': zip_file_path,
-            'zip_filename': zip_filename,
-            'turn_number': turn_number,
-            'file_count': len(included_files),
-            'total_size': total_size
+            "zip_path": zip_file_path,
+            "zip_filename": zip_filename,
+            "turn_number": turn_number,
+            "file_count": len(included_files),
+            "total_size": total_size,
         }
     except Exception as e:
         print(f"Error creating turn {turn_number} zip: {e}")
@@ -3674,11 +4071,7 @@ def create_turn_zip(session_path, base_session_id, turn_number, save_to_chat_zip
 
 def create_agent():
     """Create an agent configured for tasks"""
-    agent = A1(
-        use_tool_retriever=True,
-        download_data_lake=False,
-        llm='claude-sonnet-4-5-20250929'
-    )
+    agent = A1(use_tool_retriever=True, download_data_lake=False, llm="claude-sonnet-4-5-20250929")
     return agent
 
 
@@ -3772,12 +4165,13 @@ I have enough information to proceed! [READY_FOR_EXECUTION]"
         "tools": [],  # NO TOOLS - key difference
         "timeout": 90,  # Shorter timeout (90s vs 600s)
         "temperature": 0.7,
-        "mode": "planning"
+        "mode": "planning",
     }
 
 
 # Global template retriever instance (initialized once, reused for all requests)
 template_retriever = None
+
 
 def get_template_retriever():
     """Get or create the global template retriever instance"""
@@ -3790,6 +4184,7 @@ def get_template_retriever():
             print(f"Warning: Could not initialize template retriever: {e}")
             template_retriever = None
     return template_retriever
+
 
 # Email allow list middleware to restrict API access
 class EmailAllowListMiddleware(BaseHTTPMiddleware):
@@ -3849,7 +4244,7 @@ class EmailAllowListMiddleware(BaseHTTPMiddleware):
                     headers={
                         "Access-Control-Allow-Origin": "*",
                         "Access-Control-Allow-Credentials": "true",
-                    }
+                    },
                 )
 
         return await call_next(request)
@@ -3868,7 +4263,7 @@ class CORSHeaderMiddleware(BaseHTTPMiddleware):
                     "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key, Accept, Origin, X-Requested-With, Access-Control-Request-Method, Access-Control-Request-Headers",
                     "Access-Control-Max-Age": "3600",
                     "Access-Control-Allow-Credentials": "true",
-                }
+                },
             )
 
         # Process the request
@@ -3878,9 +4273,12 @@ class CORSHeaderMiddleware(BaseHTTPMiddleware):
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, x-api-key, Accept, Origin, X-Requested-With"
+        response.headers["Access-Control-Allow-Headers"] = (
+            "Content-Type, Authorization, x-api-key, Accept, Origin, X-Requested-With"
+        )
 
         return response
+
 
 # FastAPI App
 app = FastAPI(title="Agent Chat API", description="Multi-user agent chat with queue management")
@@ -3911,6 +4309,7 @@ app.add_middleware(CORSHeaderMiddleware)
 # Add email allow list middleware to restrict API access
 app.add_middleware(EmailAllowListMiddleware)
 
+
 # Global OPTIONS handler for CORS preflight requests
 @app.options("/{full_path:path}")
 async def options_handler(full_path: str):
@@ -3920,12 +4319,12 @@ async def options_handler(full_path: str):
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
         "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key, Accept, Origin, X-Requested-With",
-        "Access-Control-Max-Age": "3600"
+        "Access-Control-Max-Age": "3600",
     }
+
 
 # API Endpoints
 # REMOVED: /chat endpoint - legacy blocking endpoint, use /chat-queue for modern queue-based multi-turn chat
-
 
 
 @app.post("/chat-queue")
@@ -3935,7 +4334,7 @@ async def start_chat_queue(
     user_id: str = Form(...),
     session_id: Optional[str] = Form(None),
     use_template: Optional[bool] = Form(None),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(default=[]),
 ):
     """Add chat request to queue with S3 file uploads
 
@@ -3965,7 +4364,9 @@ async def start_chat_queue(
     session_id = session_id or str(uuid.uuid4())
 
     # Create or get multi-turn session first to get turn number
-    multiturn_session = queue_manager.create_or_get_multiturn_session(session_id, language, user_id, initial_query=message)
+    multiturn_session = queue_manager.create_or_get_multiturn_session(
+        session_id, language, user_id, initial_query=message
+    )
     turn_number = queue_manager.add_turn_to_session(session_id, message)
 
     # Handle file uploads with S3 storage
@@ -3987,12 +4388,16 @@ async def start_chat_queue(
 
                 # Check file size
                 if file_size > MAX_FILE_SIZE_BYTES:
-                    rejected_files.append({
-                        "filename": file.filename,
-                        "size_mb": round(file_size_mb, 2),
-                        "reason": f"File size {file_size_mb:.2f}MB exceeds maximum {MAX_FILE_SIZE_MB}MB"
-                    })
-                    logger.warning(f"Rejected file {file.filename}: size {file_size_mb:.2f}MB > {MAX_FILE_SIZE_MB}MB limit")
+                    rejected_files.append(
+                        {
+                            "filename": file.filename,
+                            "size_mb": round(file_size_mb, 2),
+                            "reason": f"File size {file_size_mb:.2f}MB exceeds maximum {MAX_FILE_SIZE_MB}MB",
+                        }
+                    )
+                    logger.warning(
+                        f"Rejected file {file.filename}: size {file_size_mb:.2f}MB > {MAX_FILE_SIZE_MB}MB limit"
+                    )
                     continue
 
                 # Save file temporarily
@@ -4008,9 +4413,7 @@ async def start_chat_queue(
 
                         # Upload to S3
                         cloud_storage_manager.s3_client.upload_file(
-                            temp_file_path,
-                            cloud_storage_manager.bucket_name,
-                            s3_object_name
+                            temp_file_path, cloud_storage_manager.bucket_name, s3_object_name
                         )
 
                         # Store S3 metadata
@@ -4021,7 +4424,7 @@ async def start_chat_queue(
                             "turn_number": turn_number,
                             "upload_time": datetime.now().isoformat(),
                             "file_size": file_size,
-                            "file_size_mb": round(file_size_mb, 2)
+                            "file_size_mb": round(file_size_mb, 2),
                         }
 
                         logger.info(f"Uploaded {file.filename} to S3: {s3_object_name} (size: {file_size_mb:.2f}MB)")
@@ -4041,7 +4444,7 @@ async def start_chat_queue(
     if s3_file_metadata:
         # Store S3 metadata in the current turn (will be saved when turn completes)
         # For now, store it temporarily in queue_manager for processing
-        if not hasattr(queue_manager, '_temp_s3_metadata'):
+        if not hasattr(queue_manager, "_temp_s3_metadata"):
             queue_manager._temp_s3_metadata = {}
         queue_manager._temp_s3_metadata[f"{session_id}_turn_{turn_number}"] = s3_file_metadata
 
@@ -4053,7 +4456,7 @@ async def start_chat_queue(
         uploaded_files=uploaded_file_paths,
         turn_number=turn_number,
         user_id=user_id,
-        use_template=use_template
+        use_template=use_template,
     )
 
     # Store S3 metadata in user request for processing
@@ -4072,20 +4475,24 @@ async def start_chat_queue(
         "position": position,
         "uploaded_files": len(uploaded_file_paths),
         "s3_files": list(s3_file_metadata.keys()) if s3_file_metadata else [],
-        "message": "Request added to queue. Files uploaded to S3. Use /status/{session_id} to check progress."
+        "message": "Request added to queue. Files uploaded to S3. Use /status/{session_id} to check progress.",
     }
 
     # Add rejected files info if any
     if rejected_files:
         response["rejected_files"] = rejected_files
-        response["message"] = f"Request added to queue. {len(uploaded_file_paths)} files uploaded, {len(rejected_files)} rejected (>10MB)."
+        response["message"] = (
+            f"Request added to queue. {len(uploaded_file_paths)} files uploaded, {len(rejected_files)} rejected (>10MB)."
+        )
 
     return response
+
 
 @app.get("/progress/{session_id}")
 async def get_progress(session_id: str, user_id: str):
     """Get current progress for a session (alias for /status for backward compatibility)"""
     return await get_status(session_id, user_id)
+
 
 @app.get("/status/{session_id}")
 async def get_status(session_id: str, user_id: str, turn_number: Optional[int] = None):
@@ -4143,7 +4550,7 @@ async def get_status(session_id: str, user_id: str, turn_number: Optional[int] =
             "status": status_data.get("status", "unknown"),
             "is_complete": status_data.get("is_complete", False),
             "is_cancelled": status_data.get("is_cancelled", False),
-            "created_at": status_data.get("created_at", datetime.now().isoformat())
+            "created_at": status_data.get("created_at", datetime.now().isoformat()),
         }
 
         # Add turn information if this is a multi-turn session
@@ -4179,9 +4586,11 @@ async def get_status(session_id: str, user_id: str, turn_number: Optional[int] =
                         "snapshot_summary": {
                             "timestamp": update.get("snapshot", {}).get("timestamp"),
                             "status": update.get("snapshot", {}).get("status"),
-                            "thinking_length": update.get("snapshot", {}).get("content", {}).get("thinking_length", 0) if isinstance(update.get("snapshot", {}).get("content"), dict) else 0,
-                            "is_complete": update.get("snapshot", {}).get("is_complete", False)
-                        }
+                            "thinking_length": update.get("snapshot", {}).get("content", {}).get("thinking_length", 0)
+                            if isinstance(update.get("snapshot", {}).get("content"), dict)
+                            else 0,
+                            "is_complete": update.get("snapshot", {}).get("is_complete", False),
+                        },
                     }
                     filtered_updates.append(filtered_update)
                 else:
@@ -4201,10 +4610,7 @@ async def get_status(session_id: str, user_id: str, turn_number: Optional[int] =
         elif storage_location == "cloud":
             # Cloud sessions: show summary data (progress is summarized)
             response["progress_summary"] = status_data.get("progress_summary", {})
-            response["cloud_info"] = {
-                "uploaded_at": status_data.get("uploaded_to_cloud_at"),
-                "files_available": True
-            }
+            response["cloud_info"] = {"uploaded_at": status_data.get("uploaded_to_cloud_at"), "files_available": True}
 
         elif storage_location == "local":
             # Local stored sessions: include available progress data
@@ -4222,12 +4628,14 @@ async def get_status(session_id: str, user_id: str, turn_number: Optional[int] =
         print(f"Error getting status for session {session_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving session status: {str(e)}")
 
+
 # REMOVED: /upload/{session_id} endpoint - not needed for multi-turn chat workflow
 # File uploads can be handled during initial session creation if needed
 
 
 # REMOVED: /sessions endpoint - was insecure (exposed all users' sessions)
 # Use /all-sessions with user_id filtering instead
+
 
 @app.get("/download/{session_id}")
 async def download_session_zip(session_id: str, user_id: str):
@@ -4277,11 +4685,7 @@ async def download_session_zip(session_id: str, user_id: str):
             # Local session: serve zip file directly
             zip_path = files_info.get("zip_path")
             if zip_path and os.path.exists(zip_path):
-                return FileResponse(
-                    zip_path,
-                    media_type='application/zip',
-                    filename=os.path.basename(zip_path)
-                )
+                return FileResponse(zip_path, media_type="application/zip", filename=os.path.basename(zip_path))
             else:
                 raise HTTPException(status_code=404, detail="Local zip file not found")
 
@@ -4398,10 +4802,8 @@ async def download_individual_file(session_id: str, filename: str, user_id: str)
         if not session_path:
             # Try to find session folder
             import glob
-            patterns = [
-                f"chat_sessions/*{session_id[:8]}*",
-                f"chat_sessions/multiturn_*{session_id[:8]}*"
-            ]
+
+            patterns = [f"chat_sessions/*{session_id[:8]}*", f"chat_sessions/multiturn_*{session_id[:8]}*"]
             for pattern in patterns:
                 matches = glob.glob(pattern)
                 if matches:
@@ -4421,15 +4823,12 @@ async def download_individual_file(session_id: str, filename: str, user_id: str)
             if os.path.exists(file_path) and os.path.isfile(file_path):
                 # Determine media type based on extension
                 import mimetypes
+
                 media_type, _ = mimetypes.guess_type(file_path)
                 if not media_type:
                     media_type = "application/octet-stream"
 
-                return FileResponse(
-                    file_path,
-                    media_type=media_type,
-                    filename=os.path.basename(file_path)
-                )
+                return FileResponse(file_path, media_type=media_type, filename=os.path.basename(file_path))
             else:
                 raise HTTPException(status_code=404, detail=f"File '{filename}' not found in local storage")
 
@@ -4440,6 +4839,7 @@ async def download_individual_file(session_id: str, filename: str, user_id: str)
     except Exception as e:
         print(f"Error downloading file {filename} from session {session_id}: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
@@ -4476,7 +4876,7 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
             else:
                 return 999
             # Match patterns like fig1, fig_1, figure1, figure_1
-            match = re.search(r'(?:fig(?:ure)?[_\s]?)(\d+)', filename)
+            match = re.search(r"(?:fig(?:ure)?[_\s]?)(\d+)", filename)
             if match:
                 return int(match.group(1))
             return 999  # Non-numbered figures go at the end
@@ -4497,13 +4897,13 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
                     # Extract base name and clean it
                     base_name = os.path.splitext(filename)[0]
                     # Remove figN_ prefix from display name
-                    clean_name = re.sub(r'^fig(?:ure)?[_\s]?\d+[_\s\-]*', '', base_name, flags=re.IGNORECASE)
-                    clean_name = clean_name.replace('_', ' ').replace('-', ' ').strip()
+                    clean_name = re.sub(r"^fig(?:ure)?[_\s]?\d+[_\s\-]*", "", base_name, flags=re.IGNORECASE)
+                    clean_name = clean_name.replace("_", " ").replace("-", " ").strip()
                     if clean_name:
                         clean_name = clean_name.title()
                     else:
                         # Fallback to cleaned base name if everything was removed
-                        clean_name = base_name.replace('_', ' ').replace('-', ' ').title()
+                        clean_name = base_name.replace("_", " ").replace("-", " ").title()
                     # Use proper "Figure N:" caption format
                     caption = f"Figure {fig_idx}: {clean_name}"
                     images_section += f"### {caption}\n\n"
@@ -4514,8 +4914,8 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
                 # Try to extract filename from URL
                 url_filename = image_item.split("/")[-1].split("?")[0]
                 base_name = os.path.splitext(url_filename)[0]
-                clean_name = re.sub(r'^fig(?:ure)?[_\s]?\d+[_\s\-]*', '', base_name, flags=re.IGNORECASE)
-                clean_name = clean_name.replace('_', ' ').replace('-', ' ').strip()
+                clean_name = re.sub(r"^fig(?:ure)?[_\s]?\d+[_\s\-]*", "", base_name, flags=re.IGNORECASE)
+                clean_name = clean_name.replace("_", " ").replace("-", " ").strip()
                 if clean_name:
                     clean_name = clean_name.title()
                 else:
@@ -4554,11 +4954,7 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
                     else:
                         size_display = f" ({file_size} bytes)"
 
-                download_links.append({
-                    "name": f"Download All Files (ZIP){size_display}",
-                    "url": url,
-                    "icon": "📦"
-                })
+                download_links.append({"name": f"Download All Files (ZIP){size_display}", "url": url, "icon": "📦"})
                 break  # Only add one zip download link
 
     # Add PDF download link if available
@@ -4566,11 +4962,7 @@ def append_images_to_report(final_report: str, files_data: dict) -> str:
     if pdf_info and isinstance(pdf_info, dict):
         url = pdf_info.get("url") or pdf_info.get("download_url")
         if url:
-            download_links.append({
-                "name": "Final Report (PDF)",
-                "url": url,
-                "icon": "📄"
-            })
+            download_links.append({"name": "Final Report (PDF)", "url": url, "icon": "📄"})
 
     # Build download links section
     if download_links:
@@ -4615,26 +5007,25 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
         if isinstance(file_item, str):
             filename = file_item.split("/")[-1]
             file_path = file_item
-            file_ext = filename.split('.')[-1].lower() if '.' in filename else ''
+            file_ext = filename.split(".")[-1].lower() if "." in filename else ""
 
             # Upload to S3 if file exists locally
             if os.path.exists(file_path) and session_id:
                 try:
                     # Determine the correct S3 folder based on file type
-                    if file_ext in ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp']:
-                        s3_folder = 'images'
-                    elif file_ext == 'pdf':
-                        s3_folder = 'report_pdf' if filename.startswith('report_') else 'files'
+                    if file_ext in ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp"]:
+                        s3_folder = "images"
+                    elif file_ext == "pdf":
+                        s3_folder = "report_pdf" if filename.startswith("report_") else "files"
                     else:
-                        s3_folder = 'files'
+                        s3_folder = "files"
                     s3_key = f"sessions/{session_id}/{s3_folder}/{filename}"
 
                     # Check if file already exists in S3 to avoid re-uploading
                     try:
                         head_object_count += 1
                         cloud_storage_manager.s3_client.head_object(
-                            Bucket=cloud_storage_manager.bucket_name,
-                            Key=s3_key
+                            Bucket=cloud_storage_manager.bucket_name, Key=s3_key
                         )
                         # File exists in S3, just generate fresh presigned URL
                         url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
@@ -4643,15 +5034,13 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
                             "filename": filename,
                             "s3_key": s3_key,
                             "url": url,
-                            "expires_at": (datetime.now() + timedelta(hours=2)).isoformat()
+                            "expires_at": (datetime.now() + timedelta(hours=2)).isoformat(),
                         }
                     except cloud_storage_manager.s3_client.exceptions.ClientError:
                         # File doesn't exist in S3, upload it once
                         upload_count += 1
                         cloud_storage_manager.s3_client.upload_file(
-                            file_path,
-                            cloud_storage_manager.bucket_name,
-                            s3_key
+                            file_path, cloud_storage_manager.bucket_name, s3_key
                         )
                         # Generate presigned URL after upload
                         url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
@@ -4660,32 +5049,34 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
                             "filename": filename,
                             "s3_key": s3_key,
                             "url": url,
-                            "expires_at": (datetime.now() + timedelta(hours=2)).isoformat()
+                            "expires_at": (datetime.now() + timedelta(hours=2)).isoformat(),
                         }
                 except Exception as e:
                     print(f"Warning: Failed to upload {filename} to S3 or generate URL: {e}")
                     return {
                         "path": file_path,
                         "filename": filename,
-                        "download_url": f"/download-file/{session_id}/{filename}?user_id={user_id}" if session_id and user_id else (f"/download-file/{session_id}/{filename}" if session_id else None)
+                        "download_url": f"/download-file/{session_id}/{filename}?user_id={user_id}"
+                        if session_id and user_id
+                        else (f"/download-file/{session_id}/{filename}" if session_id else None),
                     }
 
             # File doesn't exist locally - try to find it in S3
             if session_id:
                 # Determine S3 folder based on file type
-                if file_ext in ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp']:
-                    s3_folder = 'images'
-                elif file_ext == 'pdf':
-                    s3_folder = 'report_pdf' if filename.startswith('report_') else 'files'
+                if file_ext in ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp"]:
+                    s3_folder = "images"
+                elif file_ext == "pdf":
+                    s3_folder = "report_pdf" if filename.startswith("report_") else "files"
                 else:
-                    s3_folder = 'files'
+                    s3_folder = "files"
 
                 # Build list of S3 keys to try (turn-specific first, then base session)
                 s3_keys_to_try = [f"sessions/{session_id}/{s3_folder}/{filename}"]
 
                 # If session_id has _turn_N suffix, also try the base session path
-                if '_turn_' in session_id:
-                    base_session_id = session_id.split('_turn_')[0]
+                if "_turn_" in session_id:
+                    base_session_id = session_id.split("_turn_")[0]
                     s3_keys_to_try.append(f"sessions/{base_session_id}/{s3_folder}/{filename}")
 
                 for s3_key in s3_keys_to_try:
@@ -4693,8 +5084,7 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
                         # Check if file exists in S3
                         head_object_count += 1
                         cloud_storage_manager.s3_client.head_object(
-                            Bucket=cloud_storage_manager.bucket_name,
-                            Key=s3_key
+                            Bucket=cloud_storage_manager.bucket_name, Key=s3_key
                         )
                         # File exists in S3, generate presigned URL
                         url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
@@ -4703,7 +5093,7 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
                             "filename": filename,
                             "s3_key": s3_key,
                             "url": url,
-                            "expires_at": (datetime.now() + timedelta(hours=2)).isoformat()
+                            "expires_at": (datetime.now() + timedelta(hours=2)).isoformat(),
                         }
                     except cloud_storage_manager.s3_client.exceptions.ClientError:
                         # File doesn't exist at this S3 key, try next
@@ -4714,7 +5104,9 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
             return {
                 "path": file_path,
                 "filename": filename,
-                "download_url": f"/download-file/{session_id}/{filename}?user_id={user_id}" if session_id and user_id else (f"/download-file/{session_id}/{filename}" if session_id else None)
+                "download_url": f"/download-file/{session_id}/{filename}?user_id={user_id}"
+                if session_id and user_id
+                else (f"/download-file/{session_id}/{filename}" if session_id else None),
             }
 
         if not isinstance(file_item, dict):
@@ -4727,7 +5119,7 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
             try:
                 url = cloud_storage_manager.generate_presigned_url(
                     file_item["s3_key"],
-                    expiry_seconds=7200  # 2 hours
+                    expiry_seconds=7200,  # 2 hours
                 )
                 result["url"] = url
                 result["expires_at"] = (datetime.now() + timedelta(hours=2)).isoformat()
@@ -4743,8 +5135,8 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
             if os.path.exists(file_path):
                 try:
                     # Determine S3 key based on file type
-                    file_ext = filename.split('.')[-1].lower()
-                    if file_ext in ['png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf']:
+                    file_ext = filename.split(".")[-1].lower()
+                    if file_ext in ["png", "jpg", "jpeg", "gif", "svg", "pdf"]:
                         s3_key = f"sessions/{session_id}/images/{filename}"
                     else:
                         s3_key = f"sessions/{session_id}/files/{filename}"
@@ -4753,8 +5145,7 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
                     try:
                         head_object_count += 1
                         cloud_storage_manager.s3_client.head_object(
-                            Bucket=cloud_storage_manager.bucket_name,
-                            Key=s3_key
+                            Bucket=cloud_storage_manager.bucket_name, Key=s3_key
                         )
                         # File exists in S3, just generate fresh presigned URL
                         url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
@@ -4765,9 +5156,7 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
                         # File doesn't exist in S3, upload it once
                         upload_count += 1
                         cloud_storage_manager.s3_client.upload_file(
-                            file_path,
-                            cloud_storage_manager.bucket_name,
-                            s3_key
+                            file_path, cloud_storage_manager.bucket_name, s3_key
                         )
                         # Generate presigned URL after upload
                         url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
@@ -4776,42 +5165,50 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
                         result["expires_at"] = (datetime.now() + timedelta(hours=2)).isoformat()
                     except Exception as process_error:
                         # S3 operation failed, fall back to local download
-                        result["download_url"] = f"/download-file/{session_id}/{filename}?user_id={user_id}" if user_id else f"/download-file/{session_id}/{filename}"
+                        result["download_url"] = (
+                            f"/download-file/{session_id}/{filename}?user_id={user_id}"
+                            if user_id
+                            else f"/download-file/{session_id}/{filename}"
+                        )
                         print(f"Warning: Failed to process {filename} with S3: {process_error}")
                 except Exception as e:
                     print(f"Warning: Error processing {filename} for S3: {e}")
                     # Fall back to local download URL
-                    result["download_url"] = f"/download-file/{session_id}/{filename}?user_id={user_id}" if user_id else f"/download-file/{session_id}/{filename}"
+                    result["download_url"] = (
+                        f"/download-file/{session_id}/{filename}?user_id={user_id}"
+                        if user_id
+                        else f"/download-file/{session_id}/{filename}"
+                    )
             else:
                 # File doesn't exist locally, check if it exists in S3
                 # Determine S3 folder based on filename pattern
                 # Files are organized in S3 by type: report_md/, result_json/, thinking_process/, query_file/, etc.
-                file_ext = filename.split('.')[-1].lower()
+                file_ext = filename.split(".")[-1].lower()
 
                 # Try to infer folder from filename prefix and extension
-                if filename.startswith('report_') and file_ext == 'pdf':
-                    folder = 'report_pdf'
-                elif filename.startswith('report_') and file_ext == 'md':
-                    folder = 'report_md'
-                elif filename.startswith('result_'):
-                    folder = 'result_json'
-                elif filename.startswith('thinking_'):
-                    folder = 'thinking_process'
-                elif filename.startswith('query_'):
-                    folder = 'query_file'
-                elif file_ext in ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp']:
-                    folder = 'images'
-                elif filename.endswith('.zip'):
-                    folder = 'files'
+                if filename.startswith("report_") and file_ext == "pdf":
+                    folder = "report_pdf"
+                elif filename.startswith("report_") and file_ext == "md":
+                    folder = "report_md"
+                elif filename.startswith("result_"):
+                    folder = "result_json"
+                elif filename.startswith("thinking_"):
+                    folder = "thinking_process"
+                elif filename.startswith("query_"):
+                    folder = "query_file"
+                elif file_ext in ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp"]:
+                    folder = "images"
+                elif filename.endswith(".zip"):
+                    folder = "files"
                 else:
-                    folder = 'files'
+                    folder = "files"
 
                 # Build list of S3 keys to try (turn-specific first, then base session)
                 s3_keys_to_try = [f"sessions/{session_id}/{folder}/{filename}"]
 
                 # If session_id has _turn_N suffix, also try the base session path
-                if '_turn_' in session_id:
-                    base_session_id = session_id.split('_turn_')[0]
+                if "_turn_" in session_id:
+                    base_session_id = session_id.split("_turn_")[0]
                     s3_keys_to_try.append(f"sessions/{base_session_id}/{folder}/{filename}")
 
                 found_in_s3 = False
@@ -4820,8 +5217,7 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
                         # Check if file exists in S3
                         head_object_count += 1
                         cloud_storage_manager.s3_client.head_object(
-                            Bucket=cloud_storage_manager.bucket_name,
-                            Key=s3_key
+                            Bucket=cloud_storage_manager.bucket_name, Key=s3_key
                         )
                         # File exists in S3, generate presigned URL
                         url = cloud_storage_manager.generate_presigned_url(s3_key, expiry_seconds=7200)
@@ -4839,7 +5235,11 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
 
                 if not found_in_s3:
                     # File doesn't exist in S3 either, fall back to download URL
-                    result["download_url"] = f"/download-file/{session_id}/{filename}?user_id={user_id}" if user_id else f"/download-file/{session_id}/{filename}"
+                    result["download_url"] = (
+                        f"/download-file/{session_id}/{filename}?user_id={user_id}"
+                        if user_id
+                        else f"/download-file/{session_id}/{filename}"
+                    )
                     result["filename"] = filename
 
         return result
@@ -4864,7 +5264,9 @@ def generate_file_urls(files_data, session_id: str = None, user_id: str = None):
 
     # Print summary statistics
     total_time = (time.time() - func_start) * 1000
-    print(f"[PERF generate_file_urls] Total: {total_time:.2f} ms | Files: {file_count} | head_object calls: {head_object_count} | Uploads: {upload_count}")
+    print(
+        f"[PERF generate_file_urls] Total: {total_time:.2f} ms | Files: {file_count} | head_object calls: {head_object_count} | Uploads: {upload_count}"
+    )
 
     return result
 
@@ -4879,6 +5281,7 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
         turn_number: Optional turn number to retrieve. If not provided, returns current/latest turn results.
     """
     import time
+
     start_time = time.time()
     print(f"[PERF /results] Started for session {session_id}")
 
@@ -4922,8 +5325,8 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
     else:
         current_turn = multiturn_session.current_turn
         total_turns = multiturn_session.total_turns
-        is_shared = multiturn_session.is_shared if hasattr(multiturn_session, 'is_shared') else False
-        session_owner_id = multiturn_session.user_id if hasattr(multiturn_session, 'user_id') else None
+        is_shared = multiturn_session.is_shared if hasattr(multiturn_session, "is_shared") else False
+        session_owner_id = multiturn_session.user_id if hasattr(multiturn_session, "user_id") else None
     print(f"[PERF /results] Step 2 (get multiturn info): {(time.time() - step2_start) * 1000:.2f} ms")
 
     # Process turn_number if we have turn information
@@ -4962,7 +5365,9 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
     if turn_number is not None and current_turn is not None:
         # Check if the requested turn is currently being processed
         turn_specific_id = f"{session_id}_turn_{turn_number}"
-        if turn_specific_id in queue_manager.active_sessions or (turn_number == current_turn and session_id in queue_manager.active_sessions):
+        if turn_specific_id in queue_manager.active_sessions or (
+            turn_number == current_turn and session_id in queue_manager.active_sessions
+        ):
             # Return processing status instead of error
             return {
                 "session_id": session_id,
@@ -4971,7 +5376,7 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                 "total_turns": total_turns,
                 "status": "processing",
                 "is_complete": False,
-                "message": f"Turn {turn_number} is still being processed"
+                "message": f"Turn {turn_number} is still being processed",
             }
     elif not session_data.get("is_complete", False):
         raise HTTPException(status_code=400, detail="Session is not yet complete")
@@ -4984,7 +5389,9 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
         if cloud_multiturn_session and "turns" not in cloud_multiturn_session:
             # Step 2 fetched metadata only (no turns) - need to fetch full session with turns
             cloud_multiturn_session = await unified_manager.get_multiturn_session_by_id(session_id, include_turns=True)
-            print(f"[PERF /results] Step 4 (get full multiturn session with turns): {(time.time() - step4_start) * 1000:.2f} ms")
+            print(
+                f"[PERF /results] Step 4 (get full multiturn session with turns): {(time.time() - step4_start) * 1000:.2f} ms"
+            )
         elif not cloud_multiturn_session:
             # Not fetched at all yet
             cloud_multiturn_session = await unified_manager.get_multiturn_session_by_id(session_id, include_turns=True)
@@ -5010,7 +5417,11 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                 # DEBUG: Log what files we extracted from the turn
                 print(f"[DEBUG /results] Turn {turn_number} files extracted:")
                 print(f"[DEBUG /results]   Raw turn_files: {turn_files}")
-                tp_file = turn_files.get("thinking_process", {}).get("filename", "NOT_FOUND") if isinstance(turn_files.get("thinking_process"), dict) else f"NOT_DICT: {turn_files.get('thinking_process')}"
+                tp_file = (
+                    turn_files.get("thinking_process", {}).get("filename", "NOT_FOUND")
+                    if isinstance(turn_files.get("thinking_process"), dict)
+                    else f"NOT_DICT: {turn_files.get('thinking_process')}"
+                )
                 print(f"[DEBUG /results]   Extracted TP filename: {tp_file}")
 
                 # OPTIMIZATION: Skip expensive sessions collection query if turn_files already has images
@@ -5030,9 +5441,13 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                                 turn_files["images"] = s3_files["images"]
                     except Exception as e:
                         print(f"Warning: Could not retrieve S3 files for turn results: {e}")
-                    print(f"[PERF /results] Step 5 (retrieve_session_from_cloud for S3 files): {(time.time() - step5_start) * 1000:.2f} ms - FETCHED")
+                    print(
+                        f"[PERF /results] Step 5 (retrieve_session_from_cloud for S3 files): {(time.time() - step5_start) * 1000:.2f} ms - FETCHED"
+                    )
                 else:
-                    print(f"[PERF /results] Step 5 (retrieve_session_from_cloud for S3 files): {(time.time() - step5_start) * 1000:.2f} ms - SKIPPED (already have files)")
+                    print(
+                        f"[PERF /results] Step 5 (retrieve_session_from_cloud for S3 files): {(time.time() - step5_start) * 1000:.2f} ms - SKIPPED (already have files)"
+                    )
 
                 # Generate URLs for turn files (use turn-specific session ID for turn 2+)
                 step6_start = time.time()
@@ -5090,9 +5505,7 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
                     "query": target_turn.get("query"),
                     "files": turn_files,
                     "turn_type": target_turn.get("turn_type", "execution"),  # NEW FIELD
-                    "content": {
-                        "final_report": final_report_with_images
-                    }
+                    "content": {"final_report": final_report_with_images},
                 }
 
                 # Add ready_for_execution flag for planning turns
@@ -5124,11 +5537,9 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
             result = {
                 "session_id": session_id,
                 "status": cloud_session.get("status", "completed"),
-                "content": {
-                    "final_report": final_report_with_images
-                },
+                "content": {"final_report": final_report_with_images},
                 "files": s3_files_with_urls,  # Changed from s3_files to files for consistency
-                "result_summary": cloud_session.get("result_summary", {})
+                "result_summary": cloud_session.get("result_summary", {}),
             }
             # Add turn information if available
             if current_turn is not None and total_turns is not None:
@@ -5149,8 +5560,8 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
             "legacy_result": {
                 "result": session_data.get("result"),
                 "error": session_data.get("error"),
-                "created_at": session_data.get("created_at")
-            }
+                "created_at": session_data.get("created_at"),
+            },
         }
         # Add turn information if available
         if current_turn is not None and total_turns is not None:
@@ -5213,8 +5624,7 @@ async def get_session_results(session_id: str, user_id: str, turn_number: Option
         if "final_report" in json_result["content"]:
             files_for_images = json_result.get("files") or json_result.get("s3_files", {})
             json_result["content"]["final_report"] = append_images_to_report(
-                json_result["content"]["final_report"],
-                files_for_images
+                json_result["content"]["final_report"], files_for_images
             )
 
     # Add turn information if available
@@ -5251,7 +5661,7 @@ async def stop_task(session_id: str, user_id: str):
 
     # First verify user owns this session
     if session_id in queue_manager.active_sessions:
-        session_user_id = getattr(queue_manager.active_sessions[session_id], 'user_id', None)
+        session_user_id = getattr(queue_manager.active_sessions[session_id], "user_id", None)
         if session_user_id and session_user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied: Session belongs to different user")
 
@@ -5273,7 +5683,7 @@ async def stop_task(session_id: str, user_id: str):
             "session_id": actual_session_id,
             "status": "cancelled",
             "was_queued": was_queued,
-            "was_running": was_running
+            "was_running": was_running,
         }
 
         # Include the requested session ID if it was different (i.e., parent session was used)
@@ -5312,33 +5722,30 @@ def filter_execute_blocks(text: str, include_execute: bool = False) -> str:
     def truncate_execute_block(match):
         """Truncate execute block content to first 5 lines, with '......' for the rest"""
         full_content = match.group(1)
-        lines = full_content.split('\n')
+        lines = full_content.split("\n")
 
         # If 5 lines or fewer, keep the full content
         if len(lines) <= 5:
-            return f'<execute>{full_content}</execute>'
+            return f"<execute>{full_content}</execute>"
 
         # Keep first 5 lines and add '......' to indicate more content
         truncated_lines = lines[:5]
-        return '<execute>' + '\n'.join(truncated_lines) + '\n......\n</execute>'
+        return "<execute>" + "\n".join(truncated_lines) + "\n......\n</execute>"
 
     # Truncate <execute>...</execute> blocks to first 5 lines (including multiline)
-    filtered_text = re.sub(r'<execute>(.*?)</execute>', truncate_execute_block, text, flags=re.DOTALL)
+    filtered_text = re.sub(r"<execute>(.*?)</execute>", truncate_execute_block, text, flags=re.DOTALL)
 
     # Hide verbose directory listings - match "Current directory files:" followed by file list
     # Pattern: "Current directory files:\n  - file1\n  - file2\n..."
     def replace_file_listing(match):
         full_match = match.group(0)
         # Count number of files in the listing (lines starting with "  - ")
-        file_count = len(re.findall(r'^\s+-\s+', full_match, re.MULTILINE))
+        file_count = len(re.findall(r"^\s+-\s+", full_match, re.MULTILINE))
         return f"Current directory files: Found {file_count} items. (Full listing hidden for readability)"
 
     # Replace verbose file listings with summary
     filtered_text = re.sub(
-        r'Current directory files:.*?(?=\n\n|\n[A-Z]|\Z)',
-        replace_file_listing,
-        filtered_text,
-        flags=re.DOTALL
+        r"Current directory files:.*?(?=\n\n|\n[A-Z]|\Z)", replace_file_listing, filtered_text, flags=re.DOTALL
     )
 
     return filtered_text
@@ -5346,10 +5753,7 @@ def filter_execute_blocks(text: str, include_execute: bool = False) -> str:
 
 @app.get("/snapshots/{session_id}")
 async def get_session_snapshots(
-    session_id: str,
-    user_id: str,
-    turn_number: Optional[int] = None,
-    include_execute: bool = False
+    session_id: str, user_id: str, turn_number: Optional[int] = None, include_execute: bool = False
 ):
     """Get all periodic snapshots for a session
 
@@ -5461,7 +5865,9 @@ async def get_session_snapshots(
             # Use all_progress_updates which contains accumulated updates including snapshots
             # Note: "progress_updates" only contains new/unread updates, not the full history
             progress_updates = active_session_data.get("all_progress_updates", [])
-            print(f"[SNAPSHOTS] Got active session data for: {active_turn_session_id}, all_progress_updates count: {len(progress_updates)}")
+            print(
+                f"[SNAPSHOTS] Got active session data for: {active_turn_session_id}, all_progress_updates count: {len(progress_updates)}"
+            )
         else:
             # Fallback to session_data if not in active_sessions
             progress_updates = session_data.get("progress_updates", [])
@@ -5474,15 +5880,19 @@ async def get_session_snapshots(
             if update.get("type") == "snapshot_saved":
                 snapshot = update.get("snapshot")
                 if snapshot:
-                    snapshots_list.append({
-                        "timestamp": snapshot.get("timestamp"),
-                        "status": snapshot.get("status"),
-                        "session_path": snapshot.get("session_path"),
-                        "thinking_length": snapshot.get("content", {}).get("thinking_length", 0) if isinstance(snapshot.get("content"), dict) else 0,
-                        "is_complete": snapshot.get("is_complete", False),
-                        "is_cancelled": snapshot.get("is_cancelled", False),
-                        "error": snapshot.get("error")
-                    })
+                    snapshots_list.append(
+                        {
+                            "timestamp": snapshot.get("timestamp"),
+                            "status": snapshot.get("status"),
+                            "session_path": snapshot.get("session_path"),
+                            "thinking_length": snapshot.get("content", {}).get("thinking_length", 0)
+                            if isinstance(snapshot.get("content"), dict)
+                            else 0,
+                            "is_complete": snapshot.get("is_complete", False),
+                            "is_cancelled": snapshot.get("is_cancelled", False),
+                            "error": snapshot.get("error"),
+                        }
+                    )
                     # Keep track of latest thinking content
                     if isinstance(snapshot.get("content"), dict):
                         content = snapshot.get("content")
@@ -5490,7 +5900,9 @@ async def get_session_snapshots(
                             latest_thinking_content = content.get("thinking_content")
 
         print(f"[SNAPSHOTS DEBUG] Active session - extracted {len(snapshots_list)} snapshots from progress_updates")
-        print(f"[SNAPSHOTS DEBUG] Latest thinking content length: {len(latest_thinking_content) if latest_thinking_content else 0}")
+        print(
+            f"[SNAPSHOTS DEBUG] Latest thinking content length: {len(latest_thinking_content) if latest_thinking_content else 0}"
+        )
 
         # RACE CONDITION FIX: If storage_location is "active" but we have no thinking content,
         # the session might be in transition (being finalized). Instead of returning empty content,
@@ -5504,7 +5916,7 @@ async def get_session_snapshots(
                 "snapshot_count": len(snapshots_list),
                 "snapshots": snapshots_list,
                 "thinking_process": filter_execute_blocks(latest_thinking_content, include_execute),
-                "storage_location": storage_location
+                "storage_location": storage_location,
             }
             return result
         # else: fall through to turn_specific/cloud logic below
@@ -5548,7 +5960,9 @@ async def get_session_snapshots(
                             fallback_session_id = base_session_id
 
                         cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(fallback_session_id)
-                        print(f"[SNAPSHOTS DEBUG] S3 fallback - Cloud session found for {fallback_session_id}: {cloud_session is not None}")
+                        print(
+                            f"[SNAPSHOTS DEBUG] S3 fallback - Cloud session found for {fallback_session_id}: {cloud_session is not None}"
+                        )
 
                         if cloud_session and "s3_files" in cloud_session:
                             s3_files = cloud_session["s3_files"]
@@ -5569,12 +5983,16 @@ async def get_session_snapshots(
                                 # Try first available file
                                 for file_info in files_to_check:
                                     if isinstance(file_info, dict) and "s3_key" in file_info:
-                                        print(f"[SNAPSHOTS DEBUG] S3 fallback - Downloading from S3 key: {file_info['s3_key']}")
+                                        print(
+                                            f"[SNAPSHOTS DEBUG] S3 fallback - Downloading from S3 key: {file_info['s3_key']}"
+                                        )
                                         try:
                                             content = cloud_storage_manager.download_file_content(file_info["s3_key"])
                                             if content:
-                                                thinking_process_text = content.decode('utf-8')
-                                                print(f"[SNAPSHOTS DEBUG] S3 fallback - Downloaded {len(thinking_process_text)} characters from S3")
+                                                thinking_process_text = content.decode("utf-8")
+                                                print(
+                                                    f"[SNAPSHOTS DEBUG] S3 fallback - Downloaded {len(thinking_process_text)} characters from S3"
+                                                )
                                                 break
                                         except Exception as e:
                                             print(f"[SNAPSHOTS DEBUG] S3 fallback - Error downloading: {e}")
@@ -5583,6 +6001,7 @@ async def get_session_snapshots(
                     except Exception as e:
                         print(f"[SNAPSHOTS DEBUG] S3 fallback error: {e}")
                         import traceback
+
                         traceback.print_exc()
 
                 if thinking_process_file:
@@ -5593,7 +6012,7 @@ async def get_session_snapshots(
                             print(f"[SNAPSHOTS DEBUG] Thinking process file is a string path: {thinking_process_file}")
                             print(f"[SNAPSHOTS DEBUG] File exists: {os.path.exists(thinking_process_file)}")
                             if os.path.exists(thinking_process_file):
-                                with open(thinking_process_file, 'r', encoding='utf-8') as f:
+                                with open(thinking_process_file, "r", encoding="utf-8") as f:
                                     thinking_process_text = f.read()
                                 print(f"[SNAPSHOTS DEBUG] Read {len(thinking_process_text)} characters from file")
                             else:
@@ -5607,7 +6026,7 @@ async def get_session_snapshots(
                                 print(f"[SNAPSHOTS DEBUG] Thinking process file is a dict with path: {file_path}")
                                 print(f"[SNAPSHOTS DEBUG] File exists: {os.path.exists(file_path)}")
                                 if os.path.exists(file_path):
-                                    with open(file_path, 'r', encoding='utf-8') as f:
+                                    with open(file_path, "r", encoding="utf-8") as f:
                                         thinking_process_text = f.read()
                                     print(f"[SNAPSHOTS DEBUG] Read {len(thinking_process_text)} characters from file")
                                 else:
@@ -5622,8 +6041,10 @@ async def get_session_snapshots(
                                     # Download content from S3 (synchronous method)
                                     content = cloud_storage_manager.download_file_content(s3_key)
                                     if content:
-                                        thinking_process_text = content.decode('utf-8')
-                                        print(f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3")
+                                        thinking_process_text = content.decode("utf-8")
+                                        print(
+                                            f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3"
+                                        )
                                 except Exception as e:
                                     print(f"Warning: Could not download thinking process from S3: {e}")
 
@@ -5643,13 +6064,17 @@ async def get_session_snapshots(
                                     else:
                                         turn_session_id = base_session_id
                                     s3_key = f"sessions/{turn_session_id}/thinking_process/{filename}"
-                                    print(f"[SNAPSHOTS DEBUG] Constructed S3 key from filename (using turn_session_id={turn_session_id}): {s3_key}")
+                                    print(
+                                        f"[SNAPSHOTS DEBUG] Constructed S3 key from filename (using turn_session_id={turn_session_id}): {s3_key}"
+                                    )
 
                                     try:
                                         content = cloud_storage_manager.download_file_content(s3_key)
                                         if content:
-                                            thinking_process_text = content.decode('utf-8')
-                                            print(f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3 using constructed key")
+                                            thinking_process_text = content.decode("utf-8")
+                                            print(
+                                                f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3 using constructed key"
+                                            )
                                     except Exception as e:
                                         print(f"[SNAPSHOTS DEBUG] Failed to download with constructed key: {e}")
 
@@ -5660,15 +6085,21 @@ async def get_session_snapshots(
                                         fallback_session_id = f"{base_session_id}_turn_{turn_number}"
                                     else:
                                         fallback_session_id = base_session_id
-                                    cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(fallback_session_id)
-                                    print(f"[SNAPSHOTS DEBUG] Cloud session found for {fallback_session_id}: {cloud_session is not None}")
+                                    cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(
+                                        fallback_session_id
+                                    )
+                                    print(
+                                        f"[SNAPSHOTS DEBUG] Cloud session found for {fallback_session_id}: {cloud_session is not None}"
+                                    )
                                     if cloud_session and "s3_files" in cloud_session:
                                         s3_files = cloud_session["s3_files"]
                                         print(f"[SNAPSHOTS DEBUG] s3_files keys: {list(s3_files.keys())}")
 
                                         # Look for thinking process in S3 files
                                         thinking_process_files = s3_files.get("thinking_process")
-                                        print(f"[SNAPSHOTS DEBUG] thinking_process files in S3: {thinking_process_files}")
+                                        print(
+                                            f"[SNAPSHOTS DEBUG] thinking_process files in S3: {thinking_process_files}"
+                                        )
 
                                         if thinking_process_files:
                                             # Handle both dict (single file) and list (multiple files)
@@ -5683,35 +6114,55 @@ async def get_session_snapshots(
                                                 print(f"[SNAPSHOTS DEBUG] Looking for file matching: {filename}")
                                                 for file_info in files_to_check:
                                                     if isinstance(file_info, dict):
-                                                        if file_info.get("filename") == filename and "s3_key" in file_info:
-                                                            print(f"[SNAPSHOTS DEBUG] Found matching file, downloading from S3 key: {file_info['s3_key']}")
-                                                            content = cloud_storage_manager.download_file_content(file_info["s3_key"])
+                                                        if (
+                                                            file_info.get("filename") == filename
+                                                            and "s3_key" in file_info
+                                                        ):
+                                                            print(
+                                                                f"[SNAPSHOTS DEBUG] Found matching file, downloading from S3 key: {file_info['s3_key']}"
+                                                            )
+                                                            content = cloud_storage_manager.download_file_content(
+                                                                file_info["s3_key"]
+                                                            )
                                                             if content:
-                                                                thinking_process_text = content.decode('utf-8')
-                                                                print(f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3 (matched filename)")
+                                                                thinking_process_text = content.decode("utf-8")
+                                                                print(
+                                                                    f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3 (matched filename)"
+                                                                )
                                                                 break
 
                                             # If still not found, fall back to first available file
                                             if not thinking_process_text:
-                                                print(f"[SNAPSHOTS DEBUG] No filename match, trying first available file")
+                                                print(
+                                                    f"[SNAPSHOTS DEBUG] No filename match, trying first available file"
+                                                )
                                                 for file_info in files_to_check:
                                                     if isinstance(file_info, dict) and "s3_key" in file_info:
-                                                        print(f"[SNAPSHOTS DEBUG] Downloading from S3 key: {file_info['s3_key']}")
-                                                        content = cloud_storage_manager.download_file_content(file_info["s3_key"])
+                                                        print(
+                                                            f"[SNAPSHOTS DEBUG] Downloading from S3 key: {file_info['s3_key']}"
+                                                        )
+                                                        content = cloud_storage_manager.download_file_content(
+                                                            file_info["s3_key"]
+                                                        )
                                                         if content:
-                                                            thinking_process_text = content.decode('utf-8')
-                                                            print(f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3")
+                                                            thinking_process_text = content.decode("utf-8")
+                                                            print(
+                                                                f"[SNAPSHOTS DEBUG] Downloaded {len(thinking_process_text)} characters from S3"
+                                                            )
                                                             break
                                     else:
                                         print(f"[SNAPSHOTS DEBUG] No s3_files in cloud session")
                             except Exception as e:
                                 print(f"[SNAPSHOTS DEBUG] Error retrieving from cloud: {e}")
                                 import traceback
+
                                 traceback.print_exc()
                     except Exception as e:
                         print(f"Error reading thinking process file: {e}")
 
-                print(f"[SNAPSHOTS DEBUG] Final thinking_process_text length: {len(thinking_process_text) if thinking_process_text else 0}")
+                print(
+                    f"[SNAPSHOTS DEBUG] Final thinking_process_text length: {len(thinking_process_text) if thinking_process_text else 0}"
+                )
                 print(f"[SNAPSHOTS DEBUG] thinking_process_text is None: {thinking_process_text is None}")
 
                 result = {
@@ -5720,7 +6171,7 @@ async def get_session_snapshots(
                     "current_turn": current_turn,
                     "total_turns": total_turns,
                     "thinking_process": filter_execute_blocks(thinking_process_text, include_execute),
-                    "storage_location": "turn_specific"
+                    "storage_location": "turn_specific",
                 }
                 return result
 
@@ -5737,18 +6188,20 @@ async def get_session_snapshots(
             for snapshot in snapshots_info:
                 if isinstance(snapshot, dict) and "s3_key" in snapshot:
                     url = cloud_storage_manager.generate_presigned_url(snapshot["s3_key"])
-                    snapshots_with_urls.append({
-                        "filename": snapshot.get("filename"),
-                        "url": url,
-                        "file_size": snapshot.get("file_size", 0),
-                        "uploaded_at": snapshot.get("uploaded_at")
-                    })
+                    snapshots_with_urls.append(
+                        {
+                            "filename": snapshot.get("filename"),
+                            "url": url,
+                            "file_size": snapshot.get("file_size", 0),
+                            "uploaded_at": snapshot.get("uploaded_at"),
+                        }
+                    )
 
             result = {
                 "session_id": session_id,
                 "snapshot_count": len(snapshots_with_urls),
                 "snapshots": snapshots_with_urls,
-                "storage_location": "cloud"
+                "storage_location": "cloud",
             }
             # Add turn information
             if current_turn is not None:
@@ -5767,7 +6220,7 @@ async def get_session_snapshots(
         "snapshots": [],
         "thinking_process": None,
         "storage_location": storage_location,
-        "message": "No snapshots found for this session"
+        "message": "No snapshots found for this session",
     }
 
 
@@ -5806,7 +6259,7 @@ async def get_all_sessions(user_id: Optional[str] = None):
                 "status": session.get("status", "unknown"),
                 "is_complete": session.get("is_complete", False),
                 # Add storage info for debugging (remove in production)
-                "_source": session.get("_storage_location", "unknown")
+                "_source": session.get("_storage_location", "unknown"),
             }
             formatted_sessions.append(session_info)
 
@@ -5819,6 +6272,7 @@ async def get_all_sessions(user_id: Optional[str] = None):
 
 # Multi-Turn Conversation Endpoints
 
+
 @app.post("/continue-session")
 async def continue_session(
     session_id: str = Form(...),
@@ -5826,7 +6280,7 @@ async def continue_session(
     language: Language = Form(Language.EN),
     user_id: str = Form(...),
     use_template: Optional[bool] = Form(None),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(default=[]),
 ):
     """Continue an existing multi-turn session with S3 file handling
 
@@ -5865,14 +6319,24 @@ async def continue_session(
 
             if cloud_session_data:
                 # DEBUG: Log what data we got from cloud
-                print(f"[DEBUG /continue-session] Loaded session data from storage location: {cloud_session_data.get('_storage_location', 'unknown')}")
+                print(
+                    f"[DEBUG /continue-session] Loaded session data from storage location: {cloud_session_data.get('_storage_location', 'unknown')}"
+                )
                 if "turns" in cloud_session_data and isinstance(cloud_session_data["turns"], list):
                     print(f"[DEBUG /continue-session] Cloud data has {len(cloud_session_data['turns'])} turns:")
                     for t in cloud_session_data["turns"]:
                         turn_num = t.get("turn_number")
                         files = t.get("files", {})
-                        tp_file = files.get("thinking_process", {}).get("filename", "NONE") if isinstance(files.get("thinking_process"), dict) else "NONE"
-                        report_file = files.get("final_report", {}).get("filename", "NONE") if isinstance(files.get("final_report"), dict) else "NONE"
+                        tp_file = (
+                            files.get("thinking_process", {}).get("filename", "NONE")
+                            if isinstance(files.get("thinking_process"), dict)
+                            else "NONE"
+                        )
+                        report_file = (
+                            files.get("final_report", {}).get("filename", "NONE")
+                            if isinstance(files.get("final_report"), dict)
+                            else "NONE"
+                        )
                         print(f"[DEBUG /continue-session]   Turn {turn_num}: TP={tp_file}, Report={report_file}")
 
                 # Verify user owns this session before restoring
@@ -5891,7 +6355,7 @@ async def continue_session(
                     current_turn=cloud_session_data.get("current_turn", 0),
                     accumulated_context=cloud_session_data.get("accumulated_context", ""),
                     session_status=cloud_session_data.get("session_status", "active"),
-                    session_name=cloud_session_data.get("session_name", "")
+                    session_name=cloud_session_data.get("session_name", ""),
                 )
 
                 # Restore turns
@@ -5904,7 +6368,7 @@ async def continue_session(
                             response_content=turn_data.get("response_content"),
                             files=turn_data.get("files"),
                             timestamp=turn_data.get("timestamp", datetime.now().isoformat()),
-                            status=turn_data.get("status", "completed")
+                            status=turn_data.get("status", "completed"),
                         )
                         multiturn_session.turns.append(turn)
 
@@ -5919,6 +6383,7 @@ async def continue_session(
         except Exception as e:
             print(f"Error loading session from cloud: {e}")
             import traceback
+
             traceback.print_exc()
             raise HTTPException(status_code=404, detail="Multi-turn session not found")
 
@@ -5939,8 +6404,7 @@ async def continue_session(
 
     # Handle files - could be UploadFile objects or strings (file paths)
     has_upload_files = files and any(
-        (hasattr(file, 'filename') and file.filename) or (isinstance(file, str) and file)
-        for file in files
+        (hasattr(file, "filename") and file.filename) or (isinstance(file, str) and file) for file in files
     )
 
     if has_upload_files:
@@ -5956,7 +6420,7 @@ async def continue_session(
                     uploaded_file_paths.append(file)
                 continue
 
-            if not hasattr(file, 'filename') or not file.filename:
+            if not hasattr(file, "filename") or not file.filename:
                 continue
 
             # UploadFile object - read file content
@@ -5966,11 +6430,13 @@ async def continue_session(
 
             # Check file size
             if file_size > MAX_FILE_SIZE_BYTES:
-                rejected_files.append({
-                    "filename": file.filename,
-                    "size_mb": round(file_size_mb, 2),
-                    "reason": f"File size {file_size_mb:.2f}MB exceeds maximum {MAX_FILE_SIZE_MB}MB"
-                })
+                rejected_files.append(
+                    {
+                        "filename": file.filename,
+                        "size_mb": round(file_size_mb, 2),
+                        "reason": f"File size {file_size_mb:.2f}MB exceeds maximum {MAX_FILE_SIZE_MB}MB",
+                    }
+                )
                 logger.warning(f"Rejected file {file.filename}: size {file_size_mb:.2f}MB > {MAX_FILE_SIZE_MB}MB limit")
                 continue
 
@@ -5987,9 +6453,7 @@ async def continue_session(
 
                     # Upload to S3
                     cloud_storage_manager.s3_client.upload_file(
-                        temp_file_path,
-                        cloud_storage_manager.bucket_name,
-                        s3_object_name
+                        temp_file_path, cloud_storage_manager.bucket_name, s3_object_name
                     )
 
                     # Store S3 metadata
@@ -6000,7 +6464,7 @@ async def continue_session(
                         "turn_number": turn_number,
                         "upload_time": datetime.now().isoformat(),
                         "file_size": file_size,
-                        "file_size_mb": round(file_size_mb, 2)
+                        "file_size_mb": round(file_size_mb, 2),
                     }
 
                     logger.info(f"Uploaded {file.filename} to S3: {s3_object_name} (size: {file_size_mb:.2f}MB)")
@@ -6019,7 +6483,7 @@ async def continue_session(
     if s3_file_metadata:
         # Store S3 metadata in the current turn (will be saved when turn completes)
         # For now, store it temporarily in queue_manager for processing
-        if not hasattr(queue_manager, '_temp_s3_metadata'):
+        if not hasattr(queue_manager, "_temp_s3_metadata"):
             queue_manager._temp_s3_metadata = {}
         queue_manager._temp_s3_metadata[f"{session_id}_turn_{turn_number}"] = s3_file_metadata
 
@@ -6028,24 +6492,24 @@ async def continue_session(
         multiturn_session=multiturn_session,
         current_message=message,
         uploaded_files=uploaded_file_paths,
-        include_file_list=True
+        include_file_list=True,
     )
 
     # Add S3 metadata to context for file restoration
     # Check if we have stored S3 metadata for previous turns
-    if hasattr(queue_manager, '_temp_s3_metadata'):
+    if hasattr(queue_manager, "_temp_s3_metadata"):
         for key, turn_files in queue_manager._temp_s3_metadata.items():
             if key.startswith(session_id):
                 # Extract turn number from key
-                turn_num = int(key.split('_turn_')[-1]) if '_turn_' in key else 1
+                turn_num = int(key.split("_turn_")[-1]) if "_turn_" in key else 1
                 for filename, metadata in turn_files.items():
-                    if filename not in enhanced_context.get('all_files', {}):
-                        enhanced_context['all_files'][filename] = {
-                            'turn': turn_num,
-                            's3_key': metadata['s3_key'],
-                            'bucket': metadata['bucket'],
-                            'type': 'file',
-                            'needs_download': True  # Flag for download from S3
+                    if filename not in enhanced_context.get("all_files", {}):
+                        enhanced_context["all_files"][filename] = {
+                            "turn": turn_num,
+                            "s3_key": metadata["s3_key"],
+                            "bucket": metadata["bucket"],
+                            "type": "file",
+                            "needs_download": True,  # Flag for download from S3
                         }
 
     # Create user request with enhanced context
@@ -6055,14 +6519,14 @@ async def continue_session(
         language=language,
         uploaded_files=uploaded_file_paths,
         is_continuation=True,
-        previous_context=enhanced_context['enhanced_message'],
+        previous_context=enhanced_context["enhanced_message"],
         turn_number=turn_number,
         user_id=user_id,
-        use_template=use_template
+        use_template=use_template,
     )
 
     # Store file metadata including S3 references
-    user_request.all_turn_files = enhanced_context.get('all_files', {})
+    user_request.all_turn_files = enhanced_context.get("all_files", {})
     user_request.s3_file_metadata = s3_file_metadata
 
     # Store reference to original multi-turn session
@@ -6079,13 +6543,15 @@ async def continue_session(
         "position": position,
         "uploaded_files": len(uploaded_file_paths),
         "s3_files": list(s3_file_metadata.keys()) if s3_file_metadata else [],
-        "message": f"Turn {turn_number} added to queue with S3 storage. Use /status/{session_id}_turn_{turn_number} to check progress."
+        "message": f"Turn {turn_number} added to queue with S3 storage. Use /status/{session_id}_turn_{turn_number} to check progress.",
     }
 
     # Add rejected files info if any
     if rejected_files:
         response["rejected_files"] = rejected_files
-        response["message"] = f"Turn {turn_number} added. {len(uploaded_file_paths)} files uploaded, {len(rejected_files)} rejected (>10MB)."
+        response["message"] = (
+            f"Turn {turn_number} added. {len(uploaded_file_paths)} files uploaded, {len(rejected_files)} rejected (>10MB)."
+        )
 
     return response
 
@@ -6096,7 +6562,7 @@ async def plan_session(
     message: str = Form(...),
     language: Language = Form(Language.EN),
     user_id: str = Form(...),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(default=[]),
 ):
     """
     Planning/clarification endpoint - agent asks questions without tool execution
@@ -6164,7 +6630,7 @@ async def plan_session(
                     current_turn=cloud_session_data.get("current_turn", 0),
                     accumulated_context=cloud_session_data.get("accumulated_context", ""),
                     session_status=cloud_session_data.get("session_status", "active"),
-                    session_name=cloud_session_data.get("session_name", "")
+                    session_name=cloud_session_data.get("session_name", ""),
                 )
 
                 # Restore turns
@@ -6179,7 +6645,7 @@ async def plan_session(
                             files=turn_data.get("files"),
                             timestamp=turn_data.get("timestamp", datetime.now().isoformat()),
                             status=turn_data.get("status", "completed"),
-                            ready_for_execution=turn_data.get("ready_for_execution")
+                            ready_for_execution=turn_data.get("ready_for_execution"),
                         )
                         multiturn_session.turns.append(turn)
 
@@ -6208,7 +6674,7 @@ async def plan_session(
                 last_updated=datetime.now().isoformat(),
                 session_name=message[:50] + ("..." if len(message) > 50 else ""),
                 total_turns=0,
-                current_turn=0
+                current_turn=0,
             )
             queue_manager.multiturn_sessions[session_id] = multiturn_session
 
@@ -6250,7 +6716,7 @@ async def plan_session(
             previous_context=planning_context,
             turn_number=turn_number,
             user_id=user_id,
-            turn_type="planning"  # Mark as planning turn
+            turn_type="planning",  # Mark as planning turn
         )
 
         # Set planning agent configuration
@@ -6260,21 +6726,24 @@ async def plan_session(
         # Add to queue
         position = queue_manager.add_request(user_request)
 
-        return JSONResponse({
-            "session_id": session_id,
-            "turn_session_id": turn_session_id,
-            "turn_number": turn_number,
-            "turn_type": "planning",
-            "status": "queued",
-            "position": position,
-            "message": "Planning request queued successfully"
-        })
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "turn_session_id": turn_session_id,
+                "turn_number": turn_number,
+                "turn_type": "planning",
+                "status": "queued",
+                "position": position,
+                "message": "Planning request queued successfully",
+            }
+        )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error in plan_session: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -6295,6 +6764,7 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
         raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
 
     import time
+
     start_time = time.time()
     print(f"[PERF /multiturn-session] Started for session {session_id}")
 
@@ -6303,7 +6773,9 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
         step1_start = time.time()
         unified_manager = get_unified_session_manager(queue_manager)
         session = await unified_manager.get_multiturn_session_by_id(session_id)
-        print(f"[PERF /multiturn-session] Step 1 (get_multiturn_session_by_id): {(time.time() - step1_start) * 1000:.2f} ms")
+        print(
+            f"[PERF /multiturn-session] Step 1 (get_multiturn_session_by_id): {(time.time() - step1_start) * 1000:.2f} ms"
+        )
 
         if not session:
             raise HTTPException(status_code=404, detail="Multi-turn session not found")
@@ -6316,7 +6788,7 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
         # Handle in-memory sessions: Extract turns from _session_object
         if session.get("_storage_location") == "memory" and "_session_object" in session:
             session_obj = session["_session_object"]
-            if hasattr(session_obj, 'turns'):
+            if hasattr(session_obj, "turns"):
                 # Convert MultiTurnSession object's turns to dict format
                 session["turns"] = []
                 for turn in session_obj.turns:
@@ -6327,9 +6799,9 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
                         "final_report": turn.final_report,
                         "timestamp": turn.timestamp,
                         "status": turn.status,
-                        "files": turn.files if hasattr(turn, 'files') else {}
+                        "files": turn.files if hasattr(turn, "files") else {},
                     }
-                    if include_thinking and hasattr(turn, 'response_content'):
+                    if include_thinking and hasattr(turn, "response_content"):
                         turn_dict["response_content"] = turn.response_content
                     session["turns"].append(turn_dict)
 
@@ -6377,8 +6849,12 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
                     if has_missing_files:
                         try:
                             cloud_fetch_start = time.time()
-                            turn_cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(turn_session_id_for_cloud)
-                            print(f"[PERF /multiturn-session] Cloud fetch for turn {turn_num}: {(time.time() - cloud_fetch_start) * 1000:.2f} ms")
+                            turn_cloud_session = await cloud_storage_manager.retrieve_session_from_cloud(
+                                turn_session_id_for_cloud
+                            )
+                            print(
+                                f"[PERF /multiturn-session] Cloud fetch for turn {turn_num}: {(time.time() - cloud_fetch_start) * 1000:.2f} ms"
+                            )
                             if turn_cloud_session:
                                 print(f"Local files missing for turn {turn_num}, fetched S3 files from cloud storage")
 
@@ -6444,7 +6920,9 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
                     turn.pop("response_content", None)
                     # Keep final_report as it's the main output
 
-            print(f"[PERF /multiturn-session] Step 2 (process turns & generate URLs): {(time.time() - step2_start) * 1000:.2f} ms")
+            print(
+                f"[PERF /multiturn-session] Step 2 (process turns & generate URLs): {(time.time() - step2_start) * 1000:.2f} ms"
+            )
 
         print(f"[PERF /multiturn-session] TOTAL TIME: {(time.time() - start_time) * 1000:.2f} ms")
         return session
@@ -6454,15 +6932,13 @@ async def get_multiturn_session(session_id: str, user_id: str, include_thinking:
     except Exception as e:
         print(f"Error getting multiturn session: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error retrieving session: {str(e)}")
 
+
 @app.get("/multiturn-sessions")
-async def get_all_multiturn_sessions(
-    user_id: Optional[str] = None,
-    limit: int = 10,
-    offset: int = 0
-):
+async def get_all_multiturn_sessions(user_id: Optional[str] = None, limit: int = 10, offset: int = 0):
     """Get multi-turn sessions with pagination
 
     Args:
@@ -6492,7 +6968,7 @@ async def get_all_multiturn_sessions(
                 "limit": limit,
                 "offset": offset,
                 "error": "user_id is required",
-                "message": "Please provide a valid user_id"
+                "message": "Please provide a valid user_id",
             }
 
         # Check if user is in the allowed list
@@ -6505,16 +6981,14 @@ async def get_all_multiturn_sessions(
 
         # Get multi-turn sessions with pagination
         result = await unified_manager.get_multiturn_sessions(
-            include_cloud=True,
-            user_id=user_id,
-            limit=limit,
-            offset=offset
+            include_cloud=True, user_id=user_id, limit=limit, offset=offset
         )
 
         return result
     except Exception as e:
         print(f"Error getting multi-turn sessions: {e}")
         import traceback
+
         traceback.print_exc()
         # Fallback to local-only sessions with pagination
         sessions = []
@@ -6528,21 +7002,17 @@ async def get_all_multiturn_sessions(
                 "session_status": session.session_status,
                 "first_query": session.turns[0].query if session.turns else "No queries",
                 "latest_query": session.turns[-1].query if session.turns else "No queries",
-                "_storage_location": "local"
+                "_storage_location": "local",
             }
             sessions.append(session_summary)
 
         # Sort and paginate fallback sessions
-        sessions.sort(key=lambda x: x.get('last_updated', x.get('created_at', '')), reverse=True)
+        sessions.sort(key=lambda x: x.get("last_updated", x.get("created_at", "")), reverse=True)
         total = len(sessions)
-        paginated = sessions[offset:offset + limit]
+        paginated = sessions[offset : offset + limit]
 
-        return {
-            "sessions": paginated,
-            "total": total,
-            "limit": limit,
-            "offset": offset
-        }
+        return {"sessions": paginated, "total": total, "limit": limit, "offset": offset}
+
 
 @app.get("/turn-report/{session_id}/{turn_number}")
 async def get_turn_report(session_id: str, turn_number: int, user_id: str):
@@ -6571,10 +7041,11 @@ async def get_turn_report(session_id: str, turn_number: int, user_id: str):
                 "response_content": turn.response_content,
                 "files": turn.files,
                 "timestamp": turn.timestamp,
-                "status": turn.status
+                "status": turn.status,
             }
 
     raise HTTPException(status_code=404, detail=f"Turn {turn_number} not found in session")
+
 
 @app.get("/session-context/{session_id}")
 async def get_session_context(session_id: str, user_id: str):
@@ -6595,10 +7066,85 @@ async def get_session_context(session_id: str, user_id: str):
     return {
         "session_id": session_id,
         "accumulated_context": multiturn_session.accumulated_context,
-        "total_turns": multiturn_session.total_turns
+        "total_turns": multiturn_session.total_turns,
     }
 
+
+# ============= RNA STRUCTURE VISUALIZATION ENDPOINTS =============
+
+
+@app.get("/rna-structures/{session_id}")
+async def get_rna_structures(session_id: str, user_id: str, turn_number: Optional[int] = None):
+    """Get RNA structure data for visualization
+
+    Args:
+        session_id: The session ID
+        user_id: User ID for authentication
+        turn_number: Optional - specific turn (default: all turns)
+
+    Returns:
+        {
+            "session_id": "abc123",
+            "structures": [
+                {
+                    "turn_number": 1,
+                    "rna_structures": [
+                        {
+                            "id": "seq_1",
+                            "sequence": "GCGCGCGCGC",
+                            "structure": "((((..))))",
+                            "length": 10,
+                            "base_pairs": 4,
+                            "method": "rnafm"
+                        }
+                    ]
+                }
+            ]
+        }
+    """
+    # Check if user is in the allowed list
+    if user_id and not is_user_allowed(user_id):
+        logger.warning(f"Access denied for user_id in /rna-structures: {user_id}")
+        raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
+
+    try:
+        unified_manager = get_unified_session_manager(queue_manager)
+        session = await unified_manager.get_multiturn_session_by_id(session_id)
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # Verify user ownership
+        session_user_id = session.get("user_id")
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        result = {"session_id": session_id, "structures": []}
+
+        for turn in session.get("turns", []):
+            if turn_number and turn.get("turn_number") != turn_number:
+                continue
+
+            structured_data = turn.get("structured_data") or {}
+            rna_structures = structured_data.get("rna_structures", [])
+
+            if rna_structures:
+                result["structures"].append({"turn_number": turn.get("turn_number"), "rna_structures": rna_structures})
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting RNA structures: {e}")
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error retrieving RNA structures: {str(e)}")
+
+
 # ============= SESSION SHARING ENDPOINTS =============
+
 
 @app.post("/share-session")
 async def share_session(request: ShareSessionRequest):
@@ -6606,7 +7152,9 @@ async def share_session(request: ShareSessionRequest):
     # Check if user is in the allowed list
     if request.user_id and not is_user_allowed(request.user_id):
         logger.warning(f"Access denied for user_id in /share-session: {request.user_id}")
-        raise HTTPException(status_code=403, detail=f"Access denied: User '{request.user_id}' is not in the allowed list")
+        raise HTTPException(
+            status_code=403, detail=f"Access denied: User '{request.user_id}' is not in the allowed list"
+        )
 
     try:
         # Get the session to share
@@ -6646,7 +7194,7 @@ async def share_session(request: ShareSessionRequest):
                 "last_query": multiturn_session.latest_query,
                 "turns": [turn.dict() for turn in multiturn_session.turns],
                 "created_at": multiturn_session.created_at,
-                "last_updated": multiturn_session.last_updated
+                "last_updated": multiturn_session.last_updated,
             }
 
             # Store in community collection
@@ -6656,7 +7204,7 @@ async def share_session(request: ShareSessionRequest):
             "success": True,
             "session_id": request.session_id,
             "shared_at": multiturn_session.shared_at,
-            "message": "Session shared successfully"
+            "message": "Session shared successfully",
         }
 
     except HTTPException:
@@ -6664,6 +7212,7 @@ async def share_session(request: ShareSessionRequest):
     except Exception as e:
         print(f"Error sharing session: {e}")
         raise HTTPException(status_code=500, detail=f"Error sharing session: {str(e)}")
+
 
 @app.post("/unshare-session")
 async def unshare_session(session_id: str, user_id: str):
@@ -6695,17 +7244,14 @@ async def unshare_session(session_id: str, user_id: str):
         if cloud_storage_manager:
             await cloud_storage_manager.remove_shared_session(session_id)
 
-        return {
-            "success": True,
-            "session_id": session_id,
-            "message": "Session unshared successfully"
-        }
+        return {"success": True, "session_id": session_id, "message": "Session unshared successfully"}
 
     except HTTPException:
         raise
     except Exception as e:
         print(f"Error unsharing session: {e}")
         raise HTTPException(status_code=500, detail=f"Error unsharing session: {str(e)}")
+
 
 @app.get("/shared-sessions")
 async def get_shared_sessions(user_id: str, limit: int = 50, offset: int = 0):
@@ -6723,37 +7269,26 @@ async def get_shared_sessions(user_id: str, limit: int = 50, offset: int = 0):
 
         # Get from MongoDB community_sessions collection
         from s3_mongodb.func_mongodb import get_mongodb_collection
-        collection = get_mongodb_collection(
-            os.getenv("SESSION_DB_NAME", "dleader_agent"),
-            "community_sessions"
-        )
+
+        collection = get_mongodb_collection(os.getenv("SESSION_DB_NAME", "dleader_agent"), "community_sessions")
 
         if collection is None:
             return {"sessions": [], "total": 0, "limit": limit, "offset": offset}
 
         # Query all shared sessions, sorted by shared_at (newest first)
         total_count = collection.count_documents({})
-        shared_sessions = list(
-            collection.find({})
-            .sort("shared_at", -1)
-            .skip(offset)
-            .limit(limit)
-        )
+        shared_sessions = list(collection.find({}).sort("shared_at", -1).skip(offset).limit(limit))
 
         # Remove MongoDB _id field from results
         for session in shared_sessions:
             session.pop("_id", None)
 
-        return {
-            "sessions": shared_sessions,
-            "total": total_count,
-            "limit": limit,
-            "offset": offset
-        }
+        return {"sessions": shared_sessions, "total": total_count, "limit": limit, "offset": offset}
 
     except Exception as e:
         print(f"Error getting shared sessions: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving shared sessions: {str(e)}")
+
 
 @app.post("/rename-multisession")
 async def rename_multisession(request: RenameMultiSessionRequest):
@@ -6761,9 +7296,12 @@ async def rename_multisession(request: RenameMultiSessionRequest):
     # Check if user is in the allowed list
     if not is_user_allowed(request.user_id):
         logger.warning(f"Access denied for user_id in /rename-multisession: {request.user_id}")
-        raise HTTPException(status_code=403, detail=f"Access denied: User '{request.user_id}' is not in the allowed list")
+        raise HTTPException(
+            status_code=403, detail=f"Access denied: User '{request.user_id}' is not in the allowed list"
+        )
 
     import time
+
     start_total = time.time()
 
     try:
@@ -6797,9 +7335,7 @@ async def rename_multisession(request: RenameMultiSessionRequest):
             updates = {"session_name": new_name}
             start_update = time.time()
             success = await unified_manager.update_multiturn_session(
-                session_id=session_id,
-                updates=updates,
-                user_id=user_id
+                session_id=session_id, updates=updates, user_id=user_id
             )
             update_time = (time.time() - start_update) * 1000
             print(f"⏱️  [RENAME] Update session: {update_time:.2f} ms")
@@ -6815,10 +7351,7 @@ async def rename_multisession(request: RenameMultiSessionRequest):
                 "session_id": session_id,
                 "new_name": new_name,
                 "message": "Session renamed successfully",
-                "timing": {
-                    "total_ms": round(total_time, 2),
-                    "update_ms": round(update_time, 2)
-                }
+                "timing": {"total_ms": round(total_time, 2), "update_ms": round(update_time, 2)},
             }
 
         except PermissionError as e:
@@ -6829,8 +7362,10 @@ async def rename_multisession(request: RenameMultiSessionRequest):
     except Exception as e:
         print(f"Error renaming session: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error renaming session: {str(e)}")
+
 
 @app.post("/upload-template")
 async def upload_template(request: TemplateListRequest, user_id: str):
@@ -6843,14 +7378,10 @@ async def upload_template(request: TemplateListRequest, user_id: str):
         raise HTTPException(status_code=403, detail=f"Access denied: User '{user_id}' is not in the allowed list")
 
     try:
-        from s3_mongodb.func_mongodb import (get_mongodb_collection,
-                                             upsert_wrapper)
+        from s3_mongodb.func_mongodb import get_mongodb_collection, upsert_wrapper
 
         # Get MongoDB collection
-        collection = get_mongodb_collection(
-            os.getenv("SESSION_DB_NAME", "dleader_agent"),
-            "workflow_templates"
-        )
+        collection = get_mongodb_collection(os.getenv("SESSION_DB_NAME", "dleader_agent"), "workflow_templates")
 
         if collection is None:
             raise HTTPException(status_code=503, detail="MongoDB connection not available")
@@ -6869,7 +7400,7 @@ async def upload_template(request: TemplateListRequest, user_id: str):
             "database_name": os.getenv("SESSION_DB_NAME", "dleader_agent"),
             "collection_name": "workflow_templates",
             "items": templates_to_upload,
-            "id_field": "_id"
+            "id_field": "_id",
         }
 
         result = upsert_wrapper(event)
@@ -6882,13 +7413,11 @@ async def upload_template(request: TemplateListRequest, user_id: str):
         os.makedirs(templates_dir, exist_ok=True)
         templates_file = os.path.join(templates_dir, "workflow_templates.json")
         templates_data = {"templates": [template.dict() for template in request.templates]}
-        with open(templates_file, 'w', encoding='utf-8') as f:
+        with open(templates_file, "w", encoding="utf-8") as f:
             json.dump(templates_data, f, ensure_ascii=False, indent=2)
 
         return TemplateResponse(
-            success=True,
-            message="Templates uploaded successfully to MongoDB",
-            total_templates=len(request.templates)
+            success=True, message="Templates uploaded successfully to MongoDB", total_templates=len(request.templates)
         )
 
     except HTTPException:
@@ -6896,6 +7425,7 @@ async def upload_template(request: TemplateListRequest, user_id: str):
     except Exception as e:
         print(f"Error uploading templates: {e}")
         raise HTTPException(status_code=500, detail=f"Error uploading templates: {str(e)}")
+
 
 @app.get("/templates")
 async def get_templates(user_id: str):
@@ -6911,10 +7441,7 @@ async def get_templates(user_id: str):
         from s3_mongodb.func_mongodb import get_mongodb_collection
 
         # Try to get from MongoDB first
-        collection = get_mongodb_collection(
-            os.getenv("SESSION_DB_NAME", "dleader_agent"),
-            "workflow_templates"
-        )
+        collection = get_mongodb_collection(os.getenv("SESSION_DB_NAME", "dleader_agent"), "workflow_templates")
 
         if collection is not None:
             templates = list(collection.find({}).sort("title", 1))
@@ -6925,29 +7452,26 @@ async def get_templates(user_id: str):
                 if "uploaded_at" in template:
                     template.pop("uploaded_at", None)
 
-            return {
-                "templates": templates,
-                "total": len(templates),
-                "source": "mongodb"
-            }
+            return {"templates": templates, "total": len(templates), "source": "mongodb"}
 
         # Fallback to local file if MongoDB not available
         templates_file = os.path.join(os.getcwd(), "templates", "workflow_templates.json")
         if not os.path.exists(templates_file):
             return {"templates": [], "total": 0, "source": "none"}
 
-        with open(templates_file, 'r', encoding='utf-8') as f:
+        with open(templates_file, "r", encoding="utf-8") as f:
             templates_data = json.load(f)
 
         return {
             "templates": templates_data.get("templates", []),
             "total": len(templates_data.get("templates", [])),
-            "source": "local_backup"
+            "source": "local_backup",
         }
 
     except Exception as e:
         print(f"Error retrieving templates: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving templates: {str(e)}")
+
 
 @app.get("/health")
 async def health_check():
@@ -6958,10 +7482,12 @@ async def health_check():
         "queue_size": queue_manager.request_queue.qsize(),
         "is_processing": queue_manager.is_processing,
         "current_session": queue_manager.current_processing_session,
-        "multiturn_sessions": len(queue_manager.multiturn_sessions)
+        "multiturn_sessions": len(queue_manager.multiturn_sessions),
     }
 
+
 # ============= USER MANAGEMENT ENDPOINTS =============
+
 
 @app.get("/user/{user_id}/name")
 async def get_user_name(user_id: str):
@@ -6988,44 +7514,26 @@ async def get_user_name(user_id: str):
         from s3_mongodb.func_mongodb import get_mongodb_collection
 
         # Get users collection
-        users_collection = get_mongodb_collection(
-            os.getenv("SESSION_DB_NAME", "dleader_agent"),
-            "users"
-        )
+        users_collection = get_mongodb_collection(os.getenv("SESSION_DB_NAME", "dleader_agent"), "users")
 
         if users_collection is None:
             # If MongoDB is not available, return user_id as default
-            return {
-                "user_id": user_id,
-                "username": user_id,
-                "source": "default"
-            }
+            return {"user_id": user_id, "username": user_id, "source": "default"}
 
         # Find user in MongoDB
         user_doc = users_collection.find_one({"_id": user_id})
 
         if user_doc and "username" in user_doc:
-            return {
-                "user_id": user_id,
-                "username": user_doc["username"],
-                "source": "mongodb"
-            }
+            return {"user_id": user_id, "username": user_doc["username"], "source": "mongodb"}
         else:
             # No custom name set, return user_id as default
-            return {
-                "user_id": user_id,
-                "username": user_id,
-                "source": "default"
-            }
+            return {"user_id": user_id, "username": user_id, "source": "default"}
 
     except Exception as e:
         logger.error(f"Error retrieving username for {user_id}: {e}")
         # On error, return user_id as fallback
-        return {
-            "user_id": user_id,
-            "username": user_id,
-            "source": "error_fallback"
-        }
+        return {"user_id": user_id, "username": user_id, "source": "error_fallback"}
+
 
 @app.put("/user/{user_id}/name")
 async def update_user_name(user_id: str, request: Request):
@@ -7059,10 +7567,7 @@ async def update_user_name(user_id: str, request: Request):
         from s3_mongodb.func_mongodb import get_mongodb_collection
 
         # Get users collection
-        users_collection = get_mongodb_collection(
-            os.getenv("SESSION_DB_NAME", "dleader_agent"),
-            "users"
-        )
+        users_collection = get_mongodb_collection(os.getenv("SESSION_DB_NAME", "dleader_agent"), "users")
 
         if users_collection is None:
             raise HTTPException(status_code=503, detail="Database unavailable")
@@ -7071,15 +7576,10 @@ async def update_user_name(user_id: str, request: Request):
         result = users_collection.update_one(
             {"_id": user_id},
             {
-                "$set": {
-                    "username": new_username,
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                },
-                "$setOnInsert": {
-                    "created_at": datetime.now(timezone.utc).isoformat()
-                }
+                "$set": {"username": new_username, "updated_at": datetime.now(timezone.utc).isoformat()},
+                "$setOnInsert": {"created_at": datetime.now(timezone.utc).isoformat()},
             },
-            upsert=True
+            upsert=True,
         )
 
         return {
@@ -7087,7 +7587,7 @@ async def update_user_name(user_id: str, request: Request):
             "username": new_username,
             "updated": result.modified_count > 0,
             "created": result.upserted_id is not None,
-            "message": "Username updated successfully"
+            "message": "Username updated successfully",
         }
 
     except HTTPException:
@@ -7095,6 +7595,7 @@ async def update_user_name(user_id: str, request: Request):
     except Exception as e:
         logger.error(f"Error updating username for {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error updating username: {str(e)}")
+
 
 # ============= TRASH SYSTEM ENDPOINTS =============
 # Most trash management endpoints have been moved to trash_api.py
@@ -7104,6 +7605,7 @@ async def update_user_name(user_id: str, request: Request):
 from trash_api import router as trash_router
 
 app.include_router(trash_router)
+
 
 async def _perform_hard_delete(session_id: str, user_id: str):
     """
@@ -7138,6 +7640,7 @@ async def _perform_hard_delete(session_id: str, user_id: str):
 
         # Delete any turn-specific files
         import glob
+
         turn_files = glob.glob(f"session_storage/{session_id}_turn_*.json")
         for turn_file in turn_files:
             if os.path.exists(turn_file):
@@ -7156,6 +7659,7 @@ async def _perform_hard_delete(session_id: str, user_id: str):
         for folder in session_folders:
             if os.path.exists(folder):
                 import shutil
+
                 shutil.rmtree(folder)
                 print(f"[HARD DELETE] Deleted folder: {folder}")
 
@@ -7188,12 +7692,7 @@ async def _perform_hard_delete(session_id: str, user_id: str):
                 return ("community", [], str(e))
 
         # Run all cloud deletions in parallel
-        await asyncio.gather(
-            delete_from_s3(),
-            delete_from_mongodb(),
-            delete_from_community(),
-            return_exceptions=True
-        )
+        await asyncio.gather(delete_from_s3(), delete_from_mongodb(), delete_from_community(), return_exceptions=True)
 
         print(f"[HARD DELETE] Background deletion completed for session: {session_id}")
 
@@ -7221,8 +7720,7 @@ async def hard_delete_session(session_id: str, user_id: str, confirm: bool = Fal
     try:
         if not confirm:
             raise HTTPException(
-                status_code=400,
-                detail="Must confirm hard deletion with confirm=true. This action cannot be undone!"
+                status_code=400, detail="Must confirm hard deletion with confirm=true. This action cannot be undone!"
             )
 
         # Get unified session manager
@@ -7247,7 +7745,7 @@ async def hard_delete_session(session_id: str, user_id: str, confirm: bool = Fal
             "message": "Session deletion started (processing in background)",
             "session_id": session_id,
             "deleted_at": datetime.now().isoformat(),
-            "deleted_by": user_id
+            "deleted_by": user_id,
         }
 
     except HTTPException:
@@ -7328,10 +7826,8 @@ async def get_session_download_urls(session_id: str, user_id: str, turn_number: 
         if not session_path and session_data.get("is_complete"):
             # Try to find session folder
             import glob
-            patterns = [
-                f"chat_sessions/*{session_id[:8]}*",
-                f"chat_sessions/multiturn_*{session_id[:8]}*"
-            ]
+
+            patterns = [f"chat_sessions/*{session_id[:8]}*", f"chat_sessions/multiturn_*{session_id[:8]}*"]
             for pattern in patterns:
                 matches = glob.glob(pattern)
                 if matches:
@@ -7351,7 +7847,7 @@ async def get_session_download_urls(session_id: str, user_id: str, turn_number: 
                 "session_id": session_id,
                 "download_url": f"/download/{session_id}?user_id={user_id}",
                 "zip_available": True,
-                "storage_type": storage_location
+                "storage_type": storage_location,
             }
             # Add turn information
             if multiturn_session:
@@ -7383,6 +7879,7 @@ async def get_session_download_urls(session_id: str, user_id: str, turn_number: 
     except Exception as e:
         print(f"Error getting download URLs for session {session_id}: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error generating download URLs: {str(e)}")
 
@@ -7397,16 +7894,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FastAPI Agent Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8001, help="Port to bind to")
-    parser.add_argument("--no-reload", action="store_true", help="Disable auto-reload (auto-reload is enabled by default)")
+    parser.add_argument(
+        "--no-reload", action="store_true", help="Disable auto-reload (auto-reload is enabled by default)"
+    )
 
     args = parser.parse_args()
 
     # Enable reload by default, disable only if --no-reload is specified
     reload_enabled = not args.no_reload
 
-    uvicorn.run(
-        "agent_fastapi_server_multiturn:app",
-        host=args.host,
-        port=args.port,
-        reload=reload_enabled
-    )
+    uvicorn.run("agent_fastapi_server_multiturn:app", host=args.host, port=args.port, reload=reload_enabled)

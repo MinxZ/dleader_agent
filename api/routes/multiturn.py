@@ -332,3 +332,71 @@ async def rename_multisession(request: RenameMultiSessionRequest):
 
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error renaming session: {str(e)}")
+
+
+# ============= RNA STRUCTURE VISUALIZATION ENDPOINTS =============
+
+
+@router.get("/rna-structures/{session_id}")
+async def get_rna_structures(session_id: str, user_id: str, turn_number: Optional[int] = None):
+    """Get RNA structure data for visualization
+
+    Args:
+        session_id: The session ID
+        user_id: User ID for authentication
+        turn_number: Optional - specific turn (default: all turns)
+
+    Returns:
+        {
+            "session_id": "abc123",
+            "structures": [
+                {
+                    "turn_number": 1,
+                    "rna_structures": [
+                        {
+                            "id": "seq_1",
+                            "sequence": "GCGCGCGCGC",
+                            "structure": "((((..))))",
+                            "length": 10,
+                            "base_pairs": 4,
+                            "method": "rnafm"
+                        }
+                    ]
+                }
+            ]
+        }
+    """
+    try:
+        unified_manager = get_unified_session_manager(queue_manager)
+        session = await unified_manager.get_multiturn_session_by_id(session_id)
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # Verify user ownership
+        session_user_id = session.get("user_id")
+        if session_user_id and session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        result = {"session_id": session_id, "structures": []}
+
+        for turn in session.get("turns", []):
+            if turn_number and turn.get("turn_number") != turn_number:
+                continue
+
+            structured_data = turn.get("structured_data") or {}
+            rna_structures = structured_data.get("rna_structures", [])
+
+            if rna_structures:
+                result["structures"].append({"turn_number": turn.get("turn_number"), "rna_structures": rna_structures})
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting RNA structures: {e}")
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error retrieving RNA structures: {str(e)}")

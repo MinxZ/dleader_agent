@@ -21,6 +21,16 @@ python agent_fastapi_server_multiturn.py --host 0.0.0.0 --port 8001
 ruff check . && ruff format .
 ```
 
+## Server Architecture Notes
+
+**Auto-restart:** The server runs with auto-reload enabled. When you modify Python files, the server automatically restarts - no manual restart needed.
+
+**Endpoint locations:** API endpoints are defined in TWO places:
+1. **Main server file:** `agent_fastapi_server_multiturn.py` - Most endpoints are defined here directly
+2. **Route modules:** `api/routes/*.py` - Only some routes (e.g., trash_router) are imported
+
+**When adding new endpoints:** Add them to `agent_fastapi_server_multiturn.py` directly (around line 6600+ for multiturn-related endpoints). The `api/routes/multiturn.py` file exists but its router is NOT imported by the main server.
+
 ## API Endpoints (localhost:8001)
 
 **Note:** All endpoints except `/health` require `user_id` parameter.
@@ -100,6 +110,27 @@ curl -X DELETE 'http://localhost:8001/hard-delete/{session_id}?user_id=DLeader&c
 # Download ZIP
 curl 'http://localhost:8001/download/{session_id}?user_id=DLeader' -o session.zip
 ```
+
+## File Storage & Data Persistence
+
+**Critical:** Local session files are automatically deleted after upload to cloud storage.
+
+**Storage locations:**
+- **S3:** Session files (images, reports, zips) are uploaded to S3
+- **MongoDB:** Session metadata, turns, structured data stored in `multiturn_sessions` collection
+- **Local:** Files exist temporarily during processing, then deleted after S3 upload
+
+**When implementing features that need file data:**
+1. Collect/parse data BEFORE files are uploaded to S3 and deleted
+2. Store extracted data in MongoDB (e.g., `structured_data` field in turns)
+3. For retrieval, query MongoDB - don't expect local files to exist
+
+**Session data flow:**
+1. Agent runs → files created in `chat_sessions/multiturn_*` directory
+2. `complete_turn()` called → should extract any structured data HERE
+3. Files uploaded to S3
+4. Local files deleted
+5. Session metadata saved to MongoDB
 
 ## Debugging Notes
 
