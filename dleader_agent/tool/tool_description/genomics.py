@@ -458,28 +458,77 @@ description = [
             }
         ],
     },
+    # NOTE: search_sequence_gggenome is deprecated - use search_sequence_seqan3 instead
+    # {
+    #     "description": "Search for a nucleotide sequence in the human genome (hg38) using SeqAn3 API to find off-target sites. "
+    #     "Returns the number of potential off-target hits with breakdown by error count. "
+    #     "Use this to assess ASO/siRNA specificity by checking how many genomic locations match the sequence. "
+    #     "Sequence must be 10-100 nucleotides long.",
+    #     "name": "search_sequence_gggenome",
+    #     "optional_parameters": [
+    #         {
+    #             "default": "hg38",
+    #             "description": "Genome database to search. Currently only hg38 (human) is supported.",
+    #             "name": "db",
+    #             "type": "str",
+    #         },
+    #         {
+    #             "default": 2,
+    #             "description": "Maximum number of mismatches/gaps allowed (0-6, split between mismatch and gap)",
+    #             "name": "k",
+    #             "type": "int",
+    #         },
+    #         {
+    #             "default": None,
+    #             "description": "Not used - both strands are always searched automatically",
+    #             "name": "strand",
+    #             "type": "str",
+    #         },
+    #         {
+    #             "default": False,
+    #             "description": "If True, only allow mismatches (no gaps/insertions/deletions)",
+    #             "name": "nogap",
+    #             "type": "bool",
+    #         },
+    #         {
+    #             "default": True,
+    #             "description": "If True (default), return only count summary. If False, return detailed match locations.",
+    #             "name": "summary_only",
+    #             "type": "bool",
+    #         },
+    #     ],
+    #     "required_parameters": [
+    #         {
+    #             "default": None,
+    #             "description": "Nucleotide sequence to search (10-100 nucleotides, e.g., 'CGTTTGCCTCAGACAGGT')",
+    #             "name": "sequence",
+    #             "type": "str",
+    #         }
+    #     ],
+    # },
     {
-        "description": "Search for a nucleotide sequence in genome databases using GGGenome API to find off-target sites. "
-        "Returns the number of potential off-target hits with breakdown by mismatch count. "
-        "Use this to assess ASO/siRNA specificity by checking how many genomic locations match the sequence.",
-        "name": "search_sequence_gggenome",
+        "description": "Search for a nucleotide sequence in the human genome (hg38) using SeqAn3 API to find off-target sites. "
+        "This tool replaces the deprecated GGGenome API with a faster SeqAn3-based search. "
+        "Returns the number of potential off-target hits with breakdown by error count. "
+        "Use this to assess gRNA/ASO/siRNA specificity by checking how many genomic locations match the sequence. "
+        "Sequence must be 10-100 nucleotides long.",
+        "name": "search_sequence_seqan3",
         "optional_parameters": [
             {
                 "default": "hg38",
-                "description": "Genome database to search. Options: hg38 (human), mm10 (mouse), "
-                "dm3 (fly), ce10 (worm), TAIR10 (Arabidopsis), pombe (yeast), refseq, etc.",
+                "description": "Genome database to search. Currently only hg38 (human) is supported.",
                 "name": "db",
                 "type": "str",
             },
             {
                 "default": 2,
-                "description": "Maximum number of mismatches/gaps allowed (0-20)",
+                "description": "Maximum number of mismatches/gaps allowed (0-6, split between mismatch and gap)",
                 "name": "k",
                 "type": "int",
             },
             {
                 "default": None,
-                "description": "Strand to search: 'plus' (+) or 'minus' (-). If None, searches both strands",
+                "description": "Not used - both strands are always searched automatically",
                 "name": "strand",
                 "type": "str",
             },
@@ -499,7 +548,7 @@ description = [
         "required_parameters": [
             {
                 "default": None,
-                "description": "Nucleotide sequence to search (e.g., 'CGTTTGCCTCAGACAGGT')",
+                "description": "Nucleotide sequence to search (10-100 nucleotides, e.g., 'CGTTTGCCTCAGACAGGT')",
                 "name": "sequence",
                 "type": "str",
             }

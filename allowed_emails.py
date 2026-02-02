@@ -7,6 +7,7 @@ Only users in this list will be granted access to the API endpoints.
 
 # Email allow list - only users with these emails can access the API
 ALLOWED_EMAILS = [
+        'andrew.m.thomson@greyrigge.com',
         'kenji@protein.osaka-u.ac.jp',
     'hanlin.li@oligolink.com',
         # Tom

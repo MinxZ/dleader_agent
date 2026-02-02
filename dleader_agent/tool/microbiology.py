@@ -1496,7 +1496,7 @@ def predict_rna_structure_rnafm(
     import time
     import requests
 
-    BASE_URL = "https://u2rvqq5bwl.execute-api.ap-northeast-1.amazonaws.com"
+    BASE_URL = "https://dleader-lab--rna-fm-api-rnafmservice-serve.modal.run"
 
     # Normalize input: convert list of strings to list of dicts
     normalized_sequences = []
